@@ -1,0 +1,86 @@
+{
+  "name": "relay",
+  "version": "1.8.0",
+  "description": "Relay - 个人 AI 助手",
+  "main": "main.js",
+  "author": "g0at",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.relay.app",
+    "productName": "Relay",
+    "executableName": "Relay",
+    "artifactName": "${productName}-${version}-Setup.${ext}",
+    "publish": {
+      "provider": "github",
+      "owner": "g1at",
+      "repo": "Relay"
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "electronLanguages": ["zh-CN", "en-US"],
+    "removePackageScripts": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "skill-usage-worker.js",
+      "scheduler.js",
+      "updater.js",
+      "logger.js",
+      "cron-mcp-server.js",
+      "renderer/**/*",
+      "installer/**/*",
+      "!**/*.map",
+      "!**/{.DS_Store,Thumbs.db}"
+    ],
+    "extraResources": [
+      {
+        "from": "extra-resources/",
+        "to": "extra-resources/"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "asarUnpack": [
+      "cron-mcp-server.js",
+      "skill-usage-worker.js"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Relay",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "unicode": true,
+      "installerLanguages": ["zh_CN"],
+      "language": "2052",
+      "displayLanguageSelector": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    },
+    "asar": true,
+    "compression": "maximum"
+  }
+}

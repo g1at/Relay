@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>首次设置 - Relay</title>
+  <link rel="stylesheet" href="../renderer/fonts/misans.css" />
+  <link rel="stylesheet" href="wizard.css" />
+</head>
+<body>
+  <div class="wizard">
+    <header class="wiz-header">
+      <div class="brand">
+        <img src="../renderer/logo.png" class="brand-logo" alt="" />
+        <span class="brand-name">Relay</span>
+      </div>
+      <div class="steps">
+        <div class="step active" data-step="1"><i></i><span>欢迎</span></div>
+        <div class="step" data-step="2"><i></i><span>API Key</span></div>
+        <div class="step" data-step="3"><i></i><span>正在安装</span></div>
+        <div class="step" data-step="4"><i></i><span>完成</span></div>
+      </div>
+    </header>
+
+    <main class="wiz-body">
+      <!-- ── 页 1:欢迎 ── -->
+      <section class="page active" data-page="1">
+        <div class="hero">
+          <div class="hero-emoji">👋</div>
+          <h1>欢迎使用 Relay</h1>
+          <p>第一次使用，我们花 3-5 分钟把环境装好，接下来会自动准备：</p>
+        </div>
+        <ul class="checklist" id="probeList">
+          <li data-key="git">
+            <span class="ck-badge">📦</span>
+            <span class="ck-text"><b>Git for Windows</b><i>版本管理与 Bash 运行时</i></span>
+          </li>
+          <li data-key="node">
+            <span class="ck-badge">⬢</span>
+            <span class="ck-text"><b>Node.js 20+</b><i>运行 Claude Code 所需</i></span>
+          </li>
+          <li data-key="claude">
+            <span class="ck-badge">✦</span>
+            <span class="ck-text"><b>Claude Code CLI</b><i>核心 AI 命令行工具</i></span>
+          </li>
+          <li data-key="mcp">
+            <span class="ck-badge">🔗</span>
+            <span class="ck-text"><b>飞书 MCP</b><i>读写飞书文档的能力</i></span>
+          </li>
+        </ul>
+        <p class="hint">已装好的会自动跳过。装完直接进聊天界面，不再看到这个向导。<br/>需要 Agent 时，进入后在「设置 → Agent 目录」导入即可。</p>
+      </section>
+
+      <!-- ── 页 2:API Key ── -->
+      <section class="page" data-page="2">
+        <div class="hero">
+          <div class="hero-emoji">🔑</div>
+          <h1>填一个 mify API Key</h1>
+          <p>用来调用大模型。已有 Key 直接粘贴，没有就按下面三步申请。</p>
+        </div>
+
+        <div class="key-field">
+          <span class="key-ico">🔑</span>
+          <input type="password" id="apiKey" placeholder="sk-mify-..." />
+          <button class="key-eye" id="btnShowKey">显示</button>
+        </div>
+        <a class="link" id="lnkGetKey">➜ 没有 Key？点这里打开 mify 申请页</a>
+
+        <div class="key-steps">
+          <div class="ks-title">如何获取</div>
+          <ol>
+            <li>打开 mify 平台，用<b>小米 SSO</b> 登录</li>
+            <li>创建一个 <b>API Key</b></li>
+            <li>复制粘贴到上方输入框</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ── 页 3:安装进度 ── -->
+      <section class="page" data-page="3">
+        <h1>正在安装(预计 3-5 分钟)</h1>
+        <p class="sub">请勿关闭窗口，装好后会自动进入聊天界面。</p>
+
+        <!-- 步骤清单(主视觉):每步 待办 → 进行中(转圈)→ ✓ 完成 -->
+        <ul class="install-steps" id="installSteps">
+          <li data-step="1">
+            <span class="is-icon"></span>
+            <span class="is-text"><b>基础环境</b><i>Git 与 Node.js 运行时</i></span>
+          </li>
+          <li data-step="2">
+            <span class="is-icon"></span>
+            <span class="is-text"><b>Claude Code</b><i>核心命令行工具</i></span>
+          </li>
+          <li data-step="3">
+            <span class="is-icon"></span>
+            <span class="is-text"><b>飞书 MCP</b><i>读写飞书文档的能力</i></span>
+          </li>
+          <li data-step="5">
+            <span class="is-icon"></span>
+            <span class="is-text"><b>收尾检查</b><i>校验并写入配置</i></span>
+          </li>
+        </ul>
+
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-text" id="progressText">准备中…</div>
+
+        <!-- 精简日志(次要):去掉时间戳/[INFO]/ASCII 边框,只留干净的进展 -->
+        <div class="log-feed" id="logBox"></div>
+      </section>
+
+      <!-- ── 页 4:完成 ── -->
+      <section class="page" data-page="4">
+        <div class="hero">
+          <div class="hero-emoji success">🎉</div>
+          <h1>装好了！</h1>
+          <p class="sub" id="doneSummary">环境已就绪，点下方按钮直接进入聊天界面。</p>
+        </div>
+
+        <div class="done-cards">
+          <div class="done-card">
+            <div class="dc-title">✏ 新对话</div>
+            <div class="dc-desc">直接对话，翻译 / 写代码 / 查资料都行</div>
+          </div>
+          <div class="done-card">
+            <div class="dc-title">⊞ Agent</div>
+            <div class="dc-desc">在设置里导入 Agent 后，选择它进行专项对话</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wiz-footer">
+      <button class="btn-ghost" id="btnPrev">上一步</button>
+      <div class="footer-spacer"></div>
+      <button class="btn-primary" id="btnNext">下一步</button>
+    </footer>
+  </div>
+
+  <script src="wizard.js"></script>
+</body>
+</html>

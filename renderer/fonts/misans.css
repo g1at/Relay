@@ -1,0 +1,15 @@
+/* MiSans 本地字体(离线打包,来自官方 misans@4.1.0 web 子集)
+   - Normal = 简体中文 + 符号(CJK,按 unicode-range 分片懒加载)
+   - Latin  = 拉丁字母 / 数字 / 标点
+   仅打包 Regular / Semibold 两个字重:
+     · 正文 font-weight:400/500 → 匹配 Regular(声明值 330)
+     · 标题/按钮 font-weight:600 → 匹配 Semibold(声明值 520)
+   浏览器只会按需下载命中 unicode-range 的分片,运行时开销很小。 */
+
+/* 拉丁(单文件,优先级靠后:中文用 MiSans,英文/数字用 MiSansLatin) */
+@import url('./Latin/MiSansLatin-Regular.min.css');
+@import url('./Latin/MiSansLatin-Semibold.min.css');
+
+/* 中文 / CJK(分片) */
+@import url('./Normal/MiSans-Regular.min.css');
+@import url('./Normal/MiSans-Semibold.min.css');

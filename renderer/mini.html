@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Relay 快速输入</title>
+  <link rel="stylesheet" href="fonts/misans.css" />
+  <style>
+    /* 迷你输入框 —— 视觉变量与主界面 styles.css 完全一致,确保浑然一体 */
+    :root {
+      --bg-panel:     #ffffff;
+      --text:         #1a1a1a;
+      --text-muted:   #8a8a8a;
+      --border:       #e6e6e8;
+      --accent:       #1f6feb;
+      --radius-card:  20px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      height: 100%;
+      background: transparent;          /* 窗口透明,圆角外不留白 */
+      font-family: 'MiSans', 'MiSansLatin', -apple-system, 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', sans-serif;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      user-select: none;
+      overflow: hidden;
+    }
+
+    /* 外层卡片:大圆角白卡 + 柔和阴影(对齐主界面输入卡 + 弹窗的质感) */
+    .mini-card {
+      margin: 14px 16px 18px;           /* 留出投影空间(窗口透明,圆角才不被裁);底部略大托住下投影 */
+      background: var(--bg-panel);
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      border-radius: var(--radius-card);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.10), 0 1px 3px rgba(0, 0, 0, 0.06);
+      overflow: hidden;
+      -webkit-app-region: drag;         /* 整卡可拖动(无边框窗口需要) */
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 头部:logo + 品牌名(右上角快捷键提示已移除) */
+    .mini-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 12px 16px 0;
+    }
+    .mini-logo {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      object-fit: cover;
+      flex: none;
+    }
+    .mini-brand {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* 输入区:无边框 textarea 占满整行(无发送按钮——回车发送已在底部标注),不可拖动(要能点选文字) */
+    .mini-input-row {
+      padding: 8px 16px 12px;
+      -webkit-app-region: no-drag;
+    }
+    #miniInput {
+      flex: 1 1 auto;
+      width: 100%;
+      box-sizing: border-box;
+      border: none;
+      outline: none;
+      resize: none;
+      background: transparent;
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.5;
+      color: var(--text);
+      height: 26px;                 /* 初始单行;由 autoGrow 按内容设置,不用 flex 撑高 */
+      max-height: 200px;
+      padding: 4px 0 2px;
+      overflow-y: hidden;           /* 默认不显滚动条;内容超过 max-height 时 JS 才打开 */
+      user-select: text;
+    }
+    #miniInput::placeholder { color: var(--text-muted); }
+    /* 多行超出时的滚动条:细、淡、贴合整体风格,不再是系统默认的粗灰条 */
+    #miniInput::-webkit-scrollbar { width: 7px; }
+    #miniInput::-webkit-scrollbar-track { background: transparent; }
+    #miniInput::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.14);
+      border-radius: 4px;
+    }
+    #miniInput::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.24); }
+
+    /* 底部提示行:回车发送 / 换行 / 关闭(居中) */
+    .mini-hint {
+      padding: 0 16px 11px;
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: center;
+      gap: 14px;
+      -webkit-app-region: no-drag;
+    }
+    .mini-hint kbd {
+      font-family: inherit;
+      font-size: 10.5px;
+      background: #f4f4f5;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0 5px;
+      color: var(--text-muted);
+    }
+
+    /* 极轻入场动画:与主界面弹窗一致的「下沉淡入」 */
+    @keyframes mini-in {
+      from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+      to   { opacity: 1; transform: none; }
+    }
+    .mini-card { animation: mini-in 0.13s ease-out; }
+
+    /* 深色主题 */
+    [data-theme="dark"] {
+      --bg-panel:     #242424;
+      --text:         #e4e4e7;
+      --text-muted:   #71717a;
+      --border:       #2e2e30;
+    }
+    [data-theme="dark"] .mini-card {
+      border-color: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.2);
+    }
+    [data-theme="dark"] .mini-hint kbd {
+      background: #2c2c2e;
+      border-color: #3f3f42;
+    }
+    [data-theme="dark"] #miniInput::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); }
+    [data-theme="dark"] #miniInput::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+  </style>
+</head>
+<body>
+  <div class="mini-card">
+    <div class="mini-head">
+      <img id="miniLogo" class="mini-logo" src="logo.png" alt="" />
+      <span id="miniBrand" class="mini-brand">Relay</span>
+    </div>
+    <div class="mini-input-row">
+      <textarea id="miniInput" rows="1" placeholder="问点什么…" autofocus></textarea>
+    </div>
+    <div class="mini-hint">
+      <span><kbd>Enter</kbd> 发送</span>
+      <span><kbd>Shift+Enter</kbd> 换行</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+    </div>
+  </div>
+
+  <script>
+    // 主题初始化(在 DOM 操作前尽早执行)
+    (async () => {
+      try {
+        const s = await window.api.settings.read();
+        const t = (s?.app?.theme) || 'light';
+        const dark = t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (_) {}
+    })();
+
+    const input = document.getElementById('miniInput');
+    const card = document.querySelector('.mini-card');
+
+    // 拉品牌(名称 + logo + 快捷键文案),让迷你窗与用户自定义的主界面头部一致
+    (async () => {
+      try {
+        const b = await window.api.mini.brand();
+        if (b) {
+          if (b.name) document.getElementById('miniBrand').textContent = b.name;
+          if (b.logo) document.getElementById('miniLogo').src = b.logo;
+        }
+      } catch (_) {}
+    })();
+
+    // 输入框高度自适应,并把卡片总高回报主进程同步窗口高度(多行时长高)。
+    //   先把高度归零再读 scrollHeight,拿到的才是「内容真实所需高度」(否则 flex 拉伸会污染读数,
+    //   把窗口撑成大空框)。超过上限才打开滚动条,平时一律 hidden,不显那条灰条。
+    const MAX_INPUT_H = 200;       // 与 CSS #miniInput max-height 一致
+    function autoGrow() {
+      input.style.height = '0px';
+      const need = input.scrollHeight;
+      const h = Math.min(need, MAX_INPUT_H);
+      input.style.height = h + 'px';
+      input.style.overflowY = (need > MAX_INPUT_H) ? 'auto' : 'hidden';
+      // 卡片实际高度 + 上下 margin(14+18)→ 通知主进程调窗口高度,保证底部投影不被裁
+      const winH = card.offsetHeight + 32;
+      try { window.api.mini.resize(winH); } catch (_) {}
+    }
+    input.addEventListener('input', autoGrow);
+
+    function submit() {
+      const text = input.value.trim();
+      if (!text) return;
+      try { window.api.mini.submit(text); } catch (_) {}
+      input.value = '';
+      autoGrow();
+    }
+
+    // 回车发送 / Shift+Enter 换行 / ESC 关闭
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        submit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        try { window.api.mini.hide(); } catch (_) {}
+      }
+    });
+
+    // 每次唤起:清空 + 聚焦(主进程在 show 时发 mini:focus)
+    window.api.mini.onFocus(() => {
+      input.value = '';
+      input.style.overflowY = 'hidden';
+      // 延后一拍确保窗口已获焦、尺寸稳定,再聚焦 + 量高(避免唤起瞬间量到异常高度)
+      setTimeout(() => { input.focus(); autoGrow(); }, 30);
+    });
+
+    // 首次加载也聚焦一次
+    setTimeout(() => { input.focus(); autoGrow(); }, 50);
+  </script>
+</body>
+</html>
