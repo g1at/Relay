@@ -101,6 +101,11 @@ Function RelayStyleInstallPage
   GetDlgItem $0 $RelayInstallPage 1016
   ShowWindow $0 ${SW_HIDE}
 FunctionEnd
+
+; Skip the MUI finish page entirely — installer closes automatically after install.
+Function SkipFinishPage
+  Abort
+FunctionEnd
 !endif
 
 ; Skip the assisted install-mode choice and keep the current-user behavior.
@@ -120,7 +125,9 @@ FunctionEnd
   ${EndIf}
 !macroend
 
+; Wire SkipFinishPage as PRE callback so MUI skips the finish wizard entirely.
 !macro customFinishPage
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipFinishPage
 !macroend
 
 !macro customHeader
