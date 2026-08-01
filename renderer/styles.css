@@ -1996,9 +1996,10 @@ html, body {
    更新是用户的选择,不该打断正在进行的对话。*/
 .update-bubble {
   position: fixed;
-  /* 放右上角而不是右下角:输入区是居中且高度可变的,底部锚定会盖住发送按钮。
-     顶部留出头部栏的高度,这样任何窗口宽度下都不挡操作。*/
-  right: 20px; top: 96px;
+  /* 贴着头部栏下沿、尖角对准右上角的设置齿轮,做成「从齿轮弹出」的观感。
+     不放右下角是因为输入区居中且高度可变,底部锚定会盖住发送按钮。
+     top = 头部栏 56px + 1px 描边 + 9px 间隙。*/
+  right: 20px; top: 66px;
   width: 300px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
@@ -2008,18 +2009,33 @@ html, body {
   z-index: 1900;              /* 低于 toast(2000),高于常规内容 */
   /* 入场用 animation 而非 transition:插入即播,不依赖 JS 补 class。
      窗口在后台时 requestAnimationFrame 不触发,靠它加 class 会让气泡卡在全透明。*/
-  animation: ubIn 0.2s ease both;
+  transform-origin: top right;
+  animation: ubIn 0.18s ease both;
+}
+/* 指向齿轮的尖角:旋转 45° 的方块,只留左上两条边当描边。
+   齿轮中心距窗口右缘 40px(头部右内边距 24 + 按钮半宽 16),气泡右缘在 20px 处,
+   故尖角中心要落在气泡内侧 20px —— 即 right(15) + 半宽(5)。*/
+.update-bubble::before {
+  content: '';
+  position: absolute;
+  top: -5px; right: 15px;
+  width: 10px; height: 10px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  border-top-left-radius: 2px;
+  transform: rotate(45deg);
 }
 @keyframes ubIn {
-  from { opacity: 0; transform: translateY(-12px); }
+  from { opacity: 0; transform: translateY(-6px) scale(0.96); }
   to   { opacity: 1; transform: none; }
 }
 /* 退场:加 .hiding,过渡结束后由 JS 移除节点 */
 .update-bubble.hiding {
   animation: none;
   opacity: 0;
-  transform: translateY(-12px);
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transform: translateY(-6px) scale(0.96);
+  transition: opacity 0.16s ease, transform 0.16s ease;
 }
 
 .update-bubble .ub-head {
