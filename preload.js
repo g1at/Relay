@@ -42,10 +42,13 @@ contextBridge.exposeInMainWorld('api', {
   // 一键更新 Claude Code 到最新版
   updateClaude: () => ipcRenderer.invoke('claude:update'),
 
-  // Relay 应用自更新(electron-updater;主进程自动检查+静默下载,这里只做状态展示与安装触发)
+  // Relay 应用自更新(见 updater.js)。主进程只自动「检查」,
+  // 下载与安装都由这里的 download / quitAndInstall 显式触发。
   relayUpdate: {
     status: () => ipcRenderer.invoke('relay:updateStatus'),           // 当前状态快照
     check: () => ipcRenderer.invoke('relay:checkUpdate'),             // 手动触发检查
+    download: () => ipcRenderer.invoke('relay:downloadUpdate'),       // 用户确认后开始下载
+    dismiss: () => ipcRenderer.invoke('relay:dismissUpdate'),         // 「稍后」:压掉气泡
     quitAndInstall: () => ipcRenderer.invoke('relay:quitAndInstall'), // 重启安装(ready 时)
     onEvent: (handler) => {                                           // 状态变化推送
       const listener = (_evt, payload) => handler(payload);

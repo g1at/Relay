@@ -2085,11 +2085,16 @@ ipcMain.handle('claude:update', async () => {
 
 // ─────────────────────────────────────────
 // Relay 应用自更新(electron-updater,见 updater.js)
+//   自动的只有「检查」,下载和安装都要用户在界面上点过才发生。
 // ─────────────────────────────────────────
-// IPC: 当前更新状态快照(设置页打开时拉一次,后续靠 relay:update-event 推送)
+// IPC: 当前更新状态快照(设置页/气泡打开时拉一次,后续靠 relay:update-event 推送)
 ipcMain.handle('relay:updateStatus', () => updater.getStatus());
 // IPC: 手动触发一次检查(fire-and-forget,结果走事件推送)
 ipcMain.handle('relay:checkUpdate', () => { updater.check(); return updater.getStatus(); });
+// IPC: 用户确认更新 → 开始下载(进度走事件推送)
+ipcMain.handle('relay:downloadUpdate', () => updater.download());
+// IPC: 用户点「稍后」→ 压掉气泡(不影响设置页展示,也不取消已在跑的下载)
+ipcMain.handle('relay:dismissUpdate', () => updater.dismiss());
 // IPC: 下载就绪后立即重启安装
 ipcMain.handle('relay:quitAndInstall', () => updater.quitAndInstall());
 

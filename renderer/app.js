@@ -490,6 +490,9 @@ async function initTheme() {
   } catch {}
   updateModelSwitchUI();
   updateComposerForMode();
+  // 应用自更新:订阅状态推送,好让「发现新版」的气泡能自己冒出来 ——
+  //   不能等用户打开设置页才订阅。内部有幂等守卫,bindRelayUpdate 再调一次无害。
+  initRelayUpdate();
 })();
 
 // ── 工作目录(对话级)──
@@ -4861,15 +4864,121 @@ function bindClaudeUpdate() {
   row.onclick = onCheck;
 }
 
-// 「Relay」行:应用自更新状态展示。
-//   主进程自动检查 + 静默下载(见 updater.js),这里只是状态的镜像:
-//   · idle(未查过) → 点击手动检查;已查过 → 「已是最新版本」
-//   · available    → 「正在下载 vX.Y.Z n%」(点击无操作,下载不打断)
-//   · ready        → 「点击重启安装 vX.Y.Z」→ quitAndInstall
-//   · error        → 「检查失败」,点击重试
-//   状态推送(relay:update-event)只订阅一次(模块级),handler 每次按 ID 现查 DOM,
+// ─────────────────────────────────────────
+// Relay 应用自更新 —— 界面侧
+//   主进程只自动「检查」,下载和安装都要用户点(见 updater.js 顶部说明)。
+//   两个入口共用同一份状态(relay:update-event 推送):
+//     ① 右下角气泡:定时检查发现新版时冒出来,不打断操作,可「稍后」关掉;
+//     ② 设置页「Relay」行:随时手动检查,交互对齐上面的 Claude Code 行(二次点击确认)。
+//   状态推送只订阅一次(模块级),handler 每次按 ID 现查 DOM,
 //   设置弹窗反复开关不会堆积监听器。
+// ─────────────────────────────────────────
 let relayUpdateSubscribed = false;
+let relayUpdateLast = null;      // 最近一次状态快照,气泡按钮点击时据此决定动作
+
+// 订阅一次,气泡与设置行同时刷新。首屏就要订阅 —— 气泡不依赖设置弹窗是否打开过。
+function initRelayUpdate() {
+  if (relayUpdateSubscribed || !window.api.relayUpdate) return;
+  relayUpdateSubscribed = true;
+  window.api.relayUpdate.onEvent(onRelayUpdateState);
+  window.api.relayUpdate.status().then(onRelayUpdateState).catch(() => {});
+}
+
+function onRelayUpdateState(st) {
+  if (!st) return;
+  relayUpdateLast = st;
+  renderUpdateBubble(st);
+  renderRelayUpdateStatus(st);
+}
+
+// ── 右下角更新气泡 ──
+//   available(未忽略) → 「发现新版本 vX」+ 立即更新 / 稍后
+//   downloading       → 「正在下载 n%」+ 进度条(无按钮,下载不打断)
+//   ready             → 「vX 已就绪」+ 重启安装 / 稍后
+//   其余状态一律不冒,避免打扰。
+let updateBubbleHideTimer = null;   // 退场用;必须可取消,否则会误删刚重新显示的气泡
+function renderUpdateBubble(st) {
+  const show = !st.dismissed &&
+    (st.state === 'available' || st.state === 'downloading' || st.state === 'ready');
+  let el = document.getElementById('updateBubble');
+  if (!show) {
+    // 已经在退场了就别重复排队,否则多次状态推送会堆出一串定时器
+    if (el && !updateBubbleHideTimer) {
+      el.classList.add('hiding');
+      updateBubbleHideTimer = setTimeout(() => {
+        updateBubbleHideTimer = null;
+        const cur = document.getElementById('updateBubble');
+        if (cur) cur.remove();
+      }, 200);
+    }
+    return;
+  }
+  // 退场途中又要显示了(例如点完「稍后」马上从设置页点下载):撤掉待执行的移除
+  if (updateBubbleHideTimer) { clearTimeout(updateBubbleHideTimer); updateBubbleHideTimer = null; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'updateBubble';
+    el.className = 'update-bubble';   // 入场动画由 CSS 在插入时自动播放
+    document.body.appendChild(el);
+  } else {
+    el.classList.remove('hiding');    // 可能正在退场,拉回来
+  }
+
+  const ver = escapeHtml(st.latest || '');
+  if (st.state === 'downloading') {
+    el.innerHTML = `
+      <div class="ub-head">
+        <span class="ub-title">正在下载 v${ver}</span>
+        <button class="ub-close" data-act="later" title="收起">✕</button>
+      </div>
+      <div class="ub-bar"><div class="ub-fill" style="width:${st.progress || 0}%"></div></div>
+      <div class="ub-desc">${st.progress || 0}% · 下载完成后可选择何时重启</div>`;
+  } else if (st.state === 'ready') {
+    el.innerHTML = `
+      <div class="ub-head">
+        <span class="ub-title">v${ver} 已就绪</span>
+        <button class="ub-close" data-act="later" title="稍后">✕</button>
+      </div>
+      <div class="ub-desc">重启 Relay 完成更新，正在进行的对话会先结束。</div>
+      <div class="ub-actions">
+        <button class="ub-btn ghost" data-act="later">稍后</button>
+        <button class="ub-btn primary" data-act="install">重启安装</button>
+      </div>`;
+  } else {
+    const err = st.error ? `<div class="ub-err">上次下载失败：${escapeHtml(st.error)}</div>` : '';
+    el.innerHTML = `
+      <div class="ub-head">
+        <span class="ub-title">发现新版本 v${ver}</span>
+        <button class="ub-close" data-act="later" title="稍后">✕</button>
+      </div>
+      <div class="ub-desc">当前 v${escapeHtml(st.current || '')}，更新前不会改动你的数据。</div>
+      ${err}
+      <div class="ub-actions">
+        <button class="ub-btn ghost" data-act="later">稍后</button>
+        <button class="ub-btn primary" data-act="download">${st.error ? '重试下载' : '立即更新'}</button>
+      </div>`;
+  }
+
+  el.querySelectorAll('[data-act]').forEach((b) => {
+    b.onclick = () => handleUpdateAction(b.dataset.act);
+  });
+}
+
+async function handleUpdateAction(act) {
+  if (!window.api.relayUpdate) return;
+  try {
+    if (act === 'later')     { await window.api.relayUpdate.dismiss(); return; }
+    if (act === 'download')  { await window.api.relayUpdate.download(); return; }
+    if (act === 'install')   { await window.api.relayUpdate.quitAndInstall(); return; }
+  } catch (_) {}
+}
+
+// ── 设置页「Relay」行 ──
+//   idle(未查过) → 「检查更新」,点击查;已查过 → 「已是最新版本」
+//   available    → 「点击更新到 vX.Y.Z」→ 再点才下载(与 Claude Code 行的二次确认一致)
+//   downloading  → 「正在下载 n%」(点击无操作)
+//   ready        → 「vX.Y.Z 已就绪，点击重启安装」→ quitAndInstall
+//   error        → 「检查失败」,点击重试
 function renderRelayUpdateStatus(st) {
   const row = $('set-relayUpdate');
   const note = $('set-relayUpdateNote');
@@ -4879,30 +4988,30 @@ function renderRelayUpdateStatus(st) {
     note.className = 'row-status' + (kind ? ' note-' + kind : '');
   };
   switch (st.state) {
-    case 'disabled':  setNote('开发模式'); break;
-    case 'checking':  setNote('检查更新中…'); break;
-    case 'available': setNote(`正在下载 v${st.latest}${st.progress ? ' ' + st.progress + '%' : '…'}`, 'accent'); break;
-    case 'ready':     setNote(`v${st.latest} 已就绪，点击重启安装`, 'accent'); break;
-    case 'error':     setNote('✗ 检查失败，点击重试', 'err'); break;
-    default:          setNote(st.checkedAt ? '已是最新版本' : '检查更新', st.checkedAt ? 'ok' : ''); break;
+    case 'disabled':    setNote('开发模式'); break;
+    case 'checking':    setNote('检查更新中…'); break;
+    case 'available':   setNote(st.error ? `下载失败，点击重试 v${st.latest}` : `点击更新到 v${st.latest}`, st.error ? 'err' : 'accent'); break;
+    case 'downloading': setNote(`正在下载 v${st.latest} ${st.progress || 0}%`, 'accent'); break;
+    case 'ready':       setNote(`v${st.latest} 已就绪，点击重启安装`, 'accent'); break;
+    case 'error':       setNote('✗ 检查失败，点击重试', 'err'); break;
+    default:            setNote(st.checkedAt ? '已是最新版本' : '检查更新', st.checkedAt ? 'ok' : ''); break;
   }
 }
+
 function bindRelayUpdate() {
   const row = $('set-relayUpdate');
   if (!row) return;
-  if (!relayUpdateSubscribed && window.api.relayUpdate) {
-    relayUpdateSubscribed = true;
-    window.api.relayUpdate.onEvent(renderRelayUpdateStatus);
-  }
-  // 打开设置时拉一次当前快照
-  if (window.api.relayUpdate) window.api.relayUpdate.status().then(renderRelayUpdateStatus).catch(() => {});
+  initRelayUpdate();
+  // 打开设置时拉一次当前快照(订阅可能早已完成,但此刻 DOM 才存在)
+  if (window.api.relayUpdate) window.api.relayUpdate.status().then(onRelayUpdateState).catch(() => {});
   row.onclick = async () => {
     if (!window.api.relayUpdate) return;
     try {
       const st = await window.api.relayUpdate.status();
-      if (st.state === 'ready') { await window.api.relayUpdate.quitAndInstall(); return; }
-      if (st.state === 'available' || st.state === 'checking' || st.state === 'disabled') return;
-      renderRelayUpdateStatus(await window.api.relayUpdate.check());
+      if (st.state === 'ready')     { await window.api.relayUpdate.quitAndInstall(); return; }
+      if (st.state === 'available') { await window.api.relayUpdate.download(); return; }
+      if (st.state === 'downloading' || st.state === 'checking' || st.state === 'disabled') return;
+      onRelayUpdateState(await window.api.relayUpdate.check());
     } catch (_) {}
   };
 }

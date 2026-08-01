@@ -1991,6 +1991,102 @@ html, body {
   transform: translateX(-50%) translateY(0);
 }
 
+/* ─────────────── 应用更新气泡(右下角) ─────────────── */
+/* 定时检查发现新版时冒出来。刻意做成可忽略的卡片而非模态:
+   更新是用户的选择,不该打断正在进行的对话。*/
+.update-bubble {
+  position: fixed;
+  /* 放右上角而不是右下角:输入区是居中且高度可变的,底部锚定会盖住发送按钮。
+     顶部留出头部栏的高度,这样任何窗口宽度下都不挡操作。*/
+  right: 20px; top: 96px;
+  width: 300px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+  padding: 14px 16px;
+  z-index: 1900;              /* 低于 toast(2000),高于常规内容 */
+  /* 入场用 animation 而非 transition:插入即播,不依赖 JS 补 class。
+     窗口在后台时 requestAnimationFrame 不触发,靠它加 class 会让气泡卡在全透明。*/
+  animation: ubIn 0.2s ease both;
+}
+@keyframes ubIn {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: none; }
+}
+/* 退场:加 .hiding,过渡结束后由 JS 移除节点 */
+.update-bubble.hiding {
+  animation: none;
+  opacity: 0;
+  transform: translateY(-12px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.update-bubble .ub-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
+.update-bubble .ub-title {
+  font-size: 14px; font-weight: 600; color: var(--text);
+  flex: 1; min-width: 0;
+}
+.update-bubble .ub-close {
+  flex-shrink: 0;
+  border: none; background: transparent;
+  color: var(--text-muted);
+  font-size: 13px; line-height: 1;
+  padding: 4px; border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.update-bubble .ub-close:hover { background: var(--bg-hover); color: var(--text); }
+
+.update-bubble .ub-desc {
+  font-size: 12.5px; color: var(--text-dim); line-height: 1.6;
+}
+.update-bubble .ub-err {
+  margin-top: 6px;
+  font-size: 12px; color: var(--error-text);
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  word-break: break-word;
+}
+
+/* 下载进度条:与安装器的进度条同规格(6px 圆角轨道 + 主色填充) */
+.update-bubble .ub-bar {
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 10px 0 8px;
+}
+.update-bubble .ub-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.25s ease;
+}
+
+.update-bubble .ub-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 12px;
+}
+.update-bubble .ub-btn {
+  padding: 6px 14px;
+  font-size: 12.5px; font-weight: 500;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+.update-bubble .ub-btn.primary {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.update-bubble .ub-btn.primary:hover { background: var(--accent-text); }
+.update-bubble .ub-btn.ghost { background: var(--bg-panel); color: var(--text-dim); }
+.update-bubble .ub-btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
+
 /* 输入框抖动(发送被阻塞时的反馈)*/
 .input-card textarea.shake {
   animation: shakeIt 0.4s cubic-bezier(.36,.07,.19,.97);
@@ -4521,6 +4617,9 @@ html, body {
 
 /* ── 深色:toast 提示(原本已是深底白字,深色下改为稍亮底,与背景区分) ── */
 [data-theme="dark"] .app-toast { background: rgba(60, 60, 62, 0.92); }
+
+/* ── 深色:更新气泡(配色靠变量自动跟随,只需把投影压深才浮得起来) ── */
+[data-theme="dark"] .update-bubble { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5); }
 
 /* ── 深色:定时任务弹窗完整适配 ── */
 [data-theme="dark"] .sv-listbody { background: #1a1a1c; }
