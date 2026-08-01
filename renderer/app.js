@@ -4868,13 +4868,12 @@ function bindClaudeUpdate() {
 // Relay 应用自更新 —— 界面侧
 //   主进程只自动「检查」,下载和安装都要用户点(见 updater.js 顶部说明)。
 //   两个入口共用同一份状态(relay:update-event 推送):
-//     ① 右下角气泡:定时检查发现新版时冒出来,不打断操作,可「稍后」关掉;
+//     ① 右上角气泡:定时检查发现新版时从设置齿轮下方弹出,不打断操作,可「稍后」关掉;
 //     ② 设置页「Relay」行:随时手动检查,交互对齐上面的 Claude Code 行(二次点击确认)。
 //   状态推送只订阅一次(模块级),handler 每次按 ID 现查 DOM,
 //   设置弹窗反复开关不会堆积监听器。
 // ─────────────────────────────────────────
 let relayUpdateSubscribed = false;
-let relayUpdateLast = null;      // 最近一次状态快照,气泡按钮点击时据此决定动作
 
 // 订阅一次,气泡与设置行同时刷新。首屏就要订阅 —— 气泡不依赖设置弹窗是否打开过。
 function initRelayUpdate() {
@@ -4886,12 +4885,11 @@ function initRelayUpdate() {
 
 function onRelayUpdateState(st) {
   if (!st) return;
-  relayUpdateLast = st;
   renderUpdateBubble(st);
   renderRelayUpdateStatus(st);
 }
 
-// ── 右下角更新气泡 ──
+// ── 右上角更新气泡(尖角对准设置齿轮)──
 //   available(未忽略) → 「发现新版本 vX」+ 立即更新 / 稍后
 //   downloading       → 「正在下载 n%」+ 进度条(无按钮,下载不打断)
 //   ready             → 「vX 已就绪」+ 重启安装 / 稍后
