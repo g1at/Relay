@@ -46,7 +46,6 @@ function updateFooter() {
   const map = {
     git:    probeResult.claudeOk,
     node:   probeResult.claudeOk,
-    claude: probeResult.claudeOk,
     mcp:    probeResult.claudeOk,
   };
   for (const li of $$('#probeList li')) {
@@ -58,12 +57,12 @@ function updateFooter() {
 })();
 
 // ──────── 安装步骤清单(主视觉)────────
-// 清单里的步骤号:1=基础环境 2=Claude Code 3=飞书 MCP 5=收尾(与脚本 Step 编号对齐;
+// 清单里的步骤号:1=基础环境 3=飞书 MCP 5=收尾(与脚本 Step 编号对齐;
 //   脚本里没有 Step 4,4 段是 1-install-deps 内部的子步,统一并到「基础环境」)。
-const STEP_ORDER = [1, 2, 3, 5];
+//   Step 2(安装 Claude Code)已随「运行时内置」删除 —— 运行时随 Relay 一起分发,不再需要装。
+const STEP_ORDER = [1, 3, 5];
 const STEP_LABEL = {
   1: '安装基础环境(Git / Node.js)…',
-  2: '安装 Claude Code…',
   3: '配置飞书 MCP…',
   5: '收尾检查…',
 };

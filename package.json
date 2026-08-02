@@ -12,7 +12,11 @@
     "release": "electron-builder --win --publish always"
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
+    "@anthropic-ai/sdk": "0.115.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "electron-updater": "^6.3.9",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "electron": "^32.0.0",
@@ -31,11 +35,15 @@
     "directories": {
       "output": "dist"
     },
-    "electronLanguages": ["zh-CN", "en-US"],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "removePackageScripts": true,
     "files": [
       "main.js",
       "preload.js",
+      "claude-sdk.js",
       "skill-usage-worker.js",
       "scheduler.js",
       "updater.js",
@@ -44,7 +52,9 @@
       "renderer/**/*",
       "installer/**/*",
       "!**/*.map",
-      "!**/{.DS_Store,Thumbs.db}"
+      "!**/{.DS_Store,Thumbs.db}",
+      "!node_modules/@anthropic-ai/claude-agent-sdk-*/**",
+      "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
     ],
     "extraResources": [
       {
@@ -58,10 +68,13 @@
     ],
     "asarUnpack": [
       "cron-mcp-server.js",
-      "skill-usage-worker.js"
+      "skill-usage-worker.js",
+      "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
@@ -73,7 +86,9 @@
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": false,
       "unicode": true,
-      "installerLanguages": ["zh_CN"],
+      "installerLanguages": [
+        "zh_CN"
+      ],
       "language": "2052",
       "displayLanguageSelector": false,
       "include": "build/installer.nsh",

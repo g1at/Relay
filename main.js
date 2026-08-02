@@ -1,8 +1,8 @@
 // main.js — Electron 主进程
 // 职责:
 //   1. 创建窗口
-//   2. spawn `claude -p --output-format stream-json` 与 CLI 通信
-//   3. 解析 JSON 事件流,通过 IPC 转发给 renderer
+//   2. 通过 claude-agent-sdk 驱动 Claude Code(SDK 自带运行时,不依赖用户安装)
+//   3. 把 SDK 吐出的事件流经 IPC 转发给 renderer
 
 const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, Notification, globalShortcut, clipboard, nativeTheme } = require('electron');
 const { spawn, execFile } = require('child_process');
@@ -13,6 +13,7 @@ const os = require('os');
 const fs = require('fs');
 const scheduler = require('./scheduler');
 const updater = require('./updater');
+const claudeSdk = require('./claude-sdk');
 
 const IS_DEV = process.argv.includes('--dev');
 // 开机自启唤起:--autostart 时不弹主窗,静默建托盘 + 起调度器在后台跑定时任务。
@@ -311,58 +312,14 @@ const MAX_PARALLEL_JOBS = 3;   // 并发上限:每个 claude.exe 都吃内存/CP
 //     根本不存在「要不要等」的问题。下面这条 prompt 提示退居保险位,只兜「开窗即发」的边缘案例。
 // (曾经的 XIAOMI_NPM_REGISTRY / FEISHU_PKG 两个常量随预热一起删了 —— 除预热外无人使用。)
 //
-// Claude Code 升级用:与安装脚本(2-install-claude.ps1)保持一致 ——
-//   公网 npmmirror 镜像 + 免管理员的 %LOCALAPPDATA%\npm-global 前缀。
-//   检查更新/一键更新都走这两个常量,避免装错位置或连不上源。
-const CLAUDE_PKG = '@anthropic-ai/claude-code';
-const PUBLIC_NPM_REGISTRY = 'https://registry.npmmirror.com';
-const NPM_GLOBAL_PREFIX = path.join(process.env.LOCALAPPDATA || os.homedir(), 'npm-global');
+// (CLAUDE_PKG / PUBLIC_NPM_REGISTRY / NPM_GLOBAL_PREFIX 与 parseVersion / compareVersions
+//  也随「运行时内置」一起删了：它们只服务于「用 npm 检查并升级用户全局的 claude-code」，
+//  而运行时现在随 Relay 分发、版本由 package.json 锁定，那条升级路径已不存在。)
 
-// 从 `claude --version` 输出里抠出纯版本号(形如 "1.2.3 (Claude Code)" → "1.2.3")
-function parseVersion(raw) {
-  const m = String(raw || '').match(/\d+\.\d+\.\d+(?:[-.][0-9A-Za-z]+)*/);
-  return m ? m[0] : '';
-}
-
-// 语义化版本比较:a>b 返回 1,a<b 返回 -1,相等返回 0。非数字段按字符串兜底比。
-function compareVersions(a, b) {
-  const pa = String(a).split('.');
-  const pb = String(b).split('.');
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = parseInt(pa[i], 10);
-    const nb = parseInt(pb[i], 10);
-    const aNum = Number.isFinite(na);
-    const bNum = Number.isFinite(nb);
-    if (aNum && bNum) {
-      if (na !== nb) return na > nb ? 1 : -1;
-    } else {
-      const sa = pa[i] || '';
-      const sb = pb[i] || '';
-      if (sa !== sb) return sa > sb ? 1 : -1;
-    }
-  }
-  return 0;
-}
-
-// 跑 `claude --version` 拿当前已安装版本(纯版本号);找不到 exe 或失败返回 ''。
+// 当前 Claude Code 运行时版本。运行时随 SDK 内置,版本在打包时就定死了,
+//   不再需要 spawn 一次 `claude --version` 去问 —— 直接读 SDK 声明的 claudeCodeVersion。
 function getInstalledClaudeVersion() {
-  return new Promise((resolve) => {
-    const claudeExe = getUsableClaudeExe();
-    if (!claudeExe) return resolve('');
-    let out = '';
-    let child;
-    try {
-      child = spawn(claudeExe, ['--version'], { shell: false, windowsHide: true });
-    } catch (e) {
-      console.warn('[claude:version] spawn 失败: %s', e.message);
-      return resolve('');
-    }
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (_) {} }, 15000);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (d) => { out += d; });
-    child.on('close', () => { clearTimeout(timer); resolve(parseVersion(out)); });
-    child.on('error', (e) => { clearTimeout(timer); console.warn('[claude:version] 子进程出错: %s', e.message); resolve(''); });
-  });
+  return Promise.resolve(CLAUDE_RUNTIME_VERSION || '');
 }
 
 // 飞书/Lark 文档域名(命中即认为本轮需要飞书 MCP)
@@ -441,131 +398,19 @@ function genId() {
 }
 
 // ─────────────────────────────────────────
-// 查找 claude.exe — Node 18+ 在 Windows 不能 spawn .cmd,必须找真实 .exe
-// 同时绕开 cmd.exe → 避免中文 prompt 经 GBK 二次转码乱码
+// Claude Code 运行时
 // ─────────────────────────────────────────
-// useWhere=false 时只做快速的 existsSync 候选探测(零子进程);为 true 才用同步 `where` 兜底。
-//   启动关键路径传 false —— `where claude.exe` 是个同步子进程(Windows 上几十~几百 ms),
-//   会拖慢「双击到窗口冒出来」。兜底留给启动后的后台补探测 + 安装/更新后的重解析。
-function isUsableClaudeExe(filePath) {
-  try {
-    if (!filePath || !fs.existsSync(filePath)) return false;
-    const stat = fs.statSync(filePath);
-    // npm 新版在 optional native package 下载失败时会留下约 500B 的 shell 错误脚本，
-    // 但文件名仍叫 claude.exe。existsSync 会误判；Windows PE 必须以 MZ 开头。
-    if (!stat.isFile() || stat.size < 4096) return false;
-    if (process.platform !== 'win32') return true;
-    const fd = fs.openSync(filePath, 'r');
-    try {
-      const magic = Buffer.alloc(2);
-      return fs.readSync(fd, magic, 0, 2, 0) === 2 && magic[0] === 0x4d && magic[1] === 0x5a;
-    } finally { fs.closeSync(fd); }
-  } catch (_) { return false; }
-}
-
-function findClaudeExe(useWhere = true) {
-  const LOCAL = process.env.LOCALAPPDATA || '';
-  const APPDATA = process.env.APPDATA || '';
-  // 候选 npm 全局前缀(我们安装时优先用 %LOCALAPPDATA%\npm-global 免管理员)
-  const prefixes = [
-    path.join(LOCAL, 'npm-global'),                 // 安装器设置的免权限前缀(首选)
-    path.join(APPDATA, 'npm'),                      // npm 默认全局前缀
-    'C:\\Program Files\\nodejs',                    // 系统级 Node 自带 npm 前缀
-  ];
-  const candidates = [];
-  for (const pre of prefixes) {
-    if (!pre) continue;
-    candidates.push(path.join(pre, 'claude.exe'));  // prefix 根下的 shim
-    candidates.push(path.join(pre, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'));
-  }
-  for (const p of candidates) if (isUsableClaudeExe(p)) return p;
-  // 兜底:用 where 在 PATH 里找(仅在允许时)。注:PATH 上常只有 shim(claude/.cmd)而非 claude.exe,
-  //   所以查 `where claude` 把 shim 也捞回来,再解析成真 exe(详见 resolveClaudeShimToExe 的坑说明)。
-  if (useWhere) {
-    try {
-      const out = require('child_process').execSync('where claude', { encoding: 'utf8', windowsHide: true });
-      const hits = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      const exe = hits.find(s => /claude\.exe$/i.test(s) && isUsableClaudeExe(s));
-      if (exe) return exe;
-      for (const h of hits) { const r = resolveClaudeShimToExe(h); if (r) return r; }
-    } catch (e) { console.warn('[startup] where claude 查找失败: %s', e.message); }
-  }
-  return null;
-}
-// 把 npm 生成的 shim(claude / claude.cmd / claude.ps1)解析成它真正 exec 的 claude.exe。
-//   ⚠️ Windows 关键坑:PATH 上往往只有这些 shim,没有 claude.exe ——
-//   `where claude.exe` 因此返回空,而真 exe 藏在 <prefix>\node_modules\@anthropic-ai\claude-code\bin\claude.exe。
-//   两条路解析:① 读 shim 文本里指向 claude.exe 的那行;② 兜底按 shim 所在目录拼标准相对路径。
-function resolveClaudeShimToExe(shimPath) {
-  try {
-    if (/\.exe$/i.test(shimPath) && isUsableClaudeExe(shimPath)) return shimPath;  // 本身就是 exe
-    const dir = path.dirname(shimPath);
-    // ① 从 shim 文本里抠出 claude.exe 的引用(sh shim 用 /,cmd/ps1 用 \;统一成绝对路径)
-    let txt = '';
-    try { txt = fs.readFileSync(shimPath, 'utf8'); } catch (_) {}
-    const m = txt.match(/[^\s"']*claude\.exe/i);
-    if (m) {
-      let p = m[0].replace(/\$basedir|%~dp0|%dp0%|\$PSScriptRoot/gi, dir).replace(/[\\/]+/g, path.sep);
-      if (!path.isAbsolute(p)) p = path.join(dir, p);
-      p = path.normalize(p);
-      if (isUsableClaudeExe(p)) return p;
-    }
-    // ② 兜底:shim 同目录下的标准相对位置
-    const guess = path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
-    if (isUsableClaudeExe(guess)) return guess;
-  } catch (e) { console.warn('[startup] shim 解析失败: %s path=%s', e.message, shimPath); }
-  return null;
-}
-// 异步版的 where 兜底:不阻塞事件循环/UI 线程(同步 execSync 会卡几十~几百 ms)。
-//   仅在快速 existsSync 候选全 miss 时才调,由 ensureClaudeExe() 在启动判断前 await。
-//   正常用户(命中候选)零开销;装在别处的用户(nvm/volta/自定义 prefix/非 C 盘…)靠这里探到。
-//   一次 `where claude` 把 exe 和 shim 全捞回来(claude.exe 通常不在 PATH,只有 shim 在),再逐个解析成真 exe。
-function findClaudeExeViaWhere() {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    try {
-      const child = spawn('where', ['claude'], { shell: false, windowsHide: true });
-      let out = '';
-      child.stdout.on('data', (d) => { out += d.toString('utf8'); });
-      child.on('error', () => finish(null));
-      child.on('close', () => {
-        const hits = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-        // exe 优先;其次拿任一 shim 解析成 exe
-        const exe = hits.find(s => /claude\.exe$/i.test(s) && isUsableClaudeExe(s));
-        if (exe) return finish(exe);
-        for (const h of hits) {
-          const r = resolveClaudeShimToExe(h);
-          if (r) return finish(r);
-        }
-        finish(null);
-      });
-      // where 卡死兜底:1.5s 后放弃(极端 PATH/AV 干扰场景),不让启动判断无限等。
-      setTimeout(() => { try { child.kill(); } catch (_) {} finish(null); }, 1500);
-    } catch (_) { finish(null); }
-  });
-}
-// 启动判断前确保 claude.exe 探测走完完整路径:快速候选 + (miss 时)异步 where 兜底。
-//   命中即返回,绝不重复跑 where。结果写回 CLAUDE_EXE 供 decideStartup / 后续 claude:run 共用。
-async function ensureClaudeExe() {
-  if (CLAUDE_EXE && isUsableClaudeExe(CLAUDE_EXE)) return CLAUDE_EXE;
-  CLAUDE_EXE = null;
-  const viaWhere = await findClaudeExeViaWhere();
-  if (viaWhere) { CLAUDE_EXE = viaWhere; console.log('[main] claude.exe(where 异步兜底)→', CLAUDE_EXE); }
-  return CLAUDE_EXE;
-}
-// 用 let:首次安装完成后可重新解析(刚装好的 claude.exe 才会出现)。
-//   启动时先走快速路径(不 spawn where);decideStartup 判断前再 await ensureClaudeExe() 补 where 兜底。
-let CLAUDE_EXE = findClaudeExe(false);
-console.log('[main] claude.exe →', CLAUDE_EXE);
-
-// Claude Code 可被另一个 Relay 实例或外部 npm 在本进程运行期间更新。路径没变不代表
-// 文件仍可执行；每次真正 spawn 前重新校验，避免损坏的占位 claude.exe 引发 spawn UNKNOWN。
-function getUsableClaudeExe() {
-  if (CLAUDE_EXE && isUsableClaudeExe(CLAUDE_EXE)) return CLAUDE_EXE;
-  CLAUDE_EXE = findClaudeExe(false);
-  return CLAUDE_EXE && isUsableClaudeExe(CLAUDE_EXE) ? CLAUDE_EXE : null;
-}
+// 运行时由 @anthropic-ai/claude-agent-sdk 自带（平台专属包 claude-agent-sdk-win32-x64，
+// 内含完整的 claude.exe），随 Relay 一起分发 —— 因此不再需要探测用户机器上装没装
+// Claude Code，也不再有「装了但版本不对/被 npm 装成损坏占位文件」这类问题。
+//
+// 这里原本有一整套 isUsableClaudeExe(PE 头校验) / findClaudeExe / resolveClaudeShimToExe /
+// findClaudeExeViaWhere / ensureClaudeExe / getUsableClaudeExe，专门对付 Windows 上的
+// 「PATH 上只有 npm shim 没有真 exe」「npm 在 optional 包下载失败时留下 500B 的错误脚本」
+// 「where 被杀软拖死」等一堆环境问题；1.4.0 那个「每次启动都弹向导」的时序坑也出在这条链路上。
+// 运行时内置后这些问题从根上消失，整段删除。
+const CLAUDE_RUNTIME_VERSION = claudeSdk.bundledClaudeVersion();
+console.log('[main] 内置 Claude Code 运行时 → %s (%s)', CLAUDE_RUNTIME_VERSION, claudeSdk.bundledExecutable());
 
 // ─────────────────────────────────────────
 // 系统托盘:最小化到托盘后台跑任务
@@ -858,12 +703,9 @@ function createWizardWindow() {
 //   只要环境就绪(claude 已装 + 配了 API Key)即进主界面;
 //   Agent 已与本应用解耦,由用户自行在「设置 → Agent 目录」导入,不再作为启动门槛。
 async function decideStartup() {
-  // 判断前先确保 claude.exe 探测走完整路径(快速候选 miss 时补异步 where 兜底)——
-  //   根治 1.4.0 的时序坑。⚡ 关键优化:快速路径【已命中】CLAUDE_EXE 时(绝大多数正常用户),
-  //   跳过 await,同步直接判断 → 主窗零延迟创建。只有快速路径 miss 时才 await 兜底探测,
-  //   宁可那种情况慢一点(本就要弹向导/补探测),也不让正常用户每次启动都被 await 推迟首屏。
-  if (!CLAUDE_EXE) await ensureClaudeExe();
-  const claudeOk = !!CLAUDE_EXE;
+  // 运行时随 SDK 内置,必然可用 —— 不再需要探测 claude.exe(那正是 1.4.0「每次弹向导」的时序坑所在)。
+  //   现在的启动门槛只剩「配没配 API Key」。
+  const claudeOk = true;
   const settingsOk = (() => {
     try {
       const s = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8'));
@@ -920,142 +762,79 @@ function cronMcpServerPath() {
 const CRON_HINT_RE = /定时任务|定时|计划任务|任务列表|我的任务|哪些任务|提醒我|定期|每天|每周|每月|每隔|cron|schedule|(删除|删掉|移除|取消|暂停|停用|禁用|启用|开启|恢复|修改|更改|改成|改为|编辑|运行|执行|触发|查看|列出|列举).{0,6}(任务|它|他|这个|那个|第[一二三四五六七八九十\d]+个?)/i;
 function promptMaybeCron(text) { return typeof text === 'string' && CRON_HINT_RE.test(text); }
 
-// 为本轮生成一个临时 MCP 配置文件（只含 cron server），返回路径；失败返回 null。
-//   不加 --strict，--mcp-config 是「合并」语义（已实测：飞书 + cron 共存）。
+// cron MCP 的 SDK 配置。原来要写一个临时 JSON 配置文件再用 --mcp-config 传给 CLI，
+//   现在 SDK 直接收结构化配置，临时文件与它的清理逻辑一并消失。
 //   server 直接读写 userData/schedules.json（写操作即时生效，不再走待确认）。
-function writeCronMcpConfig() {
+function cronMcpServers() {
   const server = cronMcpServerPath();
   if (!server) return null;
-  try {
-    // command 用 Electron 自身 exe + ELECTRON_RUN_AS_NODE=1 当 node 跑（不依赖系统 PATH 上的 node）。
-    //   userData 路径用【命令行参数】传给 server（claude 透传 args 最稳；env 字段实测不一定透传）。
-    const cfg = { mcpServers: { 'relay-cron': {
+  // command 用 Electron 自身 exe + ELECTRON_RUN_AS_NODE=1 当 node 跑（不依赖系统 PATH 上的 node）。
+  //   userData 路径用【命令行参数】传给 server（透传 args 最稳；env 字段实测不一定透传）。
+  return {
+    'relay-cron': {
+      type: 'stdio',
       command: process.execPath,
       args: [server, app.getPath('userData')],
       env: { ELECTRON_RUN_AS_NODE: '1' },
-    } } };
-    const dir = path.join(app.getPath('userData'), 'tmp');
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `cron-mcp-${Date.now()}.json`);
-    fs.writeFileSync(file, JSON.stringify(cfg), 'utf8');
-    return file;
-  } catch (e) { console.error('[cron-mcp] 配置生成失败:', e.message); return null; }
+    },
+  };
 }
 
-// 构造 claude 的命令行参数。一次性任务(runClaudeJob)与常驻会话(LiveSession)共用,
-//   保证两条路的行为完全一致 —— 差别只在 persistent:
-//     · persistent=false → `-p <prompt>`,prompt 走 argv,进程跑完即退(定时任务/兼容回退)
-//     · persistent=true  → `-p --input-format stream-json`,prompt 后续走 stdin,进程常驻多轮
-//   返回 { args, cronCfgFile }（cronCfgFile 需由调用方在进程结束后删除）。
-function buildClaudeArgs({ prompt, validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp, persistent }) {
-  const args = persistent
-    ? ['-p', '--input-format', 'stream-json']   // prompt 不进 argv,逐轮从 stdin 喂
-    : ['-p', prompt];
-  args.push(
-    '--output-format', 'stream-json',
-    '--verbose',  // stream-json 要求 verbose
-    '--include-partial-messages',
-    // 关键:headless(-p)默认不加载 user scope 配置源(API key/模型映射 + 飞书 MCP),显式声明 user。
-    '--setting-sources', 'user',
-    // 无交互终端弹不出权限框,自动放行;用户可在设置改 acceptEdits/plan。
-    '--permission-mode', readAppSettings().permissionMode || 'bypassPermissions',
-    // AskUserQuestion 交互工具 headless 下必被拒,禁用 + ASK_HINT 引导模型文字列出问题。
-    '--disallowed-tools', 'AskUserQuestion',
-  );
-  // 长期记忆库:--add-dir 授权(目录须先存在,否则 --add-dir 被忽略且首条记忆 Write 也需要它在)。
+// 组装交给 claude-sdk.js 的调用参数。一次性任务(runClaudeJob)与常驻会话(LiveSession)共用，
+//   保证两条路行为完全一致 —— 这正是原来 buildClaudeArgs 的职责，只是产物从 argv 数组
+//   变成了 SDK 的 options 对象（授权目录/模型档位/权限模式/MCP 的语义逐项对应）。
+//
+//   注：cron MCP 用【合并】语义挂载（不设 strictMcpConfig）——飞书及用户导入的其它 MCP 照常可用。
+//   不能 strict：否则会屏蔽用户导入的所有其它 MCP，那一轮就只剩 cron。
+function buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }) {
+  // 长期记忆库目录须先存在，否则授权被忽略且首条记忆 Write 也需要它在。
   try { fs.mkdirSync(MEMORY_DIR, { recursive: true }); } catch (_) {}
-  args.push('--add-dir', MEMORY_DIR);
-  if (validWorkingDir) args.push('--add-dir', validWorkingDir);
-  // Agent 项目根不在 cwd 链上时单独授权(避免与 validWorkingDir 重复)。
-  if (agentProjectRoot && path.resolve(agentProjectRoot) !== path.resolve(validWorkingDir || '')) {
-    args.push('--add-dir', agentProjectRoot);
-  }
-  // 模型档位:haiku/sonnet/opus → settings.json 的 ANTHROPIC_DEFAULT_*_MODEL 映射;未指定沿用默认。
-  const tier = ['haiku', 'sonnet', 'opus'].includes(model) ? model : null;
-  if (tier) args.push('--model', tier);
-  if (sessionId) args.push('--resume', sessionId);
-  // 对话内管理定时任务:挂 cron MCP（合并语义，不加 --strict —— 飞书及用户导入的其它 MCP 照常可用）。
-  //   注:不能 strict——否则会屏蔽用户导入的所有其它 MCP，那一轮就只剩 cron。
-  //   实测：飞书 pending 时 cron 工具仍完整在工具列表里，模型也能列出——之前以为「飞书干扰」是误判。
-  //   真正的幻觉锅是模型(mimo)凭直觉猜工具名(cron_delete/cron_run_now)；已在 cron-mcp-server.js
-  //   里补了这些别名工具兜住，所以这里安全合并即可。
-  let cronCfgFile = null;
-  if (attachCronMcp) {
-    cronCfgFile = writeCronMcpConfig();
-    if (cronCfgFile) args.push('--mcp-config', cronCfgFile);
-  }
-  return { args, cronCfgFile };
+  return {
+    memoryDir: MEMORY_DIR,
+    validWorkingDir,
+    agentProjectRoot,
+    model,
+    sessionId,
+    // 无交互终端弹不出权限框，自动放行；用户可在设置改 acceptEdits/plan。
+    permissionMode: readAppSettings().permissionMode || 'bypassPermissions',
+    mcpServers: attachCronMcp ? cronMcpServers() : null,
+  };
 }
 
 // ─────────────────────────────────────────
-// 一次性执行核心:spawn 一次 claude -p,解析 stream-json,事件经 onEvent 回调发出。
+// 一次性执行核心:经 claude-agent-sdk 跑一轮,事件经 onEvent 回调发出。
 //   现在只服务【定时任务调度器】和【无 convId 的兼容回退】—— 交互对话已改走常驻会话池
 //   (见 LiveSession)。定时任务是一次性负载,跑完就退,常驻对它没有意义。
 //   入参均为「已算好的最终值」:prompt 已拼好所有 hint/记忆;cwd/授权目录/model/sessionId 由调用方决定。
-//   返回 { jobId, child }。完成由 onEvent 的 'job-done' 事件通知（不等 Promise）。
+//   返回 { jobId, child }。child 是鸭子类型的句柄(只有 .pid/.kill()),
+//   与原来的 ChildProcess 在调用点上等价,jobs map 与 claude:abort 因此无需改动。
+//   完成由 onEvent 的 'job-done' 事件通知（不等 Promise）。
 // ─────────────────────────────────────────
 function runClaudeJob({ prompt, cwd, validWorkingDir, agentProjectRoot, model, sessionId, onEvent, attachCronMcp }) {
-  const claudeExe = getUsableClaudeExe();
-  if (!claudeExe) throw new Error('Claude Code 安装不完整或原生组件不可执行，请重新安装');
   const jobId = require('crypto').randomUUID();
-  const { args, cronCfgFile: _cfg } = buildClaudeArgs({
-    prompt, validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp, persistent: false,
-  });
-  let cronCfgFile = _cfg;
+  const emit = (evt) => { try { onEvent({ jobId, ...evt }); } catch (e) { console.error('[claude] emit 失败: %s type=%s', e.message, evt && evt.type); } };
 
-  const child = spawn(claudeExe, args, {
+  const { handle } = claudeSdk.runOneShot({
+    prompt,
     cwd,
-    shell: false,         // 直接 spawn .exe,不走 cmd(避免中文 prompt 经 GBK 二次转码乱码)
-    windowsHide: true,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],  // ignore stdin 免 3s 超时警告;pipe 读 stream-json
+    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }),
+    onEvent: (evt) => {
+      if (evt && evt.type === 'job-done') {
+        console.log('[claude] done jobId=%s exitCode=%s', jobId, evt.exitCode);
+        jobs.delete(jobId);
+        refreshTrayMenu();
+      }
+      emit(evt);
+    },
   });
-  console.log('[claude] spawn jobId=%s pid=%d cwd=%s model=%s sessionId=%s cronMcp=%s prompt=%s',
-    jobId, child.pid, cwd, model || '(default)', sessionId || '(new)', !!attachCronMcp,
+
+  console.log('[claude] run jobId=%s cwd=%s model=%s sessionId=%s cronMcp=%s prompt=%s',
+    jobId, cwd, model || '(default)', sessionId || '(new)', !!attachCronMcp,
     (prompt || '').slice(0, 120).replace(/\n/g, '↵'));
-  jobs.set(jobId, child);
+  jobs.set(jobId, handle);
   refreshTrayMenu();
 
-  const emit = (evt) => { try { onEvent({ jobId, ...evt }); } catch (e) { console.error('[claude] emit 失败: %s type=%s', e.message, evt && evt.type); } };
-  let stdoutBuf = '';
-
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => {
-    stdoutBuf += chunk;
-    let nl;
-    while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
-      const line = stdoutBuf.slice(0, nl).trim();
-      stdoutBuf = stdoutBuf.slice(nl + 1);
-      if (!line) continue;
-      try { emit(JSON.parse(line)); }
-      catch (e) { emit({ type: 'raw', text: line }); }   // 非 JSON 行当原始文本
-    }
-  });
-
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => {
-    console.warn('[claude] stderr jobId=%s: %s', jobId, chunk.trimEnd());
-    emit({ type: 'stderr', text: chunk });
-  });
-
-  const cleanupCronCfg = () => { if (cronCfgFile) { try { fs.rmSync(cronCfgFile, { force: true }); } catch (_) {} cronCfgFile = null; } };
-  child.on('close', (code) => {
-    console.log('[claude] close jobId=%s pid=%d exitCode=%s', jobId, child.pid, code);
-    jobs.delete(jobId);
-    refreshTrayMenu();
-    cleanupCronCfg();   // 删本轮临时 MCP 配置
-    if (stdoutBuf.trim()) emit({ type: 'raw', text: stdoutBuf });   // 残留 buffer
-    emit({ type: 'job-done', exitCode: code });   // 显式收尾(result 事件可能因异常退出缺失)
-  });
-  child.on('error', (err) => {
-    console.error('[claude] error jobId=%s pid=%d: %s', jobId, child.pid, err.message);
-    jobs.delete(jobId);
-    refreshTrayMenu();
-    cleanupCronCfg();
-    emit({ type: 'job-done', exitCode: -1, error: err.message });
-  });
-
-  return { jobId, child };
+  return { jobId, child: handle };
 }
 
 // ═════════════════════════════════════════
@@ -1151,9 +930,9 @@ function killLiveSession(sess, why) {
   sess.dead = true;
   console.log('[live] 回收 convId=%s pid=%s 原因=%s', sess.convId, sess.child && sess.child.pid, why);
   if (sess.sessionId) liveTombstones.set(sess.convId, { sessionId: sess.sessionId, at: Date.now() });
-  try { sess.child.stdin.end(); } catch (_) {}          // 先优雅:让 claude 把 session 落盘
-  try { sess.child.kill('SIGTERM'); } catch (_) {}      // 再兜底
-  if (sess.cronCfgFile) { try { fs.rmSync(sess.cronCfgFile, { force: true }); } catch (_) {} sess.cronCfgFile = null; }
+  // SDK 侧的 kill 先关输入走优雅退出(stdin EOF + ~2s 宽限,让 claude 把 session 落盘),
+  //   再 abort 兜底 —— 与原来「先 stdin.end() 再 SIGTERM」的两段式一致。
+  try { sess.child.kill(); } catch (_) {}
   if (sess.idleTimer) { clearTimeout(sess.idleTimer); sess.idleTimer = null; }
   if (liveSessions.get(sess.convId) === sess) liveSessions.delete(sess.convId);
   refreshTrayMenu();
@@ -1263,10 +1042,7 @@ function retryMissingOrchestrateAgents(sess, resultEvt) {
     '不得只修改 Task 状态后继续等待，也不要向用户复述本段运行态校验。',
   ].join('\n');
   try {
-    sess.child.stdin.write(JSON.stringify({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: correction }] },
-    }) + '\n');
+    if (!sess.child.push(correction)) throw new Error('会话已关闭');
     console.warn('[live] 协奏检测到虚假等待，已要求 PM 补派缺失 Agent convId=%s attempt=%d',
       sess.convId, sess.orchRepairAttempts);
     return true;
@@ -1276,30 +1052,20 @@ function retryMissingOrchestrateAgents(sess, resultEvt) {
   }
 }
 
-// 起一个常驻会话进程。不发任何 prompt —— MCP 会在此刻就开始连（已实测）。
+// 起一个常驻会话。不发任何 prompt —— MCP 会在此刻就开始连（已实测）。
+//   SDK 的流式输入模式等价于原来的 `--input-format stream-json`：一个进程服务多轮。
+//   这里仍保留 sess.child 这个字段名，但它现在是 claude-sdk.js 给的会话句柄
+//   （.pid / .push() / .kill()）—— pid 仍是真实 claude 进程的，MCP watchdog 照常工作。
 function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }) {
-  const claudeExe = getUsableClaudeExe();
-  if (!claudeExe) throw new Error('Claude Code 安装不完整或原生组件不可执行，请重新安装');
-  const { args, cronCfgFile } = buildClaudeArgs({
-    validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp, persistent: true,
-  });
-  const child = spawn(claudeExe, args, {
-    cwd,
-    shell: false,
-    windowsHide: true,
-    env: { ...process.env },
-    stdio: ['pipe', 'pipe', 'pipe'],   // ← 关键:stdin 必须 pipe,逐轮喂 prompt
-  });
   const sess = {
-    convId, child, cronCfgFile,
+    convId, child: null,
     fingerprint: sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp }),
-    // 重新加载 MCP 时必须原样复用这些 spawn 参数。fingerprint 只适合比较，不能反解。
+    // 重新加载 MCP 时必须原样复用这些启动参数。fingerprint 只适合比较，不能反解。
     launchSpec: { convId, cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp },
     sessionId: sessionId || null,   // claude 的 session_id,首轮从 init 事件学到
     busy: false, dead: false,
     jobId: null, onEvent: null,
     mcpPids: null,
-    buf: '',
     spawnedAt: Date.now(),   // watchdog 拍快照的时间门槛基准(见 snapshotMcpChildren 坑③)
     lastUsedAt: Date.now(),
     idleTimer: null,
@@ -1309,77 +1075,62 @@ function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, mode
     asyncAgentTaskIds: new Map(),
     orchRepairAttempts: 0,
   };
-  console.log('[live] spawn convId=%s pid=%d cwd=%s model=%s resume=%s cronMcp=%s',
-    convId, child.pid, cwd, model || '(default)', sessionId || '(new)', !!attachCronMcp);
 
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => {
-    sess.buf += chunk;
-    let nl;
-    while ((nl = sess.buf.indexOf('\n')) >= 0) {
-      const line = sess.buf.slice(0, nl).trim();
-      sess.buf = sess.buf.slice(nl + 1);
-      if (!line) continue;
-      let evt;
-      try { evt = JSON.parse(line); } catch (_) { evt = { type: 'raw', text: line }; }
-      // 学 session_id:新会话首轮由 claude 分配,后续重启进程时用它 --resume 接回(已验证可行)
-      if (evt.type === 'system' && evt.subtype === 'init' && evt.session_id) sess.sessionId = evt.session_id;
-      if (sess.keepAliveForAsyncAgents) {
-        const transitions = liveAsyncAgentTransitions(evt);
-        for (const transition of transitions) {
-          const mappedId = transition.taskId ? sess.asyncAgentTaskIds.get(transition.taskId) : null;
-          const trackingId = mappedId
-            || transition.toolUseId
-            || (transition.taskId ? `task:${transition.taskId}` : null);
-          if (transition.kind === 'launched' && trackingId) {
-            sess.asyncAgentToolIds.add(trackingId);
-            if (transition.taskId) sess.asyncAgentTaskIds.set(transition.taskId, trackingId);
-            console.log('[live] 后台 Agent 已启动 convId=%s trackingId=%s taskId=%s pending=%d',
-              convId, trackingId, transition.taskId || '-', sess.asyncAgentToolIds.size);
-          } else if (transition.kind === 'finished' && trackingId) {
-            sess.asyncAgentToolIds.delete(trackingId);
-            if (transition.taskId) sess.asyncAgentTaskIds.delete(transition.taskId);
-            console.log('[live] 后台 Agent 已结束 convId=%s trackingId=%s taskId=%s status=%s pending=%d',
-              convId, trackingId, transition.taskId || '-', transition.status, sess.asyncAgentToolIds.size);
-          }
-        }
-      }
-      const done = evt.type === 'result';
-      if (sess.onEvent) {
-        try { sess.onEvent({ jobId: sess.jobId, ...evt }); }
-        catch (e) { console.error('[live] emit 失败: %s type=%s', e.message, evt && evt.type); }
-      }
-      // 关键:前端只认 job-done 收尾(result 只记状态,见 renderer/app.js 的事件分发)。
-      //   一次性 job 的 job-done 是进程 close 时发的 —— 但常驻进程【永远不 close】,
-      //   不在这里补发就是每轮永远转圈。
-      // result.origin 不能用于区分中间态/最终态：2.1.220 在消费完成通知后，
-      // PM 整轮输出的 result 仍带 origin.kind=task-notification。
-      // 唯一可靠的收尾依据是实际 Agent 调用 Set：仍有后台 Agent 就继续等；归零后，
-      // 若 PM 虚假声称还在等待则内部纠偏，否则本轮正常结束。
-      if (done) {
-        if (sess.keepAliveForAsyncAgents && sess.asyncAgentToolIds.size > 0) {
-          console.log('[live] 阶段性 result，继续等待后台 Agent convId=%s mode=%s pending=%d',
-            convId, sess.orchestrateMode ? 'orchestrate' : 'interactive',
-            sess.asyncAgentToolIds.size);
-        } else if (!retryMissingOrchestrateAgents(sess, evt)) {
-          finishTurn(sess, evt);
+  // 消息处理与原来逐行 JSON.parse stdout 的逻辑【完全一致】——
+  //   实测 SDK 吐出的消息结构与 CLI 的 stream-json 逐字段相同，所以这里不做任何翻译。
+  const onMessage = (evt) => {
+    // 学 session_id:新会话首轮由 claude 分配,后续重启进程时用它 resume 接回(已验证可行)
+    if (evt.type === 'system' && evt.subtype === 'init' && evt.session_id) sess.sessionId = evt.session_id;
+    if (sess.keepAliveForAsyncAgents) {
+      const transitions = liveAsyncAgentTransitions(evt);
+      for (const transition of transitions) {
+        const mappedId = transition.taskId ? sess.asyncAgentTaskIds.get(transition.taskId) : null;
+        const trackingId = mappedId
+          || transition.toolUseId
+          || (transition.taskId ? `task:${transition.taskId}` : null);
+        if (transition.kind === 'launched' && trackingId) {
+          sess.asyncAgentToolIds.add(trackingId);
+          if (transition.taskId) sess.asyncAgentTaskIds.set(transition.taskId, trackingId);
+          console.log('[live] 后台 Agent 已启动 convId=%s trackingId=%s taskId=%s pending=%d',
+            convId, trackingId, transition.taskId || '-', sess.asyncAgentToolIds.size);
+        } else if (transition.kind === 'finished' && trackingId) {
+          sess.asyncAgentToolIds.delete(trackingId);
+          if (transition.taskId) sess.asyncAgentTaskIds.delete(transition.taskId);
+          console.log('[live] 后台 Agent 已结束 convId=%s trackingId=%s taskId=%s status=%s pending=%d',
+            convId, trackingId, transition.taskId || '-', transition.status, sess.asyncAgentToolIds.size);
         }
       }
     }
-  });
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => {
-    console.warn('[live] stderr convId=%s: %s', convId, String(chunk).trimEnd().slice(0, 300));
-    if (sess.onEvent) { try { sess.onEvent({ jobId: sess.jobId, type: 'stderr', text: chunk }); } catch (_) {} }
-  });
-  const onGone = (code, err) => {
+    const done = evt.type === 'result';
+    if (sess.onEvent) {
+      try { sess.onEvent({ jobId: sess.jobId, ...evt }); }
+      catch (e) { console.error('[live] emit 失败: %s type=%s', e.message, evt && evt.type); }
+    }
+    // 关键:前端只认 job-done 收尾(result 只记状态,见 renderer/app.js 的事件分发)。
+    //   一次性 job 的 job-done 是进程结束时发的 —— 但常驻进程【永远不结束】,
+    //   不在这里补发就是每轮永远转圈。
+    // result.origin 不能用于区分中间态/最终态：2.1.220 在消费完成通知后，
+    // PM 整轮输出的 result 仍带 origin.kind=task-notification。
+    // 唯一可靠的收尾依据是实际 Agent 调用 Set：仍有后台 Agent 就继续等；归零后，
+    // 若 PM 虚假声称还在等待则内部纠偏，否则本轮正常结束。
+    if (done) {
+      if (sess.keepAliveForAsyncAgents && sess.asyncAgentToolIds.size > 0) {
+        console.log('[live] 阶段性 result，继续等待后台 Agent convId=%s mode=%s pending=%d',
+          convId, sess.orchestrateMode ? 'orchestrate' : 'interactive',
+          sess.asyncAgentToolIds.size);
+      } else if (!retryMissingOrchestrateAgents(sess, evt)) {
+        finishTurn(sess, evt);
+      }
+    }
+  };
+
+  const onExit = (code, err) => {
     const wasBusy = sess.busy;
     sess.dead = true;
     if (sess.sessionId) liveTombstones.set(convId, { sessionId: sess.sessionId, at: Date.now() });
     if (sess.idleTimer) { clearTimeout(sess.idleTimer); sess.idleTimer = null; }
-    if (sess.cronCfgFile) { try { fs.rmSync(sess.cronCfgFile, { force: true }); } catch (_) {} sess.cronCfgFile = null; }
     if (liveSessions.get(convId) === sess) liveSessions.delete(convId);
-    console.log('[live] close convId=%s pid=%d exitCode=%s busy=%s', convId, child.pid, code, wasBusy);
+    console.log('[live] close convId=%s pid=%s exitCode=%s busy=%s', convId, sess.child && sess.child.pid, code, wasBusy);
     // 进程在一轮跑到一半时死掉 → 必须给前端收尾,否则 UI 永远转圈
     if (wasBusy && sess.onEvent) {
       try { sess.onEvent({ jobId: sess.jobId, type: 'job-done', exitCode: code == null ? -1 : code, error: err }); } catch (_) {}
@@ -1387,8 +1138,16 @@ function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, mode
     sess.busy = false; sess.onEvent = null;
     refreshTrayMenu();
   };
-  child.on('close', (code) => onGone(code, undefined));
-  child.on('error', (e) => { console.error('[live] error convId=%s: %s', convId, e.message); onGone(-1, e.message); });
+
+  sess.child = claudeSdk.createLiveSession({
+    cwd,
+    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }),
+    onMessage,
+    onExit,
+  });
+
+  console.log('[live] spawn convId=%s cwd=%s model=%s resume=%s cronMcp=%s',
+    convId, cwd, model || '(default)', sessionId || '(new)', !!attachCronMcp);
 
   liveSessions.set(convId, sess);
   touchIdleTimer(sess);
@@ -1430,7 +1189,7 @@ function finishTurn(sess, resultEvt) {
 // 预启动:对话打开/切换时调用。此刻起进程 → MCP 在用户打字的几秒里连好 → 首轮 init 也是零延迟。
 //   这才是原 warmUpFeishuMcp 想做却做不到的事:焐的是真正会服务这一轮的那个进程。
 function prespawnSession(opts) {
-  if (!CLAUDE_EXE || !opts || !opts.convId) return null;
+  if (!opts || !opts.convId) return null;
   const exist = liveSessions.get(opts.convId);
   if (exist && !exist.dead) return exist;    // 已有:什么都不用做
   if (!evictIfNeeded()) return null;         // 位置全被占着(都在跑)→ 放弃预启动,不影响正确性
@@ -1496,15 +1255,14 @@ function runLiveTurn({ convId, prompt, cwd, validWorkingDir, agentProjectRoot, m
   sess.lastUsedAt = Date.now();
   touchIdleTimer(sess);
   refreshTrayMenu();
-  const msg = { type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }] } };
   try {
-    sess.child.stdin.write(JSON.stringify(msg) + '\n');
+    if (!sess.child.push(prompt)) throw new Error('会话已关闭');
   } catch (e) {
-    console.error('[live] 写 stdin 失败: %s', e.message);
-    killLiveSession(sess, 'stdin 写入失败');
+    console.error('[live] 投递本轮输入失败: %s', e.message);
+    killLiveSession(sess, '输入投递失败');
     return null;
   }
-  console.log('[live] turn convId=%s jobId=%s pid=%d 复用常驻进程 promptLen=%d',
+  console.log('[live] turn convId=%s jobId=%s pid=%s 复用常驻进程 promptLen=%d',
     convId, jobId, sess.child.pid, (prompt || '').length);
   return { jobId, sessionId: sess.sessionId || null };
 }
@@ -1526,10 +1284,6 @@ ipcMain.handle('claude:run', async (event, { prompt, sessionId, mode, files, mod
   if (running >= MAX_PARALLEL_JOBS) {
     console.warn('[claude:run] 并行上限,已拒绝。当前任务数=%d(一次性%d + 常驻在跑%d)', running, jobs.size, busyLiveCount());
     return { error: `并行任务已达上限（${MAX_PARALLEL_JOBS} 个），请等待其中一个完成后再发起。` };
-  }
-  if (!getUsableClaudeExe()) {
-    console.error('[claude:run] claude.exe 未找到,无法启动');
-    return { error: 'Claude Code 安装不完整或原生组件不可执行，请在设置中重新安装。' };
   }
   // mode='agent':让 Claude 用用户在 ~/.claude/agents 里安装的指定子智能体
   // mode='orchestrate':多 Agent 协同 —— 让主 Claude 当 PM,自主拆解并用 Task(实际工具名 Agent)委派给多个子智能体
@@ -1731,7 +1485,6 @@ ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, workingD
   let resetCommitted = false;
   try {
     if (!convId) return { ok: false, message: '请先打开一个已有对话' };
-    if (!getUsableClaudeExe()) return { ok: false, message: 'Claude Code 安装不完整或原生组件不可执行' };
 
     const sess = liveSessions.get(convId);
     if (sess && !sess.dead) {
@@ -1790,7 +1543,7 @@ ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, workingD
 //   init 0.04s 返回、工具全 connected)。失败完全无害:下面 claude:run 会照常自己 spawn。
 ipcMain.handle('claude:prespawn', async (_e, { convId, sessionId, mode, model, agentName, workingDir }) => {
   try {
-    if (!convId || !CLAUDE_EXE) return { ok: false };
+    if (!convId) return { ok: false };
     if (mode === 'agent' || mode === 'orchestrate') return { ok: false, skipped: 'agent 模式的 prompt 包装依赖本轮内容,不预启动' };
     let cwd = os.homedir();
     let validWorkingDir = null;
@@ -1894,194 +1647,48 @@ function truncateByWidth(str, maxW = 24) {
 }
 
 // IPC: 用最快档位给对话起一个简短标题(历史侧边栏用,豆包式摘要)
-//   独立的一次性 -p 调用,不走流式、不占用 jobs 配额、不触发 agent。
+//   独立的一次性调用,不走流式、不占用 jobs 配额、不触发 agent。
 ipcMain.handle('claude:title', async (_e, { text }) => {
-  const claudeExe = getUsableClaudeExe();
-  if (!claudeExe || !text) return { title: '' };
-  return new Promise((resolve) => {
-    const prompt =
-      '为下面这段对话生成一个简短标题。要求:概括核心主题、' +
-      '长度控制在约 13 个汉字以内(英文/数字按半个汉字宽度算,即纯英文标题可到约 26 个字符);' +
-      '出现的英文单词或型号必须保持完整、不要在单词中间断开;' +
-      '不要标点/引号/书名号/序号、只输出标题本身、不要任何解释。\n\n' +
-      String(text).slice(0, 1200);
-    const args = [
-      '-p', prompt,
-      '--model', 'haiku',                 // 最快档位,便宜且快
-      '--setting-sources', 'user',        // 同 claude:run:headless 默认不加载 user settings,key 在那里
-      '--permission-mode', 'bypassPermissions',
-    ];
-    let child;
-    try {
-      child = spawn(claudeExe, args, {
-        cwd: os.homedir(),                // 纯聊天目录,绝不触发任何 Agent
-        shell: false,
-        windowsHide: true,
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      console.error('[claude:title] spawn 失败: %s', e.message);
-      return resolve({ title: '' });
-    }
-    let out = '';
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (_) {} }, 30000);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (c) => { out += c; });
-    child.on('close', () => {
-      clearTimeout(timer);
-      // 取第一行非空文本,去掉「标题:」前缀、引号/书名号,按视觉宽度截断兜底(不切坏英文单词)
-      //   上限 26 视觉宽 = 13 个汉字(纯英文则约 26 字符);与下方提示词「约 13 个汉字」保持一致。
-      //   侧栏静止态标题可用宽 ~187px,13 汉字(~176px)放得下,故只抬数据上限、CSS 列宽不动。
-      let t = (out.split('\n').map((s) => s.trim()).filter(Boolean)[0] || '');
-      t = t.replace(/^标题\s*[:：]\s*/, '').replace(/["'「」『』《》]/g, '').trim();
-      t = truncateByWidth(t, TITLE_MAX_W);
-      resolve({ title: t });
-    });
-    child.on('error', (e) => { clearTimeout(timer); console.error('[claude:title] 子进程出错: %s', e.message); resolve({ title: '' }); });
+  if (!text) return { title: '' };
+  const prompt =
+    '为下面这段对话生成一个简短标题。要求:概括核心主题、' +
+    '长度控制在约 13 个汉字以内(英文/数字按半个汉字宽度算,即纯英文标题可到约 26 个字符);' +
+    '出现的英文单词或型号必须保持完整、不要在单词中间断开;' +
+    '不要标点/引号/书名号/序号、只输出标题本身、不要任何解释。\n\n' +
+    String(text).slice(0, 1200);
+  const out = await claudeSdk.runText({
+    prompt,
+    cwd: os.homedir(),          // 纯聊天目录,绝不触发任何 Agent
+    model: 'haiku',             // 最快档位,便宜且快
+    timeoutMs: 30000,
   });
+  // 取第一行非空文本,去掉「标题:」前缀、引号/书名号,按视觉宽度截断兜底(不切坏英文单词)
+  //   上限 26 视觉宽 = 13 个汉字(纯英文则约 26 字符);与上方提示词「约 13 个汉字」保持一致。
+  //   侧栏静止态标题可用宽 ~187px,13 汉字(~176px)放得下,故只抬数据上限、CSS 列宽不动。
+  let t = (String(out).split('\n').map((s) => s.trim()).filter(Boolean)[0] || '');
+  t = t.replace(/^标题\s*[:：]\s*/, '').replace(/["'「」『』《》]/g, '').trim();
+  return { title: truncateByWidth(t, TITLE_MAX_W) };
 });
 
 
-// IPC: 检查 Claude Code 是否有新版本。
-//   联网 `npm view <pkg> version` 拿镜像源上的最新版,与本地 `claude --version` 对比。
-//   返回 { current, latest, hasUpdate, error }。任何失败都走 error,不抛异常给 renderer。
+// IPC: 查询 Claude Code 运行时版本。
+//   运行时现在随 Relay 内置（SDK 平台包），版本由 package.json 锁定、跟着 Relay 一起发版，
+//   用户不再能（也不需要）单独升级它 —— 这换来的是版本可控：不会因为用户或别的程序
+//   升级了全局 CLI 而让 Relay 的行为在某天突然变掉。
+//   保留这个 IPC 名字是为了不动 preload/renderer 的调用方；hasUpdate 恒为 false。
 ipcMain.handle('claude:checkUpdate', async () => {
   const current = await getInstalledClaudeVersion();
-  if (!CLAUDE_EXE) return { current: '', latest: '', hasUpdate: false, error: '未检测到 Claude Code，请先安装' };
-
-  const latest = await new Promise((resolve) => {
-    let out = '';
-    let err = '';
-    let child;
-    try {
-      // 用 cmd 调 npm(Windows 上 npm 是 .cmd,不能直接 spawn);--registry 命令级覆盖,不污染用户全局配置
-      child = spawn('cmd', ['/c', 'npm', 'view', CLAUDE_PKG, 'version', `--registry=${PUBLIC_NPM_REGISTRY}`], {
-        cwd: os.homedir(),
-        shell: false,
-        windowsHide: true,
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      console.error('[claude:checkUpdate] npm view spawn 失败: %s', e.message);
-      return resolve('');
-    }
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (_) {} }, 30000);
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    child.on('close', () => {
-      clearTimeout(timer);
-      const v = parseVersion(out);
-      if (!v && err.trim()) console.warn('[claude:checkUpdate] npm view 失败: %s', err.trim().slice(0, 200));
-      resolve(v || '');
-    });
-    child.on('error', (e) => { clearTimeout(timer); console.error('[claude:checkUpdate] 子进程出错: %s', e.message); resolve(''); });
-  });
-
-  if (!latest) return { current, latest: '', hasUpdate: false, error: '无法获取最新版本(请检查网络)' };
-  const hasUpdate = current ? compareVersions(latest, current) > 0 : true;
-  return { current, latest, hasUpdate, error: '' };
+  return { current, latest: current, hasUpdate: false, error: '', bundled: true };
 });
 
-// IPC: 一键更新 Claude Code 到最新版。
-//   复用安装脚本的方式:npm install -g --prefix <免管理员前缀> --registry <镜像> <pkg>@latest。
-//   完成后重新解析 CLAUDE_EXE 与版本号(刚更新的 shim/版本此时才生效)。
-//   返回 { ok, version, error }。串行防并发(updatingClaude 标志位)。
-let updatingClaude = false;
-ipcMain.handle('claude:update', async () => {
-  if (updatingClaude) return { ok: false, error: '更新正在进行中' };
-  updatingClaude = true;
-  const previousExe = isUsableClaudeExe(CLAUDE_EXE) ? CLAUDE_EXE : null;
-  let backupExe = null;
-  try {
-    // npm 会先移走旧包再下载 optional native binary。后者即使下载超时，npm 仍可能退出 0，
-    // 因此更新前给真实 EXE 留一个硬链接备份，验证失败时可原样恢复。
-    if (previousExe) {
-      backupExe = path.join(app.getPath('temp'), `relay-claude-backup-${process.pid}-${Date.now()}.exe`);
-      try { fs.linkSync(previousExe, backupExe); }
-      catch (_) {
-        try { fs.copyFileSync(previousExe, backupExe); }
-        catch (e) { backupExe = null; console.warn('[claude:update] 旧版本备份失败: %s', e.message); }
-      }
-    }
-    const result = await new Promise((resolve) => {
-      let out = '';
-      let err = '';
-      let child;
-      try {
-        child = spawn('cmd', [
-          '/c', 'npm', 'install', '-g',
-          '--prefix', NPM_GLOBAL_PREFIX,
-          `--registry=${PUBLIC_NPM_REGISTRY}`,
-          `${CLAUDE_PKG}@latest`,
-        ], {
-          cwd: os.homedir(),
-          shell: false,
-          windowsHide: true,
-          env: { ...process.env },
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-      } catch (e) {
-        console.error('[claude:update] npm install spawn 失败: %s', e.message);
-        return resolve({ ok: false, error: `无法启动 npm: ${e.message}` });
-      }
-      // npm 安装可能较慢(下载 + 解包),给 5 分钟
-      const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (_) {} }, 300000);
-      child.stdout.setEncoding('utf8');
-      child.stderr.setEncoding('utf8');
-      child.stdout.on('data', (d) => { out += d; });
-      child.stderr.on('data', (d) => { err += d; });
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) { console.log('[claude:update] 更新成功'); return resolve({ ok: true }); }
-        // npm 把详细原因同时写 stdout/stderr,取末尾若干字符作为提示
-        let detail = ((err || '') + '\n' + (out || '')).trim();
-        if (detail.length > 400) detail = detail.slice(-400);
-        if (!detail) detail = `npm 退出码 ${code}`;
-        console.error('[claude:update] 更新失败 code=%d: %s', code, detail.slice(0, 300));
-        resolve({ ok: false, error: detail });
-      });
-      child.on('error', (e) => { clearTimeout(timer); console.error('[claude:update] 子进程出错: %s', e.message); resolve({ ok: false, error: e.message }); });
-    });
-
-    const restorePrevious = () => {
-      if (!previousExe || !backupExe) return false;
-      try {
-        fs.copyFileSync(backupExe, previousExe);
-        CLAUDE_EXE = previousExe;
-        console.warn('[claude:update] 新版本不可执行，已恢复更新前的 Claude Code');
-        return true;
-      } catch (e) {
-        console.error('[claude:update] 恢复旧版本失败: %s', e.message);
-        return false;
-      }
-    };
-
-    if (!result.ok) {
-      restorePrevious();
-      return result;
-    }
-    // npm 退出 0 不代表原生包安装成功；必须同时通过 PE 文件校验和 --version 实跑。
-    CLAUDE_EXE = findClaudeExe();
-    const version = await getInstalledClaudeVersion();
-    if (!CLAUDE_EXE || !isUsableClaudeExe(CLAUDE_EXE) || !version) {
-      const restored = restorePrevious();
-      return {
-        ok: false,
-        error: restored
-          ? '新版 Claude Code 的 Windows 原生组件下载失败，已自动恢复更新前版本'
-          : '新版 Claude Code 安装不完整（原生组件不可执行），请重新安装',
-      };
-    }
-    return { ok: true, version };
-  } finally {
-    if (backupExe) { try { fs.rmSync(backupExe, { force: true }); } catch (_) {} }
-    updatingClaude = false;
-  }
-});
+// IPC: 保留接口以兼容旧的 renderer 调用，但内置运行时无法单独更新。
+//   要升级 Claude Code 版本请升级 Relay 本身（设置 → 关于 → Relay）。
+ipcMain.handle('claude:update', async () => ({
+  ok: false,
+  bundled: true,
+  version: CLAUDE_RUNTIME_VERSION,
+  error: 'Claude Code 运行时已内置于 Relay，随 Relay 更新一同升级，无需单独更新。',
+}));
 
 // ─────────────────────────────────────────
 // Relay 应用自更新(electron-updater,见 updater.js)
@@ -3601,9 +3208,7 @@ function cleanSkillPresentationText(value, maxLength) {
 // 用快速模型为新安装的 Skill 生成 Relay 专属中文展示元数据。
 // 文件位置沿用 Codex 的 agents/openai.yaml 约定，改用 agents/relay.yaml；
 // 它只负责界面展示，Claude Code 实际调用仍使用 SKILL.md frontmatter.name。
-function generateSkillPresentationWithClaude(skillName, callName, description, skillBody) {
-  const claudeExe = getUsableClaudeExe();
-  if (!claudeExe) return Promise.resolve(null);
+async function generateSkillPresentationWithClaude(skillName, callName, description, skillBody) {
   const source = String(skillBody || '').slice(0, 7000);
   const prompt = [
     '请根据下面的 Skill 定义，为桌面 AI 助手生成中文展示元数据。',
@@ -3621,74 +3226,30 @@ function generateSkillPresentationWithClaude(skillName, callName, description, s
     'SKILL.md：',
     source,
   ].join('\n');
-  const args = [
-    '-p', prompt,
-    '--model', 'haiku',
-    '--setting-sources', 'user',
-    '--permission-mode', 'bypassPermissions',
-    '--tools', '',                         // 只做文本归纳，禁止被导入内容诱导调用任何工具
-    '--disallowed-tools', 'AskUserQuestion',
-  ];
-  return new Promise((resolve) => {
-    let child;
-    let settled = false;
-    let stdout = '';
-    let stderr = '';
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    try {
-      child = spawn(claudeExe, args, {
-        cwd: os.homedir(),
-        shell: false,
-        windowsHide: true,
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      console.warn('[skill-meta] Claude 启动失败: %s', e.message);
-      return finish(null);
-    }
-    const timer = setTimeout(() => {
-      console.warn('[skill-meta] 中文元数据生成超时: %s', skillName);
-      try { child.kill('SIGTERM'); } catch (_) {}
-      finish(null);
-    }, 30000);
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      console.warn('[skill-meta] Claude 子进程错误: %s', e.message);
-      finish(null);
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (settled) return;
-      if (code !== 0) {
-        console.warn('[skill-meta] 生成失败 code=%s: %s', code, stderr.trim().slice(0, 300));
-        return finish(null);
-      }
-      try {
-        const cleaned = stdout.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-        const start = cleaned.indexOf('{');
-        const end = cleaned.lastIndexOf('}');
-        if (start < 0 || end <= start) return finish(null);
-        const data = JSON.parse(cleaned.slice(start, end + 1));
-        const displayName = cleanSkillPresentationText(data.display_name, 40);
-        const summary = cleanSkillPresentationText(data.short_description, 120);
-        const hasChinese = (value) => /[\u3400-\u9fff]/.test(value);
-        if (!displayName || !summary || !hasChinese(displayName) || !hasChinese(summary)) return finish(null);
-        finish({ displayName, summary });
-      } catch (e) {
-        console.warn('[skill-meta] 返回内容无法解析: %s', e.message);
-        finish(null);
-      }
-    });
+
+  const out = await claudeSdk.runText({
+    prompt,
+    cwd: os.homedir(),
+    model: 'haiku',
+    timeoutMs: 30000,
+    tools: [],           // 只做文本归纳，禁止被导入内容诱导调用任何工具
   });
+  if (!out) { console.warn('[skill-meta] 中文元数据生成无输出: %s', skillName); return null; }
+  try {
+    const cleaned = out.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    const data = JSON.parse(cleaned.slice(start, end + 1));
+    const displayName = cleanSkillPresentationText(data.display_name, 40);
+    const summary = cleanSkillPresentationText(data.short_description, 120);
+    const hasChinese = (value) => /[\u3400-\u9fff]/.test(value);
+    if (!displayName || !summary || !hasChinese(displayName) || !hasChinese(summary)) return null;
+    return { displayName, summary };
+  } catch (e) {
+    console.warn('[skill-meta] 返回内容无法解析: %s', e.message);
+    return null;
+  }
 }
 
 function writeRelaySkillPresentation(skillDir, presentation) {
@@ -4347,8 +3908,6 @@ let reviewInflight = false;   // 并发护栏:同时只允许一个 review 在�
 // 后台跑一次技能 review。fire-and-forget;不串聊天 UI 事件、不计入 MAX_PARALLEL_JOBS。
 function runSkillReviewJob({ conversationText, workingDir } = {}) {
   if (reviewInflight) { console.log('[skill-review] 上一次 review 仍在跑,跳过本次'); return; }
-  const claudeExe = getUsableClaudeExe();
-  if (!claudeExe) { console.log('[skill-review] 找不到可执行的 claude.exe,跳过'); return; }
   const text = String(conversationText || '').trim();
   if (!text) return;
 
@@ -4357,38 +3916,19 @@ function runSkillReviewJob({ conversationText, workingDir } = {}) {
   // 跑前快照现有技能名(用于完成后 diff 出新生成的技能 → 标 createdBy:agent)
   const beforeSet = new Set(listSkillNames().map((s) => s.name));
 
-  const prompt = SKILL_REVIEW_PROMPT + text;
-  const args = [
-    '-p', prompt,
-    '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
-    '--setting-sources', 'user',
-    '--permission-mode', 'bypassPermissions',   // 后台无人值守,自动放行(只授权了技能目录)
-    '--disallowed-tools', 'AskUserQuestion',
-    '--add-dir', SKILLS_DIR,                     // 仅授权技能目录写权限(不挂记忆/工作目录/cron)
-    '--model', 'haiku',                          // review 走 haiku 档(用户选定;出问题再调)
-  ];
   // review 在技能目录里跑(cwd),工作目录无关紧要;给个稳定 cwd 即可
   const cwd = (workingDir && fs.existsSync(workingDir)) ? workingDir : SKILLS_DIR;
 
-  let child;
-  try {
-    child = spawn(claudeExe, args, { cwd, shell: false, windowsHide: true, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) { console.error('[skill-review] spawn 失败:', e.message); reviewInflight = false; return; }
-
-  // 静默消费输出(不串聊天 UI);只在结束时看有没有新技能
-  child.stdout.on('data', () => {});
-  let stderrBuf = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (c) => { stderrBuf += c; });
-
-  // 90s 硬超时,防 mimo 卡死
-  const killer = setTimeout(() => { try { child.kill('SIGTERM'); } catch (_) {} }, 90000);
-
-  let finished = false;   // 防 error+close 双触发导致重复通知
-  const finish = () => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(killer);
+  // 输出静默消费(不串聊天 UI);只在结束时看有没有新技能。
+  //   仅授权技能目录写权限(不挂记忆/工作目录/cron);90s 硬超时防模型卡死。
+  claudeSdk.runText({
+    prompt: SKILL_REVIEW_PROMPT + text,
+    cwd,
+    model: 'haiku',                       // review 走 haiku 档(用户选定;出问题再调)
+    permissionMode: 'bypassPermissions',  // 后台无人值守,自动放行(只授权了技能目录)
+    additionalDirectories: [SKILLS_DIR],
+    timeoutMs: 90000,
+  }).then(() => {
     reviewInflight = false;
     // diff:跑后新出现的技能 = 自动生成的
     let created = [];
@@ -4417,11 +3957,12 @@ function runSkillReviewJob({ conversationText, workingDir } = {}) {
       } catch (e) { console.warn('[skill-review] 通知显示失败: %s', e.message); }
       console.log('[skill-review] 新增技能:', created.join(', '));
     } else {
-      console.log('[skill-review] 本次无新增技能' + (stderrBuf.trim() ? '(stderr: ' + stderrBuf.trim().slice(0, 200) + ')' : ''));
+      console.log('[skill-review] 本次无新增技能');
     }
-  };
-  child.on('close', finish);
-  child.on('error', (e) => { console.error('[skill-review] 子进程出错:', e.message); finish(); });
+  }).catch((e) => {
+    reviewInflight = false;
+    console.error('[skill-review] 执行出错:', e && e.message);
+  });
 }
 
 // 读/写 二期配置(总开关 + 频率)
@@ -4840,8 +4381,7 @@ function getInstallerResourcesDir() {
 }
 
 ipcMain.handle('installer:probe', async () => {
-  await ensureClaudeExe();   // 探测走完整路径(含 where 兜底)再报,别让向导拿到半成品的 CLAUDE_EXE
-  const claudeOk = !!CLAUDE_EXE;
+  const claudeOk = true;   // 运行时随 Relay 内置,不需要探测也不会缺
   let settingsOk = false;
   let existingKey = '';
   try {
@@ -4903,9 +4443,7 @@ ipcMain.handle('installer:run', async (event, { apiKey }) => {
     installerChild.on('close', (code) => {
       installerChild = null;
       if (stdoutBuf.trim()) event.sender.send('installer:log', { stream: 'stdout', text: stdoutBuf });
-      // 装完重新探测 claude.exe(刚装好的此时才出现),更新缓存供后续 claude:run 使用
-      CLAUDE_EXE = findClaudeExe();
-      resolve({ exitCode: code, claudeFound: !!CLAUDE_EXE });
+      resolve({ exitCode: code, claudeFound: true });   // 运行时内置,不需要装也不会找不到
     });
     installerChild.on('error', (err) => {
       installerChild = null;
@@ -4923,38 +4461,15 @@ ipcMain.handle('installer:abort', () => {
   return { aborted: false };
 });
 
-// IPC: 探测环境(claude 命令是否在,Agent 目录是否存在)
-ipcMain.handle('env:probe', async () => {
-  const claudeExe = getUsableClaudeExe();
-  const result = {
-    agentDir: AGENTS_DIR,
-    agentDirExists: fs.existsSync(AGENTS_DIR),
-    claudeExe,
-    claudeAvailable: false,
-    claudeVersion: null,
-  };
-  if (!claudeExe) return result;
-  await new Promise((res) => {
-    let p;
-    try {
-      p = spawn(claudeExe, ['--version'], { shell: false, windowsHide: true });
-    } catch (e) {
-      console.warn('[env:probe] claude spawn 失败: %s', e.message);
-      return res();
-    }
-    let out = '';
-    p.stdout.on('data', (d) => (out += d));
-    p.on('close', () => {
-      if (out.trim()) {
-        result.claudeAvailable = true;
-        result.claudeVersion = out.trim();
-      }
-      res();
-    });
-    p.on('error', () => res());
-  });
-  return result;
-});
+// IPC: 探测环境(Agent 目录是否存在;运行时随 SDK 内置故恒可用)
+ipcMain.handle('env:probe', async () => ({
+  agentDir: AGENTS_DIR,
+  agentDirExists: fs.existsSync(AGENTS_DIR),
+  claudeExe: claudeSdk.bundledExecutable(),
+  claudeAvailable: true,
+  claudeVersion: CLAUDE_RUNTIME_VERSION,
+  bundled: true,
+}));
 
 // ─────────────────────────────────────────
 // IPC: 定时任务（scheduler.js）
@@ -5082,8 +4597,6 @@ app.whenReady().then(() => {
     });
   } catch (e) { console.error('[updater] 启动失败:', e.message); }
   // 技能用量不再在启动阶段预热；首次打开技能页时先显示持久化快照，再由 Worker 增量校准。
-  // 注:claude.exe 的 where 兜底已移入 decideStartup() 前的 ensureClaudeExe()(判断前 await),
-  //   不再用启动后 setTimeout 补探测——那个时序坑(兜底晚于判断)正是 1.4.0「每次弹向导」的根因。
   // 全局快捷键唤起迷你输入框(Alt+Space)。注册失败不影响主功能,托盘菜单仍可唤起。
   registerMiniShortcut();
 });
