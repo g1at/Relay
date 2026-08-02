@@ -4447,12 +4447,11 @@ async function loadSettingsForm(activeCat = 'personalize') {
      <section class="set-cat" data-cat="about">
       <div class="set-section-head">应用</div>
       <div class="set-panel">
-        <div class="set-row clickable" id="set-checkUpdate">
+        <div class="set-row" id="set-checkUpdate">
           <div class="set-icon ico-update">🔄</div>
-          <div class="set-label" id="set-checkUpdateLabel">Claude Code</div>
-          <div class="row-status" id="set-updateNote"></div>
+          <div class="set-label">Claude Code</div>
+          <div class="row-status">已内置，随 Relay 一同更新</div>
           <div class="row-status" id="set-claudeVer">${escapeHtml(claudeVer)}</div>
-          <div class="row-chev">›</div>
         </div>
         <div class="set-row clickable" id="set-relayUpdate">
           <div class="set-icon ico-app">🚀</div>
@@ -4787,81 +4786,8 @@ function bindSettingsEvents(s) {
     btn.addEventListener('click', () => showDataPanel(btn.dataset.panel));
   });
 
-  // 关于:Claude Code 检查更新 / 一键更新
-  bindClaudeUpdate();
   // 关于:Relay 应用自更新状态(自动静默流,此处展示 + 手动检查 + 重启安装)
   bindRelayUpdate();
-}
-
-// 「检查更新」按钮:先联网查最新版并对比。
-//   · 已是最新 → 提示"已是最新版本"
-//   · 有新版   → 按钮变"更新到 x.y.z",再点一次执行一键更新
-//   全程把状态写到 #set-updateNote,按钮在请求中禁用,避免并发。
-function bindClaudeUpdate() {
-  const row   = $('set-checkUpdate');         // 整行可点击
-  const label = $('set-checkUpdateLabel');    // 行内动作文字(检查更新/检查中…/更新到 x.y.z)
-  const note  = $('set-updateNote');          // 行内右侧状态文字
-  const ver   = $('set-claudeVer');
-  if (!row || !label || !note) return;
-
-  let busy = false;                            // 进行中:禁止再次点击(div 无 disabled,用标志位+样式)
-  const setBusy = (b) => { busy = b; row.classList.toggle('disabled', b); };
-  // 行标题保持稳定，检查/更新进度统一放到右侧状态区，避免整行文字来回跳动。
-  const setLabel = () => { label.textContent = 'Claude Code'; };
-  const setNote = (text, kind = '') => {
-    note.textContent = text || '';
-    note.className = 'row-status' + (kind ? ' note-' + kind : '');
-  };
-
-  // 执行一键更新(已确认有新版后调用)
-  const doUpdate = async (latest) => {
-    if (busy) return;
-    setBusy(true);
-    setLabel('更新中…');
-    setNote(`正在更新到 ${latest}…`, 'accent');
-    try {
-      const r = await window.api.updateClaude();
-      if (r && r.ok) {
-        const v = r.version || latest;
-        if (ver) ver.textContent = v;
-        if (envCache) envCache.claudeVersion = v;   // 同步缓存,关弹窗再开仍显示新版本
-        setLabel('检查更新'); setNote(`✓ 已更新到 ${v}`, 'ok');
-        row.onclick = onCheck;                       // 复位回"检查更新"
-      } else {
-        setLabel('重试更新'); setNote('✗ 更新失败：' + ((r && r.error) || '未知错误'), 'err');
-        row.onclick = () => doUpdate(latest);
-      }
-    } catch (e) {
-      setLabel('重试更新'); setNote('✗ 更新失败：' + (e && e.message || e), 'err');
-      row.onclick = () => doUpdate(latest);
-    } finally { setBusy(false); }
-  };
-
-  // 检查更新
-  const onCheck = async () => {
-    if (busy) return;
-    setBusy(true);
-    setLabel('检查中…'); setNote('正在检查最新版本…');
-    try {
-      const r = await window.api.checkClaudeUpdate();
-      if (!r || r.error) {
-        setLabel('检查更新'); setNote('✗ ' + ((r && r.error) || '检查失败'), 'err');
-        return;
-      }
-      if (r.hasUpdate) {
-        setLabel(`更新到 ${r.latest}`); setNote(`发现新版本（当前 ${r.current || '未知'}）`, 'accent');
-        row.onclick = () => doUpdate(r.latest);
-      } else {
-        setLabel('检查更新'); setNote(`已是最新版本`, 'ok');
-        row.onclick = onCheck;
-      }
-    } catch (e) {
-      setLabel('检查更新'); setNote('✗ 检查失败：' + (e && e.message || e), 'err');
-    } finally { setBusy(false); }
-  };
-
-  // 整行点击触发(各 handler 内部已有 busy 守卫)
-  row.onclick = onCheck;
 }
 
 // ─────────────────────────────────────────

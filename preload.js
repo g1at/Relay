@@ -37,11 +37,6 @@ contextBridge.exposeInMainWorld('api', {
   // 探测环境
   probeEnv: () => ipcRenderer.invoke('env:probe'),
 
-  // 检查 Claude Code 是否有新版本(联网对比 npm 最新版)
-  checkClaudeUpdate: () => ipcRenderer.invoke('claude:checkUpdate'),
-  // 一键更新 Claude Code 到最新版
-  updateClaude: () => ipcRenderer.invoke('claude:update'),
-
   // Relay 应用自更新(见 updater.js)。主进程只自动「检查」,
   // 下载与安装都由这里的 download / quitAndInstall 显式触发。
   relayUpdate: {

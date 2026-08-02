@@ -316,12 +316,6 @@ const MAX_PARALLEL_JOBS = 3;   // 并发上限:每个 claude.exe 都吃内存/CP
 //  也随「运行时内置」一起删了：它们只服务于「用 npm 检查并升级用户全局的 claude-code」，
 //  而运行时现在随 Relay 分发、版本由 package.json 锁定，那条升级路径已不存在。)
 
-// 当前 Claude Code 运行时版本。运行时随 SDK 内置,版本在打包时就定死了,
-//   不再需要 spawn 一次 `claude --version` 去问 —— 直接读 SDK 声明的 claudeCodeVersion。
-function getInstalledClaudeVersion() {
-  return Promise.resolve(CLAUDE_RUNTIME_VERSION || '');
-}
-
 // 飞书/Lark 文档域名(命中即认为本轮需要飞书 MCP)
 const FEISHU_URL_RE = /https?:\/\/[^\s]*\b(feishu\.cn|larksuite\.com|larkoffice\.com|feishu\.net)\b/i;
 function promptNeedsFeishu(text) {
@@ -1670,24 +1664,12 @@ ipcMain.handle('claude:title', async (_e, { text }) => {
 });
 
 
-// IPC: 查询 Claude Code 运行时版本。
-//   运行时现在随 Relay 内置（SDK 平台包），版本由 package.json 锁定、跟着 Relay 一起发版，
+// Claude Code 运行时的「检查更新 / 一键更新」两个 IPC 已随内置运行时一起去掉：
+//   运行时现在是 SDK 的平台包，版本由 package.json 锁定、跟着 Relay 一起发版，
 //   用户不再能（也不需要）单独升级它 —— 这换来的是版本可控：不会因为用户或别的程序
 //   升级了全局 CLI 而让 Relay 的行为在某天突然变掉。
-//   保留这个 IPC 名字是为了不动 preload/renderer 的调用方；hasUpdate 恒为 false。
-ipcMain.handle('claude:checkUpdate', async () => {
-  const current = await getInstalledClaudeVersion();
-  return { current, latest: current, hasUpdate: false, error: '', bundled: true };
-});
-
-// IPC: 保留接口以兼容旧的 renderer 调用，但内置运行时无法单独更新。
-//   要升级 Claude Code 版本请升级 Relay 本身（设置 → 关于 → Relay）。
-ipcMain.handle('claude:update', async () => ({
-  ok: false,
-  bundled: true,
-  version: CLAUDE_RUNTIME_VERSION,
-  error: 'Claude Code 运行时已内置于 Relay，随 Relay 更新一同升级，无需单独更新。',
-}));
+//   设置页对应的行也从「可点击检查更新」改成了纯展示（见 renderer/app.js）。
+//   运行时版本仍由 env:probe 报告。
 
 // ─────────────────────────────────────────
 // Relay 应用自更新(electron-updater,见 updater.js)
