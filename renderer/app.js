@@ -1225,36 +1225,118 @@ async function finishRun(jobId, doneEvt) {
   // 仅当首轮【成功】时才用快模型生成标题(否则会把"Not logged in"之类报错当成标题)
   if (!failed && conv && (conv.turns || []).length === 1) maybeGenerateTitle(conv);
 
-  // Curator 二期:每 N 轮后台自动提炼技能(fire-and-forget,不阻塞 UI)。
-  //   排除:失败轮 / 创作会话 / 定时任务产出的会话。节奏与开关由 main 侧配置,这里按轮数触发。
+  // Curator 二期:纠正/重试/工具失败恢复等强信号立即提炼，每 N 轮兜底(fire-and-forget,不阻塞 UI)。
+  //   排除:失败轮 / 创作会话 / 定时任务产出的会话。节奏与开关由 main 侧配置。
   if (!failed && conv && conv.kind !== 'create' && !conv.fromScheduled) maybeAutoReviewSkills(conv);
 }
 
-// 满足节奏就触发一次技能 review。配置(开关/每 N 轮)从 main 拉;只在轮数命中 N 的整数倍时跑。
+const SKILL_REVIEW_CORRECTION_RE = /(不对|不是(?:这个|这样|我的意思)|我说的是|你理解错|搞错了|别再|不要再|怎么又|应该改成|应该是|重新来|并没有|仍然不对|还是不对|that'?s not what i meant|you misunderstood|not like that)/i;
+
+function normalizeReviewText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, '').replace(/[，。！？、；：,.!?;:'"“”‘’`()\[\]{}<>]/g, '');
+}
+
+function reviewTextSimilarity(a, b) {
+  const left = normalizeReviewText(a), right = normalizeReviewText(b);
+  if (left.length < 12 || right.length < 12 || /^(继续|再试试|重试)$/.test(left)) return 0;
+  const grams = (text) => {
+    const set = new Set();
+    for (let i = 0; i < text.length - 1; i++) set.add(text.slice(i, i + 2));
+    return set;
+  };
+  const x = grams(left), y = grams(right);
+  let hit = 0;
+  for (const token of x) if (y.has(token)) hit++;
+  return hit / Math.max(1, x.size + y.size - hit);
+}
+
+function reviewTraceSafe(value, max = 180) {
+  return String(value || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/(api[_-]?key|token|secret|password|authorization|cookie)\s*[:=]\s*\S+/ig, '$1=••••••••')
+    .replace(/\s{2,}/g, ' ')
+    .trim().slice(0, max);
+}
+
+function compactReviewToolTrace(turn) {
+  const items = turn && turn.activity && Array.isArray(turn.activity.items) ? turn.activity.items : [];
+  const tools = items.filter((item) => item && (item.type === 'tool' || item.type === 'task'));
+  if (!tools.length) return '';
+  const lines = [];
+  for (const item of tools) {
+    const status = item.status === 'error' ? '失败' : item.status === 'success' ? '成功' : '未完成';
+    const name = reviewTraceSafe(item.toolName || item.title || (item.type === 'task' ? '后台任务' : '工具'), 80);
+    const detail = item.status === 'error'
+      ? reviewTraceSafe(item.error || item.result || item.detail, 220)
+      : reviewTraceSafe(item.detail, 120);
+    lines.push(`- ${name}：${status}${detail ? ` — ${detail}` : ''}`);
+    if (lines.join('\n').length >= 3200) break;
+  }
+  return lines.length ? `[工具轨迹]\n${lines.join('\n')}` : '';
+}
+
+function skillReviewSignalReasons(conv) {
+  const turns = Array.isArray(conv && conv.turns) ? conv.turns : [];
+  const latest = turns[turns.length - 1] || {};
+  const previous = turns[turns.length - 2] || {};
+  const reasons = [];
+  if (SKILL_REVIEW_CORRECTION_RE.test(String(latest.user || ''))) reasons.push('用户明确纠正或重述了要求');
+  if (reviewTextSimilarity(latest.user, previous.user) >= 0.72) reasons.push('用户高相似度重发了上一轮请求');
+  const items = latest.activity && Array.isArray(latest.activity.items) ? latest.activity.items : [];
+  const tools = items.filter((item) => item && (item.type === 'tool' || item.type === 'task'));
+  const failed = tools.filter((item) => item.status === 'error');
+  if (failed.length >= 2) reasons.push('本轮出现连续工具失败');
+  if (failed.length) {
+    const failedNames = new Set(failed.map((item) => item.toolName || item.title).filter(Boolean));
+    if (tools.some((item) => item.status === 'success' && failedNames.has(item.toolName || item.title))) {
+      reasons.push('工具失败后通过替代路径恢复成功');
+    }
+  }
+  return [...new Set(reasons)];
+}
+
+// 信号命中立即 review；每 N 轮只作为兜底。skillReviewThroughTurn 防止同一批轮次重复审查。
 async function maybeAutoReviewSkills(conv) {
   try {
     const cfg = await window.api.skills.getReviewConfig();
     if (!cfg || !cfg.ok || !cfg.enabled) return;
     const n = cfg.everyTurns || 6;
     const turnCount = (conv.turns || []).length;
-    if (turnCount < 1 || turnCount % n !== 0) return;   // 每 N 轮一次
-    // 拼成纯对话文本喂给 review(我:/你: 格式;不带"继续回答"那种延续框架,review 只是回看)
+    if (turnCount < 1) return;
+    const reviewedThrough = Math.max(0, Number(conv.skillReviewThroughTurn) || 0);
+    if (reviewedThrough >= turnCount) return;
+    const signalReasons = skillReviewSignalReasons(conv);
+    const periodic = turnCount % n === 0;
+    if (!signalReasons.length && !periodic) return;
+
+    // 强信号只回看最近三轮，避免纠正信号被无关历史稀释；定期兜底只看尚未审查的窗口。
+    const start = signalReasons.length
+      ? Math.max(reviewedThrough, turnCount - 3)
+      : Math.max(reviewedThrough, turnCount - n);
     const blocks = [];
-    for (const t of (conv.turns || [])) {
+    for (const t of (conv.turns || []).slice(start)) {
       if (!t) continue;
       const u = (t.user || '').trim();
       const a = (t.assistant || '').trim();
       let b = '';
       if (u) b += `我：${u}\n`;
       if (a) b += `你：${a}`;
+      const trace = compactReviewToolTrace(t);
+      if (trace) b += `${b ? '\n' : ''}${trace}`;
       if (b.trim()) blocks.push(b.trim());
     }
     if (!blocks.length) return;
     let text = blocks.join('\n\n');
-    const MAX = 12000;   // 控体量,过长保留最近部分
+    const MAX = 16000;   // 对话 + 紧凑工具轨迹总预算
     if (text.length > MAX) text = '（较早的对话已省略）\n\n' + text.slice(text.length - MAX);
     const workingDir = (conv.workingDir && conv.workingDir.path) ? conv.workingDir.path : null;
-    window.api.skills.autoReview(text, workingDir);   // 不 await:后台跑
+    const triggerReason = signalReasons.length ? signalReasons.join('；') : `每 ${n} 轮定期兜底`;
+    const result = await window.api.skills.autoReview(text, workingDir, triggerReason);
+    if (result && result.ok && (result.started || result.queued)) {
+      conv.skillReviewThroughTurn = turnCount;
+      conv.lastSkillReviewReason = triggerReason;
+      try { await window.api.history.save(conv); } catch (_) {}
+    }
   } catch (_) { /* review 失败不影响主流程 */ }
 }
 
@@ -4125,6 +4207,7 @@ let settingsViewSnapshot = null;
 let skillOverviewCache = null;       // 跨设置窗口保留最近一次完整技能列表
 let skillPanelConfigCache = null;    // 自动提炼/体检模型的最近快照
 let skillUsageUpdateOff = null;      // 主进程增量索引完成通知，只保留一个监听器
+let memoryUsageUpdateOff = null;     // 同一份增量索引也承载记忆实际 Read 遥测
 
 function setSettingsBackAction(handler = null) {
   activeSettingsBackHandler = typeof handler === 'function' ? handler : null;
@@ -4183,6 +4266,7 @@ function openSettings() {
 function closeSettings() {
   modal.classList.add('hidden');
   if (skillUsageUpdateOff) { skillUsageUpdateOff(); skillUsageUpdateOff = null; }
+  if (memoryUsageUpdateOff) { memoryUsageUpdateOff(); memoryUsageUpdateOff = null; }
   pendingSettings = null;
   settingsViewSnapshot = null;
   modalHint.textContent = '';
@@ -4210,7 +4294,6 @@ async function loadSettingsForm(activeCat = 'personalize') {
   const s = await window.api.settings.read();
   pendingSettings = JSON.parse(JSON.stringify(s));  // 深拷贝,改它
 
-  const claudeVer = (envCache?.claudeVersion || '未探测').replace(/\s*\(Claude Code\)\s*/i, '');
   // GPT 式两栏:左侧一级菜单 + 右侧对应分类内容。所有分类的表单都渲染进 DOM(只切换显示),
   //   这样 bindSettingsEvents/保存逻辑读取各 input 不受影响,无需改动。
   modalBody.innerHTML = `
@@ -4447,12 +4530,6 @@ async function loadSettingsForm(activeCat = 'personalize') {
      <section class="set-cat" data-cat="about">
       <div class="set-section-head">应用</div>
       <div class="set-panel">
-        <div class="set-row" id="set-checkUpdate">
-          <div class="set-icon ico-update">🔄</div>
-          <div class="set-label">Claude Code</div>
-          <div class="row-status">已内置，随 Relay 一同更新</div>
-          <div class="row-status" id="set-claudeVer">${escapeHtml(claudeVer)}</div>
-        </div>
         <div class="set-row clickable" id="set-relayUpdate">
           <div class="set-icon ico-app">🚀</div>
           <div class="set-label">Relay</div>
@@ -4795,7 +4872,7 @@ function bindSettingsEvents(s) {
 //   主进程只自动「检查」,下载和安装都要用户点(见 updater.js 顶部说明)。
 //   两个入口共用同一份状态(relay:update-event 推送):
 //     ① 右上角气泡:定时检查发现新版时从设置齿轮下方弹出,不打断操作,可「稍后」关掉;
-//     ② 设置页「Relay」行:随时手动检查,交互对齐上面的 Claude Code 行(二次点击确认)。
+//     ② 设置页「Relay」行:随时手动检查,发现新版后再次点击才开始下载。
 //   状态推送只订阅一次(模块级),handler 每次按 ID 现查 DOM,
 //   设置弹窗反复开关不会堆积监听器。
 // ─────────────────────────────────────────
@@ -4899,7 +4976,7 @@ async function handleUpdateAction(act) {
 
 // ── 设置页「Relay」行 ──
 //   idle(未查过) → 「检查更新」,点击查;已查过 → 「已是最新版本」
-//   available    → 「点击更新到 vX.Y.Z」→ 再点才下载(与 Claude Code 行的二次确认一致)
+//   available    → 「点击更新到 vX.Y.Z」→ 再点才下载
 //   downloading  → 「正在下载 n%」(点击无操作)
 //   ready        → 「vX.Y.Z 已就绪，点击重启安装」→ quitAndInstall
 //   error        → 「检查失败」,点击重试
@@ -5251,20 +5328,65 @@ async function renderAgentSkillPanel(kind, mount) {
   renderList(res && res.items);
 }
 
-// MCP 服务器管理面板(结构化:列表 + 启停开关 + 删除)。mount = #mcpSection 容器。
+// MCP 服务器管理面板(结构化:真实状态 + 热重连 + 即时启停 + 删除)。mount = #mcpSection 容器。
 //   启用态来自 .claude.json 的 mcpServers,禁用态来自 sidecar 键;启停 = 在两者间搬运(见主进程 mcp:toggle)。
-//   只读写 mcpServers/sidecar,绝不碰 .claude.json 里的会话等其他数据。
+//   配置仍只读写 mcpServers/sidecar；运行态通过 Claude SDK Query 控制通道管理。
 async function renderMcpPanel(mount) {
   const q = (sel) => mount.querySelector(sel);
   mount.innerHTML = `
     <div class="set-toolbar">
       <span class="set-toolbar-count" data-count></span>
-      <button class="set-toolbar-btn primary" type="button" data-mcp-reconnect><span>↻ 重新加载当前对话</span></button>
+      <button class="set-toolbar-btn" type="button" data-mcp-sync><span>↻ 同步配置</span></button>
+      <button class="set-toolbar-btn" type="button" data-mcp-reconnect title="仅在热重连无法恢复时使用"><span>重建会话</span></button>
     </div>
     <div class="set-panel dp-list" data-list></div>
   `;
 
+  const statusLabels = {
+    connected: '已连接',
+    failed: '连接失败',
+    'needs-auth': '需要授权',
+    pending: '连接中',
+    disabled: '已停用',
+    unknown: '等待连接',
+    unavailable: '会话未启动',
+    checking: '读取状态…',
+    'status-error': '状态不可用',
+  };
+  let runtimeAvailable = false;
+  let runtimeBusy = false;
+  let runtimeChecking = false;
+  let runtimeError = '';
+  let runtimeMap = new Map();
+  let loadSequence = 0;
+
+  const currentConvId = () => (currentConv && currentConv.id) || null;
+  const canControl = () => !!currentConvId() && !isConvRunning(currentConvId());
+
   q('[data-mcp-reconnect]').addEventListener('click', (e) => resetCurrentMcpSession(e.currentTarget));
+  q('[data-mcp-sync]').addEventListener('click', async (e) => {
+    if (!currentConvId()) { showToast('请先打开一个已有对话'); return; }
+    if (!canControl()) { showToast('当前对话还在回复中，请结束后再同步'); return; }
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    const label = btn.querySelector('span');
+    if (label) label.textContent = '正在同步…';
+    try {
+      const r = await window.api.mcp.sync(currentConvId());
+      if (!r || !r.ok) { showToast((r && r.message) || '同步失败'); return; }
+      showToast(r.result && r.result.errors && Object.keys(r.result.errors).length
+        ? '配置已同步，部分服务连接失败'
+        : 'MCP 配置已同步到当前对话');
+      await loadPanel();
+    } catch (err) {
+      showToast((err && err.message) || '同步失败');
+    } finally {
+      btn.classList.remove('is-loading');
+      if (label) label.textContent = '↻ 同步配置';
+      btn.disabled = !canControl();
+    }
+  });
   syncMcpReconnectButtons();
 
   const renderList = (items) => {
@@ -5279,33 +5401,81 @@ async function renderMcpPanel(mount) {
     items.forEach((it) => {
       const row = document.createElement('div');
       row.className = 'set-row dp-item';
+      const rt = runtimeMap.get(it.name) || null;
+      const runtimeStatus = it.enabled
+        ? (runtimeChecking ? 'checking'
+          : (runtimeError ? 'status-error'
+            : (runtimeAvailable ? ((rt && rt.status) || 'unknown') : 'unavailable')))
+        : 'disabled';
+      const reconnectDisabled = !it.enabled || !runtimeAvailable || runtimeBusy || !canControl();
       row.innerHTML = `
         <div class="set-icon ico-mcp">🔗</div>
         <div class="dp-item-main">
           <div class="dp-item-name"></div>
-          <div class="dp-item-desc"></div>
+          <div class="dp-item-desc mcp-item-meta">
+            <span class="mcp-state" data-state></span>
+            <span class="mcp-summary" data-summary></span>
+          </div>
         </div>
         <div class="dp-item-actions">
+          <button class="mcp-row-reconnect" type="button" data-reconnect aria-label="重连 MCP" title="重连此 MCP" ${reconnectDisabled ? 'disabled' : ''}>↻</button>
           <div class="switch ${it.enabled ? 'on' : ''}" data-toggle title="${it.enabled ? '已启用,点击停用' : '已停用,点击启用'}"></div>
           <div class="dp-menu-wrap">
             <button class="dp-more" type="button" aria-label="更多操作">···</button>
-            <div class="dp-menu"><button type="button" class="danger" data-action="delete">删除</button></div>
+            <div class="dp-menu">
+              <button type="button" class="danger" data-action="delete">删除</button>
+            </div>
           </div>
         </div>
       `;
       row.querySelector('.dp-item-name').textContent = it.name;
-      // 副信息:停用的加「· 已停用」标注;再带一行命令/url 摘要
-      const parts = [it.enabled ? '' : '已停用', it.summary || ''].filter(Boolean);
-      row.querySelector('.dp-item-desc').textContent = parts.join('　·　');
+      const stateEl = row.querySelector('[data-state]');
+      stateEl.className = `mcp-state ${runtimeStatus}`;
+      stateEl.textContent = statusLabels[runtimeStatus] || statusLabels.unknown;
+      if (rt && rt.toolCount > 0 && runtimeStatus === 'connected') stateEl.textContent += ` · ${rt.toolCount} 个工具`;
+      if (rt && rt.error) stateEl.title = rt.error;
+      else if (runtimeError && runtimeStatus === 'status-error') stateEl.title = runtimeError;
+      const summaryEl = row.querySelector('[data-summary]');
+      summaryEl.textContent = it.summary || '';
+      if (!summaryEl.textContent) summaryEl.hidden = true;
+
+      const reconnect = async () => {
+        if (reconnectDisabled) return;
+        const buttons = [row.querySelector('[data-reconnect]')];
+        buttons.forEach((button) => { if (button) button.disabled = true; });
+        try {
+          const r = await window.api.mcp.reconnect(currentConvId(), it.name);
+          if (!r || !r.ok) { showToast((r && r.message) || `重连「${it.name}」失败`); return; }
+          showToast(`已请求重连「${it.name}」`);
+          await loadPanel();
+        } catch (err) {
+          showToast((err && err.message) || `重连「${it.name}」失败`);
+        } finally {
+          buttons.forEach((button) => { if (button && button.isConnected) button.disabled = reconnectDisabled; });
+        }
+      };
+      row.querySelector('[data-reconnect]').addEventListener('click', reconnect);
 
       // 启停开关:乐观切换 + 失败回滚(与「开机自启」开关一致的即时生效风格)
       const sw = row.querySelector('[data-toggle]');
       sw.addEventListener('click', async () => {
         const next = !sw.classList.contains('on');
         sw.classList.toggle('on', next);
-        const r = await window.api.mcp.toggle(it.name, next);
-        if (r && r.ok) { showToast(`${next ? '已启用' : '已停用'}，重连当前会话后生效`); renderList((await window.api.mcp.list()).items); }
-        else { sw.classList.toggle('on', !next); showToast((r && r.message) || '操作失败'); }   // 回滚
+        try {
+          const r = await window.api.mcp.toggle(it.name, next, currentConvId());
+          if (r && r.ok) {
+            showToast(r.liveApplied
+              ? `${next ? '已启用' : '已停用'}，当前对话已生效`
+              : ((r && r.message) || `${next ? '已启用' : '已停用'}，将在下次会话启动时生效`));
+            await loadPanel();
+          } else {
+            sw.classList.toggle('on', !next);
+            showToast((r && r.message) || '操作失败');
+          }
+        } catch (err) {
+          sw.classList.toggle('on', !next);
+          showToast((err && err.message) || '操作失败');
+        }
       });
 
       row.querySelector('[data-action="delete"]').addEventListener('click', async (e) => {
@@ -5316,8 +5486,11 @@ async function renderMcpPanel(mount) {
           confirmText: '删除', cancelText: '取消', danger: true,
         });
         if (!ok) return;
-        const r = await window.api.mcp.remove(it.name);
-        if (r && r.ok) { showToast('已删除，重连当前会话后生效'); renderList((await window.api.mcp.list()).items); }
+        const r = await window.api.mcp.remove(it.name, currentConvId());
+        if (r && r.ok) {
+          showToast(r.liveApplied ? '已删除，当前对话已生效' : ((r && r.message) || '已删除'));
+          await loadPanel();
+        }
         else showToast((r && r.message) || '删除失败');
       });
       bindDpMenu(row);
@@ -5326,8 +5499,44 @@ async function renderMcpPanel(mount) {
     });
   };
 
-  const res = await window.api.mcp.list();
-  renderList(res && res.items);
+  async function loadPanel() {
+    const sequence = ++loadSequence;
+    const convId = currentConvId();
+    const res = await window.api.mcp.list();
+    if (sequence !== loadSequence || !mount.isConnected) return;
+    runtimeChecking = !!convId;
+    runtimeAvailable = false;
+    runtimeBusy = false;
+    runtimeError = '';
+    runtimeMap = new Map();
+    renderList((res && res.items) || []);
+
+    const syncBtn = q('[data-mcp-sync]');
+    if (syncBtn && !syncBtn.classList.contains('is-loading')) {
+      syncBtn.disabled = !convId || !canControl();
+      syncBtn.title = !convId
+        ? '请先打开一个已有对话'
+        : (!canControl() ? '当前对话还在回复中' : '读取磁盘配置并同步到当前 Claude 会话');
+    }
+    syncMcpReconnectButtons();
+
+    if (!convId) {
+      runtimeChecking = false;
+      renderList((res && res.items) || []);
+      return;
+    }
+    const runtime = await window.api.mcp.status(convId).catch((err) => ({ ok: false, message: err && err.message }));
+    if (sequence !== loadSequence || !mount.isConnected) return;
+    runtimeChecking = false;
+    runtimeAvailable = !!(runtime && runtime.available);
+    runtimeBusy = !!(runtime && runtime.busy);
+    runtimeError = runtime && !runtime.ok ? (runtime.message || '读取 MCP 状态失败') : '';
+    runtimeMap = new Map(((runtime && runtime.items) || []).map((item) => [item.name, item]));
+    renderList((res && res.items) || []);
+    if (syncBtn && !syncBtn.classList.contains('is-loading')) syncBtn.disabled = !canControl() || runtimeBusy;
+  }
+
+  await loadPanel();
 }
 
 const MAINTENANCE_MODEL_OPTIONS = [
@@ -5469,7 +5678,12 @@ async function renderSkillCuratorPanel(mount) {
       const autoBadge  = it.createdBy === 'agent' ? `<span class="skill-badge auto">🤖 自动生成</span>` : '';
       const useText = !usageReady
         ? '正在后台统计用量…'
-        : (it.useCount > 0 ? `用 ${it.useCount} 次 · 最近 ${fmtDay(it.lastUsedAt)}` : '未使用过');
+        : (it.useCount > 0
+            ? `用 ${it.useCount} 次 · 最近 ${fmtDay(it.lastUsedAt)}` +
+              ((it.correctionCount || it.retryCount || it.toolErrorCount)
+                ? ` · 质量信号 纠正 ${it.correctionCount || 0}/重试 ${it.retryCount || 0}/报错 ${it.toolErrorCount || 0}`
+                : '')
+            : '未使用过');
       row.innerHTML = `
         <div class="set-icon ico-skill">🧩</div>
         <div class="dp-item-main">
@@ -5908,8 +6122,9 @@ async function renderMemoryPanel(mount) {
     '1. 用 Read 通读记忆库目录下全部 .md 文件(MEMORY.md 索引除外)。\n' +
     '2. 合并同主题:多个文件讲同一件事时,把增量信息并入信息量最大的那个文件(用 Write 覆写),然后删除其余文件。\n' +
     '3. 清理过期:已被证伪、明确过期、或只对当时那次对话有意义的条目,删除对应 .md 文件。\n' +
-    '4. 保守原则:拿不准是否还有用的,一律保留,不要删。\n' +
-    '5. 审计要求:最后输出一份整理报告,列出 (a)合并了哪些文件 (b)删除了哪些文件及其内容要点——被删内容必须在报告里留痕,便于人工追回 (c)保留不动的条目数。没有可整理的就报告「记忆库无需整理,共 N 条」。\n' +
+    '4. 核心保护:索引或遥测里标为「核心」的记忆禁止自动删除;如内容冲突,只在报告里提示用户人工确认。\n' +
+    '5. 保守原则:拿不准是否还有用的,一律保留,不要删;索引展示多但实读少只能作为检查线索,不能单独作为删除理由。\n' +
+    '6. 审计要求:最后输出一份整理报告,列出 (a)合并了哪些文件 (b)删除了哪些文件及其内容要点——被删内容必须在报告里留痕,便于人工追回 (c)保留不动的条目数。没有可整理的就报告「记忆库无需整理,共 N 条」。\n' +
     '注意:不要创建或编辑 MEMORY.md(索引由系统自动重建);删除文件用 Bash 工具(rm)。';
   const autoOn = q('[data-auto-on]'), autoNext = q('[data-auto-next]'), autoRun = q('[data-auto-run]');
   const autoToggle = q('[data-mem-auto-toggle]'), autoPanel = q('[data-mem-auto-panel]');
@@ -6066,13 +6281,20 @@ async function renderMemoryPanel(mount) {
           <button class="dp-more" type="button" aria-label="更多操作">···</button>
           <div class="dp-menu">
             <button type="button" data-action="detail">详情</button>
+            <button type="button" data-action="pin"${it.pinnedInFile ? ' disabled title="该标记来自 Markdown frontmatter，请在编辑页修改"' : ''}>${it.pinnedInFile ? '核心来自 Markdown' : (it.pinned ? '取消核心' : '设为核心')}</button>
             <button type="button" class="danger" data-action="delete">删除</button>
           </div>
         </div>
       `;
       row.querySelector('.dp-item-name').textContent = it.name || it.file;
-      row.querySelector('.dp-item-desc').textContent = it.description || '(无摘要)';
+      row.querySelector('.dp-item-desc').textContent = `${it.pinned ? '核心 · ' : ''}${it.description || '(无摘要)'} · 展示 ${it.exposureCount || 0} / 实读 ${it.readCount || 0}`;
       row.querySelector('[data-action="detail"]').addEventListener('click', () => renderMemoryEditor(it.file, it.name || it.file));
+      row.querySelector('[data-action="pin"]').addEventListener('click', async () => {
+        if (it.pinnedInFile) return;
+        const r = await window.api.memory.setPinned(it.file, !it.pinned);
+        if (r && r.ok) { showToast(r.pinned ? '已设为核心记忆' : '已取消核心记忆'); load(); }
+        else showToast((r && r.message) || '设置失败');
+      });
       row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
         const ok = await customConfirm({
           title: '删除记忆',
@@ -6093,8 +6315,14 @@ async function renderMemoryPanel(mount) {
 
   const load = async () => {
     const res = await window.api.memory.list();
+    if (!mount.isConnected) return;
     renderList(res && res.items);
   };
+  if (memoryUsageUpdateOff) memoryUsageUpdateOff();
+  memoryUsageUpdateOff = window.api.skills.onUsageUpdated(() => {
+    if (!mount.isConnected) return;
+    load();
+  });
   await load();
 }
 

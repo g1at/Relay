@@ -4,16 +4,30 @@ const { parentPort, workerData } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 
-const INDEX_VERSION = 1;
+const INDEX_VERSION = 2;
+const MEMORY_ROOT = workerData.memoryDir ? path.resolve(String(workerData.memoryDir)) : '';
+const CORRECTION_RE = /(不对|不是(?:这个|这样|我的意思)|我说的是|你理解错|搞错了|别再|不要再|怎么又|应该改成|应该是|重新来|并没有|仍然不对|还是不对|that'?s not what i meant|you misunderstood|not like that)/i;
+const POSITIVE_RE = /(可以了|这次对了|这样就对了|很好|搞定了|谢谢|正是这样|works now|that works|perfect)/i;
+
+function emptySkillStats() {
+  return {
+    useCount: 0, lastUsedAt: null,
+    feedbackOpportunities: 0, correctionCount: 0, retryCount: 0,
+    toolErrorCount: 0, positiveCount: 0, lastNegativeAt: null,
+  };
+}
 
 function statsArrayToMap(items) {
   const map = new Map();
   for (const item of Array.isArray(items) ? items : []) {
     if (!item || typeof item.name !== 'string' || !item.name) continue;
-    map.set(item.name, {
-      useCount: Math.max(0, Number(item.useCount) || 0),
-      lastUsedAt: typeof item.lastUsedAt === 'string' ? item.lastUsedAt : null,
-    });
+    const value = emptySkillStats();
+    for (const key of ['useCount', 'feedbackOpportunities', 'correctionCount', 'retryCount', 'toolErrorCount', 'positiveCount']) {
+      value[key] = Math.max(0, Number(item[key]) || 0);
+    }
+    value.lastUsedAt = typeof item.lastUsedAt === 'string' ? item.lastUsedAt : null;
+    value.lastNegativeAt = typeof item.lastNegativeAt === 'string' ? item.lastNegativeAt : null;
+    map.set(item.name, value);
   }
   return map;
 }
@@ -22,14 +36,14 @@ function statsMapToArray(map) {
   return [...map.entries()]
     .map(([name, value]) => ({
       name,
-      useCount: value.useCount || 0,
-      lastUsedAt: value.lastUsedAt || null,
+      ...emptySkillStats(),
+      ...value,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function bump(map, name, timestamp) {
-  const current = map.get(name) || { useCount: 0, lastUsedAt: null };
+function bumpSkillUse(map, name, timestamp) {
+  const current = map.get(name) || emptySkillStats();
   current.useCount += 1;
   if (timestamp && (!current.lastUsedAt || timestamp > current.lastUsedAt)) {
     current.lastUsedAt = timestamp;
@@ -37,9 +51,96 @@ function bump(map, name, timestamp) {
   map.set(name, current);
 }
 
-function scanJsonlText(text, stats) {
+function bumpSkillSignal(map, names, field, timestamp) {
+  for (const name of new Set(Array.isArray(names) ? names : [])) {
+    if (!name) continue;
+    const current = map.get(name) || emptySkillStats();
+    current[field] = Math.max(0, Number(current[field]) || 0) + 1;
+    if (field === 'correctionCount' || field === 'retryCount' || field === 'toolErrorCount') {
+      if (timestamp && (!current.lastNegativeAt || timestamp > current.lastNegativeAt)) current.lastNegativeAt = timestamp;
+    }
+    map.set(name, current);
+  }
+}
+
+function statsMemoryArrayToMap(items) {
+  const map = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item.name !== 'string' || !item.name) continue;
+    map.set(item.name, {
+      readCount: Math.max(0, Number(item.readCount) || 0),
+      lastReadAt: typeof item.lastReadAt === 'string' ? item.lastReadAt : null,
+    });
+  }
+  return map;
+}
+
+function memoryMapToArray(map) {
+  return [...map.entries()].map(([name, value]) => ({ name, ...value })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function bumpMemoryRead(map, name, timestamp) {
+  const current = map.get(name) || { readCount: 0, lastReadAt: null };
+  current.readCount += 1;
+  if (timestamp && (!current.lastReadAt || timestamp > current.lastReadAt)) current.lastReadAt = timestamp;
+  map.set(name, current);
+}
+
+function memoryFileFromInput(input) {
+  if (!MEMORY_ROOT) return null;
+  const candidate = input && (input.file_path || input.path);
+  if (typeof candidate !== 'string' || !candidate) return null;
+  let abs;
+  try { abs = path.resolve(candidate); } catch (_) { return null; }
+  const rel = path.relative(MEMORY_ROOT, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || !rel.toLowerCase().endsWith('.md')) return null;
+  const base = path.basename(rel);
+  return base.toLowerCase() === 'memory.md' ? null : base;
+}
+
+function normalizeUserText(value) {
+  let text = String(value || '');
+  const taskMarker = '用户的任务：\n';
+  if (text.includes(taskMarker)) text = text.slice(text.lastIndexOf(taskMarker) + taskMarker.length);
+  // Relay 会在真实用户输入后追加运行须知、图片规则、飞书提示和长期记忆。
+  // 这些固定文本若参与相似度计算，会让两条毫不相关的请求看起来高度相似。
+  for (const marker of [
+    '\n\n---\n用户上传了以下文件',
+    '\n\n---\n[交互须知]',
+    '\n\n---\n[图片处理须知]',
+    '\n\n---\n[系统提示]',
+    '\n\n---\n[长期记忆]',
+  ]) {
+    const at = text.indexOf(marker);
+    if (at >= 0) text = text.slice(0, at);
+  }
+  return text.replace(/\s+/g, ' ').trim().slice(0, 8000);
+}
+
+function textSimilarity(a, b) {
+  const clean = (value) => String(value || '').toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9\u3400-\u9fff]/g, '');
+  const left = clean(a), right = clean(b);
+  if (left.length < 12 || right.length < 12) return 0;
+  const grams = (value) => {
+    const set = new Set();
+    for (let i = 0; i < value.length - 1; i++) set.add(value.slice(i, i + 2));
+    return set;
+  };
+  const x = grams(left), y = grams(right);
+  let hit = 0;
+  for (const token of x) if (y.has(token)) hit++;
+  return hit / Math.max(1, x.size + y.size - hit);
+}
+
+function textBlocks(content) {
+  return (Array.isArray(content) ? content : [])
+    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text).join('\n');
+}
+
+function scanJsonlText(text, skillStats, memoryStats, context) {
   for (const line of String(text || '').split('\n')) {
-    if (line.indexOf('"Skill"') < 0) continue;
+    if (!line.trim()) continue;
     let data;
     try { data = JSON.parse(line); } catch (_) { continue; }
     const message = data && data.message;
@@ -49,9 +150,33 @@ function scanJsonlText(text, stats) {
     for (const block of blocks) {
       if (block && block.type === 'tool_use' && block.name === 'Skill') {
         const skill = block.input && block.input.skill;
-        if (typeof skill === 'string' && skill) bump(stats, skill, timestamp);
+        if (typeof skill === 'string' && skill) {
+          bumpSkillUse(skillStats, skill, timestamp);
+          if (!context.activeSkills.includes(skill)) context.activeSkills.push(skill);
+        }
+      }
+      if (block && block.type === 'tool_use' && block.name === 'Read') {
+        const file = memoryFileFromInput(block.input);
+        if (file) bumpMemoryRead(memoryStats, file, timestamp);
       }
     }
+
+    const role = message.role || data.type;
+    if (role !== 'user') continue;
+    const toolErrors = blocks.filter((block) => block && block.type === 'tool_result' && block.is_error);
+    if (toolErrors.length && context.activeSkills.length) {
+      for (let i = 0; i < toolErrors.length; i++) bumpSkillSignal(skillStats, context.activeSkills, 'toolErrorCount', timestamp);
+    }
+    const userText = normalizeUserText(textBlocks(blocks));
+    if (!userText) continue; // tool_result 不是新一轮用户反馈
+    if (context.activeSkills.length) {
+      bumpSkillSignal(skillStats, context.activeSkills, 'feedbackOpportunities', timestamp);
+      if (CORRECTION_RE.test(userText)) bumpSkillSignal(skillStats, context.activeSkills, 'correctionCount', timestamp);
+      if (textSimilarity(userText, context.lastUserText) >= 0.72) bumpSkillSignal(skillStats, context.activeSkills, 'retryCount', timestamp);
+      if (POSITIVE_RE.test(userText)) bumpSkillSignal(skillStats, context.activeSkills, 'positiveCount', timestamp);
+    }
+    context.activeSkills = [];
+    context.lastUserText = userText;
   }
 }
 
@@ -89,12 +214,12 @@ async function readRange(file, start, end) {
   }
 }
 
-function parseCompleteBuffer(buffer, stats) {
+function parseCompleteBuffer(buffer, skillStats, memoryStats, context) {
   if (!buffer.length) return 0;
   const lastNewline = buffer.lastIndexOf(0x0a);
   let consumed = lastNewline >= 0 ? lastNewline + 1 : 0;
 
-  if (consumed > 0) scanJsonlText(buffer.subarray(0, consumed).toString('utf8'), stats);
+  if (consumed > 0) scanJsonlText(buffer.subarray(0, consumed).toString('utf8'), skillStats, memoryStats, context);
 
   // Claude 的 JSONL 通常以换行结束。若最后一行已经是完整 JSON，也立即纳入；
   // 若仍在写入则保留 offset，下一次从这行开头继续读取。
@@ -102,7 +227,7 @@ function parseCompleteBuffer(buffer, stats) {
     const tail = buffer.subarray(consumed).toString('utf8');
     try {
       JSON.parse(tail);
-      scanJsonlText(tail, stats);
+      scanJsonlText(tail, skillStats, memoryStats, context);
       consumed = buffer.length;
     } catch (_) {}
   }
@@ -141,16 +266,25 @@ async function scan() {
       && Number(old.offset) >= 0
       && Number(old.offset) <= Number(old.size);
     const start = canAppend ? Number(old.offset) : 0;
-    const stats = canAppend ? statsArrayToMap(old.skills) : new Map();
+    const skillStats = canAppend ? statsArrayToMap(old.skills) : new Map();
+    const memoryStats = canAppend ? statsMemoryArrayToMap(old.memories) : new Map();
+    const context = canAppend && old.context && typeof old.context === 'object'
+      ? {
+          lastUserText: String(old.context.lastUserText || ''),
+          activeSkills: Array.isArray(old.context.activeSkills) ? [...old.context.activeSkills] : [],
+        }
+      : { lastUserText: '', activeSkills: [] };
     let buffer;
     try { buffer = await readRange(file, start, stat.size); } catch (_) { continue; }
     scannedBytes += buffer.length;
-    const consumed = parseCompleteBuffer(buffer, stats);
+    const consumed = parseCompleteBuffer(buffer, skillStats, memoryStats, context);
     nextFiles[relative] = {
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       offset: start + consumed,
-      skills: statsMapToArray(stats),
+      skills: statsMapToArray(skillStats),
+      memories: memoryMapToArray(memoryStats),
+      context,
     };
   }
 
@@ -163,12 +297,27 @@ async function scan() {
   const aggregate = new Map();
   for (const record of Object.values(nextFiles)) {
     for (const item of Array.isArray(record.skills) ? record.skills : []) {
-      const current = aggregate.get(item.name) || { useCount: 0, lastUsedAt: null };
-      current.useCount += Number(item.useCount) || 0;
+      const current = aggregate.get(item.name) || emptySkillStats();
+      for (const key of ['useCount', 'feedbackOpportunities', 'correctionCount', 'retryCount', 'toolErrorCount', 'positiveCount']) {
+        current[key] += Number(item[key]) || 0;
+      }
       if (item.lastUsedAt && (!current.lastUsedAt || item.lastUsedAt > current.lastUsedAt)) {
         current.lastUsedAt = item.lastUsedAt;
       }
+      if (item.lastNegativeAt && (!current.lastNegativeAt || item.lastNegativeAt > current.lastNegativeAt)) {
+        current.lastNegativeAt = item.lastNegativeAt;
+      }
       aggregate.set(item.name, current);
+    }
+  }
+
+  const memoryAggregate = new Map();
+  for (const record of Object.values(nextFiles)) {
+    for (const item of Array.isArray(record.memories) ? record.memories : []) {
+      const current = memoryAggregate.get(item.name) || { readCount: 0, lastReadAt: null };
+      current.readCount += Number(item.readCount) || 0;
+      if (item.lastReadAt && (!current.lastReadAt || item.lastReadAt > current.lastReadAt)) current.lastReadAt = item.lastReadAt;
+      memoryAggregate.set(item.name, current);
     }
   }
 
@@ -178,6 +327,7 @@ async function scan() {
       updatedAt: new Date().toISOString(),
       files: nextFiles,
       skills: statsMapToArray(aggregate),
+      memories: memoryMapToArray(memoryAggregate),
     },
     changed,
     totalFiles: targets.length,

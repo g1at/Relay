@@ -11,6 +11,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const os = require('os');
 const fs = require('fs');
+const crypto = require('crypto');
 const scheduler = require('./scheduler');
 const updater = require('./updater');
 const claudeSdk = require('./claude-sdk');
@@ -45,6 +46,93 @@ const SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 //   所有对话共享这一套(方案 A),用绝对路径注入,不受 CLI 项目键(随 cwd 漂移)影响。
 const MEMORY_DIR = path.join(os.homedir(), '.claude', 'relay-memory');
 const MEMORY_INDEX = path.join(MEMORY_DIR, 'MEMORY.md');
+const MEMORY_USAGE_FILE = path.join(MEMORY_DIR, '.usage.json');
+let _memoryUsageCache = null;
+let _memoryUsageFlushTimer = null;
+
+function readMemoryUsage() {
+  if (_memoryUsageCache) return _memoryUsageCache;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MEMORY_USAGE_FILE, 'utf8'));
+    _memoryUsageCache = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) { _memoryUsageCache = {}; }
+  return _memoryUsageCache;
+}
+
+function flushMemoryUsage() {
+  if (_memoryUsageFlushTimer) clearTimeout(_memoryUsageFlushTimer);
+  _memoryUsageFlushTimer = null;
+  try {
+    fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    const tmp = MEMORY_USAGE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(readMemoryUsage(), null, 2), 'utf8');
+    try { fs.renameSync(tmp, MEMORY_USAGE_FILE); }
+    catch (e) {
+      if (!fs.existsSync(MEMORY_USAGE_FILE)) throw e;
+      fs.rmSync(MEMORY_USAGE_FILE, { force: true });
+      fs.renameSync(tmp, MEMORY_USAGE_FILE);
+    }
+  } catch (e) { console.warn('[memory] 用量元数据写入失败: %s', e.message); }
+}
+
+function scheduleMemoryUsageFlush() {
+  if (_memoryUsageFlushTimer) return;
+  _memoryUsageFlushTimer = setTimeout(flushMemoryUsage, 800);
+  if (_memoryUsageFlushTimer && typeof _memoryUsageFlushTimer.unref === 'function') _memoryUsageFlushTimer.unref();
+}
+
+function recordMemoryExposures(files) {
+  const usage = readMemoryUsage();
+  const nowIso = new Date().toISOString();
+  let dirty = false;
+  for (const file of new Set(Array.isArray(files) ? files : [])) {
+    if (!file || String(file).toLowerCase() === 'memory.md') continue;
+    const rec = usage[file] && typeof usage[file] === 'object' ? usage[file] : {};
+    rec.exposureCount = Math.max(0, Number(rec.exposureCount) || 0) + 1;
+    rec.lastExposedAt = nowIso;
+    if (typeof rec.pinned !== 'boolean') rec.pinned = false;
+    usage[file] = rec;
+    dirty = true;
+  }
+  if (dirty) scheduleMemoryUsageFlush();
+}
+
+function memoryFlag(value) {
+  return value === true || value === 1 || /^(true|yes|1|core|pinned)$/i.test(String(value || '').trim());
+}
+
+function memoryReadStats(file) {
+  try {
+    const state = loadSkillUsageState();
+    return state && state.memoryMap && state.memoryMap.get(file) || null;
+  } catch (_) { return null; }
+}
+
+function memoryIndexLine(entry) {
+  return `- [${entry.title}](${entry.file})${entry.pinned ? ' [核心]' : ''}${entry.desc ? ' — ' + entry.desc : ''}`;
+}
+
+function memoryQueryTerms(value) {
+  const text = String(value || '').toLowerCase().slice(-8000);
+  const terms = new Set((text.match(/[a-z0-9_\-]{2,}|[\u3400-\u9fff]{2,}/g) || []).flatMap((token) => {
+    if (!/[\u3400-\u9fff]/.test(token) || token.length <= 2) return [token];
+    const grams = [];
+    for (let i = 0; i < token.length - 1; i++) grams.push(token.slice(i, i + 2));
+    return grams;
+  }));
+  return [...terms].slice(0, 160);
+}
+
+function memoryRelevanceScore(entry, terms) {
+  const title = `${entry.title} ${entry.file}`.toLowerCase();
+  const desc = String(entry.desc || '').toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (title.includes(term)) score += 6;
+    if (desc.includes(term)) score += 3;
+  }
+  return score;
+}
 
 // ── #1 索引由主进程自动维护(模型只写正文 .md,不再手写索引行) ──
 //   扫描 MEMORY_DIR 下所有 .md(MEMORY.md 自身除外),按 frontmatter 的 name/description
@@ -55,6 +143,7 @@ const MEMORY_INDEX = path.join(MEMORY_DIR, 'MEMORY.md');
 //   返回 { count, bytes }(条目数 + 重建后索引字节数),供注入预算判断用。
 function rebuildMemoryIndex() {
   let entries = [];
+  const usage = readMemoryUsage();
   try {
     const names = fs.readdirSync(MEMORY_DIR, { withFileTypes: true })
       .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.md') && e.name.toLowerCase() !== 'memory.md')
@@ -65,12 +154,14 @@ function rebuildMemoryIndex() {
       try { mtime = fs.statSync(path.join(MEMORY_DIR, file)).mtimeMs; } catch (_) {}
       const title = fm.name || file.replace(/\.md$/i, '');
       const desc = (fm.description || '').replace(/\r?\n/g, ' ').trim();
-      entries.push({ file, title, desc, mtime });
+      const sidecarPinned = !!(usage[file] && usage[file].pinned);
+      const pinned = sidecarPinned || memoryFlag(fm.core) || memoryFlag(fm.pinned);
+      entries.push({ file, title, desc, mtime, pinned });
     }
   } catch (_) { /* 目录不存在 → 空索引 */ }
-  // 新→旧排序(最近写的在前,符合「最相关」直觉);组装每条一行
-  entries.sort((a, b) => b.mtime - a.mtime);
-  const lines = entries.map((e) => `- [${e.title}](${e.file})${e.desc ? ' — ' + e.desc : ''}`);
+  // 核心记忆始终在前；普通条目仅把修改时间作为稳定排序,相关性在每轮注入时按 prompt 另算。
+  entries.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.mtime - a.mtime);
+  const lines = entries.map(memoryIndexLine);
   const body = lines.length ? lines.join('\n') + '\n' : '';
   // 写回 MEMORY.md(UTF-8 无 BOM 原子写);空库则删掉残留的 MEMORY.md,保持干净
   try {
@@ -83,13 +174,13 @@ function rebuildMemoryIndex() {
       fs.rmSync(MEMORY_INDEX, { force: true });
     }
   } catch (e) { console.warn('[memory] 写入索引失败: %s', e.message); }
-  return { count: lines.length, bytes: Buffer.byteLength(body, 'utf8'), lines };
+  return { count: lines.length, bytes: Buffer.byteLength(body, 'utf8'), lines, entries };
 }
 
 // 注入预算上限(#2):索引超过这个字节数就降级注入,避免每轮 prompt 无限膨胀。
 //   8KB ≈ 几十条「name — description」级别的索引行,够个人助手用很久;超了说明该 consolidate。
 const MEMORY_INDEX_BUDGET = 8 * 1024;
-const MEMORY_INDEX_HEAD = 40;   // 降级时保留最近的前 N 条
+const MEMORY_INDEX_HEAD = 40;   // 降级时保留核心记忆 + 与当前任务最相关的 N 条左右
 
 // 组装注入到每轮 prompt 末尾的「长期记忆」提示。
 //   先重建索引(#1),再按体量决定全量 / 降级注入(#2)。
@@ -101,8 +192,8 @@ const MEMORY_INDEX_HEAD = 40;   // 降级时保留最近的前 N 条
 //   定时任务为何默认只读:读是普惠的(产出个性化),写是危险的——周期任务跑得多,
 //   模型偶发把当次产出(如当日新闻)当「长期事实」写库,日积月累污染记忆。
 //   可读写(readwrite→full)留给记忆整理任务和用户显式要求。
-function buildMemoryHint(mode = 'full') {
-  const { count, bytes, lines } = rebuildMemoryIndex();
+function buildMemoryHint(mode = 'full', query = '') {
+  const { count, bytes, lines, entries } = rebuildMemoryIndex();
   if (mode === 'read' && count === 0) return '';
 
   // 写入规则(空库/满库共用的尾部):什么时候写、写成什么格式、只能写哪里。
@@ -111,7 +202,8 @@ function buildMemoryHint(mode = 'full') {
     '\n\n写入规则:\n' +
     '· 若本轮出现值得长期记住的新事实(用户的身份/偏好、对你工作方式的指正、项目约束、外部资源链接等),' +
     '用 Write 工具在记忆库目录新建一个 kebab-case 命名的 .md 文件,以 YAML frontmatter 开头' +
-    '(name: 短横线标识;description: 一句话摘要,会被用作索引,务必准确精炼;type: user|feedback|project|reference),' +
+    '(name: 短横线标识;description: 一句话摘要,会被用作索引,务必准确精炼;type: user|feedback|project|reference;' +
+    'core: true 仅用于稳定身份、长期硬性偏好或不可丢失约束,普通记忆不要设置),' +
     '正文写这条事实本身。你只需写这个 .md 文件——不要去创建或编辑 MEMORY.md,索引由系统自动维护。\n' +
     '· 若已有同主题的记忆文件,更新那个文件,不要重复新建。已过期/被证伪的记忆,直接删掉对应 .md。\n' +
     '· 若用户明确要求你记住某件事(如「记住…」「记一下…」),直接照办写入,无需追问;' +
@@ -126,14 +218,34 @@ function buildMemoryHint(mode = 'full') {
   }
 
   // #2 注入预算:体量在阈值内 → 全量;超阈值 → 只注入最近 MEMORY_INDEX_HEAD 条 + 提示按需 Read。
+  let selectedEntries = entries;
   let indexBlock, head;
   if (bytes <= MEMORY_INDEX_BUDGET) {
     indexBlock = lines.join('\n');
     head = '下面是全部记忆的索引(每行一条,含定位线索):';
   } else {
-    indexBlock = lines.slice(0, MEMORY_INDEX_HEAD).join('\n');
-    head = '记忆较多(共 ' + count + ' 条),下面只列出最近的 ' + MEMORY_INDEX_HEAD +
-      ' 条;完整清单见记忆库目录,需要时可用 Read/Glob 在该目录中查找其它记忆:';
+    const core = entries.filter((entry) => entry.pinned);
+    const terms = memoryQueryTerms(query);
+    const rest = entries.filter((entry) => !entry.pinned)
+      .map((entry) => ({ entry, score: memoryRelevanceScore(entry, terms) }))
+      .sort((a, b) => b.score - a.score || b.entry.mtime - a.entry.mtime);
+    const slots = Math.max(0, MEMORY_INDEX_HEAD - core.length);
+    selectedEntries = [...core, ...rest.slice(0, slots).map((item) => item.entry)];
+    indexBlock = selectedEntries.map(memoryIndexLine).join('\n');
+    head = '记忆较多(共 ' + count + ' 条),下面优先列出全部核心记忆及与当前任务最相关的 ' +
+      selectedEntries.length + ' 条;完整清单见记忆库目录,需要时可用 Read/Glob 查找其它记忆:';
+  }
+  recordMemoryExposures(selectedEntries.map((entry) => entry.file));
+
+  let telemetryBlock = '';
+  if (mode === 'maintenance') {
+    const exposure = readMemoryUsage();
+    const rows = entries.slice(0, 100).map((entry) => {
+      const shown = Math.max(0, Number(exposure[entry.file] && exposure[entry.file].exposureCount) || 0);
+      const reads = memoryReadStats(entry.file) || {};
+      return `· ${entry.file}${entry.pinned ? ' [核心-禁止自动删除]' : ''}: 索引展示 ${shown} 次,实际 Read ${Number(reads.readCount) || 0} 次${reads.lastReadAt ? `,最后实读 ${reads.lastReadAt}` : ''}`;
+    });
+    telemetryBlock = '\n\n使用遥测(仅作整理证据,从未 Read 不等于无用,禁止仅凭此删除):\n' + rows.join('\n');
   }
 
   // 只读模式(定时任务):有索引、有读规则,但明示无人值守不要写。
@@ -149,7 +261,7 @@ function buildMemoryHint(mode = 'full') {
     head + '\n' + indexBlock + '\n\n' +
     '使用规则:\n' +
     '· 若本轮问题与某条记忆相关,先用 Read 工具读取对应的 .md 取完整内容,再据此作答。' +
-    writeRules;
+    writeRules + telemetryBlock;
 }
 
 // 让 Windows 任务栏把多个窗口归到我们 app 而不是 Electron(也修 dev 模式任务栏图标走 .exe 不走 electron.exe)
@@ -1393,7 +1505,7 @@ ${prompt}`;
   prompt = `${prompt}${ASK_HINT}${IMAGE_HINT}`;
   // 长期记忆:把记忆库索引注入 prompt(CLI headless 不会自动注入),并教模型自读自写。
   //   放在最后,确保前面的文件/飞书/图片须知都已就位;下方 spawn 时 --add-dir 授权该目录。
-  prompt = `${prompt}${buildMemoryHint()}`;
+  prompt = `${prompt}${buildMemoryHint('full', prompt)}`;
 
   // 防御:用户输入以 - 开头时,CLI 参数解析器会把它当成命令行选项(如 -i / -u / -P),
   //   导致 "error: unknown option" 后静默退出、回复为空。加一句安全前缀消除歧义。
@@ -2485,7 +2597,7 @@ function aggregateTokenUsage(sessionIdSet) {
 //   1. 主进程只同步读取一个很小的持久化索引；
 //   2. 打开技能页时立即返回索引里的旧值；
 //   3. Worker 线程只读取新增文件/已有文件的追加尾部，完成后通知技能页无闪更新。
-const SKILL_USAGE_INDEX_VERSION = 1;
+const SKILL_USAGE_INDEX_VERSION = 2;
 const SKILL_USAGE_INDEX_FILE = path.join(app.getPath('userData'), 'skill-usage-index.json');
 const SKILL_USAGE_WORKER_FILE = app.isPackaged
   ? path.join(process.resourcesPath, 'app.asar.unpacked', 'skill-usage-worker.js')
@@ -2501,6 +2613,24 @@ function skillStatsArrayToMap(items) {
     map.set(item.name, {
       useCount: Math.max(0, Number(item.useCount) || 0),
       lastUsedAt: typeof item.lastUsedAt === 'string' ? item.lastUsedAt : null,
+      feedbackOpportunities: Math.max(0, Number(item.feedbackOpportunities) || 0),
+      correctionCount: Math.max(0, Number(item.correctionCount) || 0),
+      retryCount: Math.max(0, Number(item.retryCount) || 0),
+      toolErrorCount: Math.max(0, Number(item.toolErrorCount) || 0),
+      positiveCount: Math.max(0, Number(item.positiveCount) || 0),
+      lastNegativeAt: typeof item.lastNegativeAt === 'string' ? item.lastNegativeAt : null,
+    });
+  }
+  return map;
+}
+
+function memoryStatsArrayToMap(items) {
+  const map = new Map();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || typeof item.name !== 'string' || !item.name) continue;
+    map.set(item.name, {
+      readCount: Math.max(0, Number(item.readCount) || 0),
+      lastReadAt: typeof item.lastReadAt === 'string' ? item.lastReadAt : null,
     });
   }
   return map;
@@ -2516,6 +2646,7 @@ function loadSkillUsageState() {
   _skillUsageState = {
     index,
     map: skillStatsArrayToMap(index && index.skills),
+    memoryMap: memoryStatsArrayToMap(index && index.memories),
     ready: !!index,
   };
   return _skillUsageState;
@@ -2550,6 +2681,7 @@ function refreshSkillUsageInBackground({ force = false } = {}) {
     const worker = new Worker(SKILL_USAGE_WORKER_FILE, {
       workerData: {
         projectsRoot: path.join(os.homedir(), '.claude', 'projects'),
+        memoryDir: MEMORY_DIR,
         previous: state.index,
       },
     });
@@ -2579,6 +2711,7 @@ function refreshSkillUsageInBackground({ force = false } = {}) {
         _skillUsageState = {
           index: result.index,
           map: skillStatsArrayToMap(result.index.skills),
+          memoryMap: memoryStatsArrayToMap(result.index.memories),
           ready: true,
         };
         console.log(
@@ -3405,6 +3538,67 @@ ipcMain.handle('data:write', (_e, { kind, content }) => {
 //   这样「关掉」是真关(条目离开 mcpServers,claude 不会再起它),且配置不丢、可一键移回。
 //   —— 不用「entry 里加 disabled:true」是因为 claude.exe 是否honor该标记不确定,移走才 100% 可靠。
 const MCP_DISABLED_KEY = 'mcpServersDisabled';
+const MCP_CONTROL_TIMEOUT_MS = 12000;
+
+function readClaudeMcpRegistry() {
+  const file = claudeJsonPath();
+  let cfg = {};
+  if (fs.existsSync(file)) {
+    try { cfg = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')); }
+    catch (e) { return { ok: false, message: '.claude.json 解析失败：' + e.message, file, cfg: {} }; }
+  }
+  return {
+    ok: true,
+    file,
+    cfg,
+    enabled: cfg.mcpServers || {},
+    disabled: cfg[MCP_DISABLED_KEY] || {},
+  };
+}
+
+function mcpControlSession(convId) {
+  if (!convId) return null;
+  const sess = liveSessions.get(convId);
+  if (!sess || sess.dead || !sess.child) return null;
+  return sess;
+}
+
+function withMcpControlTimeout(promise, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}超时`)), MCP_CONTROL_TIMEOUT_MS);
+      if (timer.unref) timer.unref();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// SDK 状态里可能带 MCP config（其中 env 可能含密钥）。renderer 只需要展示状态，
+// 所以严格挑选公开字段，绝不把 config 原样跨 IPC 发出去。
+function publicMcpStatus(item) {
+  return {
+    name: String((item && item.name) || ''),
+    status: String((item && item.status) || 'failed'),
+    error: item && item.error ? String(item.error) : '',
+    scope: item && item.scope ? String(item.scope) : '',
+    toolCount: item && Array.isArray(item.tools) ? item.tools.length : 0,
+    serverInfo: item && item.serverInfo
+      ? { name: String(item.serverInfo.name || ''), version: String(item.serverInfo.version || '') }
+      : null,
+  };
+}
+
+async function syncMcpConfigToLiveSession(sess) {
+  const registry = readClaudeMcpRegistry();
+  if (!registry.ok) return registry;
+  const result = await withMcpControlTimeout(
+    sess.child.setMcpServers(registry.enabled),
+    '同步 MCP 配置',
+  );
+  return { ok: true, result };
+}
+
 // 安全读改写 .claude.json:BOM 剥离 + 解析失败拒写(绝不冲掉会话/onboarding 等其他键)+ 原子写。
 function mutateClaudeJson(fn) {
   const f = claudeJsonPath();
@@ -3430,21 +3624,64 @@ function mcpSummary(c) {
 }
 // 列出全部 MCP 服务器:启用(mcpServers)+ 禁用(sidecar),各带 enabled 标记 + 摘要,按名称排序。
 ipcMain.handle('mcp:list', () => {
-  const f = claudeJsonPath();
-  let cfg = {};
-  if (fs.existsSync(f)) { try { cfg = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, '')); } catch (e) { console.warn('[mcp] 解析 claude.json 失败: %s', e.message); } }
-  const on = cfg.mcpServers || {};
-  const off = cfg[MCP_DISABLED_KEY] || {};
+  const registry = readClaudeMcpRegistry();
+  if (!registry.ok) return registry;
+  const on = registry.enabled;
+  const off = registry.disabled;
   const items = [];
   for (const [name, c] of Object.entries(on))  items.push({ name, enabled: true,  summary: mcpSummary(c) });
   for (const [name, c] of Object.entries(off)) items.push({ name, enabled: false, summary: mcpSummary(c) });
   items.sort((a, b) => a.name.localeCompare(b.name));
-  return { ok: true, items, path: f };
+  return { ok: true, items, path: registry.file };
 });
-// 启停:在 mcpServers ↔ mcpServersDisabled 之间搬运该条目。enabled=目标状态。
-ipcMain.handle('mcp:toggle', (_e, { name, enabled } = {}) => {
+
+// 当前常驻 Query 的真实 MCP 状态。没有常驻会话不算错误：设置页仍可管理磁盘配置，
+// 下一次对话启动时自然加载。
+ipcMain.handle('mcp:status', async (_e, { convId } = {}) => {
+  const sess = mcpControlSession(convId);
+  if (!sess) return { ok: true, available: false, busy: false, items: [] };
+  try {
+    const statuses = await withMcpControlTimeout(sess.child.mcpServerStatus(), '读取 MCP 状态');
+    return { ok: true, available: true, busy: !!sess.busy, items: (statuses || []).map(publicMcpStatus) };
+  } catch (e) {
+    return { ok: false, available: true, busy: !!sess.busy, message: e.message || '读取 MCP 状态失败' };
+  }
+});
+
+ipcMain.handle('mcp:reconnect', async (_e, { convId, name } = {}) => {
   if (!name) return { ok: false, message: '缺少服务器名称' };
-  return mutateClaudeJson((cfg) => {
+  const sess = mcpControlSession(convId);
+  if (!sess) return { ok: false, unavailable: true, message: '当前对话尚未启动 Claude 会话' };
+  if (sess.busy) return { ok: false, busy: true, message: '当前对话还在回复中，请结束后再重连' };
+  try {
+    await withMcpControlTimeout(sess.child.reconnectMcpServer(name), `重连 ${name}`);
+    const statuses = await withMcpControlTimeout(sess.child.mcpServerStatus(), '刷新 MCP 状态');
+    return { ok: true, items: (statuses || []).map(publicMcpStatus) };
+  } catch (e) {
+    return { ok: false, message: e.message || `重连「${name}」失败` };
+  }
+});
+
+// 将磁盘里当前启用的配置作为 SDK 动态 MCP 同步到本会话。用于用户在 Relay 外部
+// 修改 .claude.json 后即时发现新增服务；SDK 包装层会自动保留 relay-cron 等内置服务。
+ipcMain.handle('mcp:sync', async (_e, { convId } = {}) => {
+  const sess = mcpControlSession(convId);
+  if (!sess) return { ok: false, unavailable: true, message: '当前对话尚未启动 Claude 会话' };
+  if (sess.busy) return { ok: false, busy: true, message: '当前对话还在回复中，请结束后再同步' };
+  try {
+    const synced = await syncMcpConfigToLiveSession(sess);
+    if (!synced.ok) return synced;
+    const statuses = await withMcpControlTimeout(sess.child.mcpServerStatus(), '刷新 MCP 状态');
+    return { ok: true, result: synced.result, items: (statuses || []).map(publicMcpStatus) };
+  } catch (e) {
+    return { ok: false, message: e.message || '同步 MCP 配置失败' };
+  }
+});
+
+// 启停:在 mcpServers ↔ mcpServersDisabled 之间搬运该条目。enabled=目标状态。
+ipcMain.handle('mcp:toggle', async (_e, { name, enabled, convId } = {}) => {
+  if (!name) return { ok: false, message: '缺少服务器名称' };
+  const changed = mutateClaudeJson((cfg) => {
     cfg.mcpServers = cfg.mcpServers || {};
     cfg[MCP_DISABLED_KEY] = cfg[MCP_DISABLED_KEY] || {};
     const from = enabled ? cfg[MCP_DISABLED_KEY] : cfg.mcpServers;
@@ -3458,17 +3695,64 @@ ipcMain.handle('mcp:toggle', (_e, { name, enabled } = {}) => {
     delete from[name];
     if (Object.keys(cfg[MCP_DISABLED_KEY]).length === 0) delete cfg[MCP_DISABLED_KEY];   // 空了就别留垃圾键
   });
+  if (!changed.ok) return changed;
+  const sess = mcpControlSession(convId);
+  if (!sess) return { ok: true, liveApplied: false };
+  if (sess.busy) return { ok: true, liveApplied: false, deferred: true, message: '配置已保存，将在下次会话启动时生效' };
+  try {
+    // 先同步集合让“此前未加载的禁用服务”进入当前 Query，再切换状态；停用时
+    // toggle 会立即断开 settings-owned 实例，随后 setMcpServers 清理动态副本。
+    if (enabled) {
+      const synced = await syncMcpConfigToLiveSession(sess);
+      if (!synced.ok) throw new Error(synced.message || '同步 MCP 配置失败');
+    }
+    let toggleError = null;
+    try {
+      await withMcpControlTimeout(sess.child.toggleMcpServer(name, !!enabled), `${enabled ? '启用' : '停用'} ${name}`);
+    } catch (e) {
+      toggleError = e;
+      // 停用一个本轮尚未发现的服务可能返回 unknown；仍继续同步动态集合，确保
+      // Relay 通过 setMcpServers 加入的同名实例被移除。
+      if (enabled) throw e;
+    }
+    if (!enabled) {
+      const synced = await syncMcpConfigToLiveSession(sess);
+      if (!synced.ok) throw new Error(synced.message || '同步 MCP 配置失败');
+    }
+    return { ok: true, liveApplied: !toggleError, message: toggleError ? '已保存停用配置；当前会话未发现该服务' : '' };
+  } catch (e) {
+    console.warn('[mcp] 配置已保存但当前会话即时启停失败 name=%s: %s', name, e.message);
+    return { ok: true, liveApplied: false, deferred: true, message: '配置已保存，当前会话同步失败；可尝试“同步配置”' };
+  }
 });
 // 删除:从启用或禁用任一处移除该条目(彻底删,不可恢复)。
-ipcMain.handle('mcp:delete', (_e, { name } = {}) => {
+ipcMain.handle('mcp:delete', async (_e, { name, convId } = {}) => {
   if (!name) return { ok: false, message: '缺少服务器名称' };
-  return mutateClaudeJson((cfg) => {
+  const changed = mutateClaudeJson((cfg) => {
     let hit = false;
     if (cfg.mcpServers && name in cfg.mcpServers) { delete cfg.mcpServers[name]; hit = true; }
     if (cfg[MCP_DISABLED_KEY] && name in cfg[MCP_DISABLED_KEY]) { delete cfg[MCP_DISABLED_KEY][name]; hit = true; }
     if (cfg[MCP_DISABLED_KEY] && Object.keys(cfg[MCP_DISABLED_KEY]).length === 0) delete cfg[MCP_DISABLED_KEY];
     if (!hit) return { ok: false, message: `未找到服务器「${name}」` };
   });
+  if (!changed.ok) return changed;
+  const sess = mcpControlSession(convId);
+  if (!sess || sess.busy) return { ok: true, liveApplied: false, deferred: !!(sess && sess.busy) };
+  try {
+    let toggleError = null;
+    try { await withMcpControlTimeout(sess.child.toggleMcpServer(name, false), `停用 ${name}`); }
+    catch (e) { toggleError = e; }
+    const synced = await syncMcpConfigToLiveSession(sess);
+    if (!synced.ok) throw new Error(synced.message || '同步 MCP 配置失败');
+    return {
+      ok: true,
+      liveApplied: !toggleError,
+      message: toggleError ? '配置已删除；当前会话未发现该服务' : '',
+    };
+  } catch (e) {
+    console.warn('[mcp] 已删除配置但当前会话清理失败 name=%s: %s', name, e.message);
+    return { ok: true, liveApplied: false, deferred: true, message: '配置已删除，当前会话仍可能保留旧工具；可使用“重建会话”兜底' };
+  }
 });
 
 ipcMain.handle('data:listAgents', () => ({ ok: true, items: listAgentNames(), dir: AGENTS_DIR }));
@@ -3690,7 +3974,7 @@ ipcMain.handle('skills:overview', (_e, { refresh = true } = {}) => {
     );
     const items = skillList.map((s) => {
       const rec = sidecar[s.name] || {};
-      const u = usage.get(s.name) || { useCount: 0, lastUsedAt: null };
+      const u = usage.get(s.callName || s.name) || usage.get(s.name) || { useCount: 0, lastUsedAt: null };
       return {
         name: s.name,
         callName: s.callName || s.name,
@@ -3700,6 +3984,12 @@ ipcMain.handle('skills:overview', (_e, { refresh = true } = {}) => {
         defaultPrompt: s.defaultPrompt || '',
         useCount: u.useCount || 0,
         lastUsedAt: u.lastUsedAt || null,
+        feedbackOpportunities: u.feedbackOpportunities || 0,
+        correctionCount: u.correctionCount || 0,
+        retryCount: u.retryCount || 0,
+        toolErrorCount: u.toolErrorCount || 0,
+        positiveCount: u.positiveCount || 0,
+        lastNegativeAt: u.lastNegativeAt || null,
         state: rec.state || 'active',
         pinned: !!rec.pinned,
         createdBy: rec.createdBy || null,   // 'agent'=对话自动提炼生成;null=用户手动导入
@@ -3846,15 +4136,17 @@ ipcMain.handle('skills:setStaleDays', (_e, { days } = {}) => {
 
 // ─────────────────────────────────────────
 // Curator 二期:技能自动生成(方案 B 全自动)
-//   每 N 轮对话后,后台 spawn 一个 claude -p 回看刚结束的对话,判断有没有值得固化成技能的经验,
-//   有就直接在 ~/.claude/skills 写/改 SKILL.md。新生成的技能标 createdBy:agent,交一期 Curator 管理。
+//   用户纠正/重试/连续工具失败等强信号命中时立即触发；每 N 轮仅作兜底。后台 spawn 一个
+//   claude -p 回看刚结束的对话,判断有没有值得固化成技能的经验,
+//   有就直接在 ~/.claude/skills 写/改 SKILL.md。新生成的技能会补齐 agents/relay.yaml,
+//   并标 createdBy:agent,交一期 Curator 管理。
 //   prompt 改写自 Hermes agent/background_review.py 的 _SKILL_REVIEW_PROMPT。
 // ─────────────────────────────────────────
 const REVIEW_DEFAULT_EVERY = 6;
 
 // 中文版技能 review 指令(要点照搬 Hermes:积极但别造碎技能、优先 patch 已有/伞技能、类级命名、
 //   不要把环境性失败固化成约束、没值得学的就停)。对话正文由调用方拼在末尾。
-const SKILL_REVIEW_PROMPT = [
+const SKILL_REVIEW_PROMPT_HEAD = [
   '你现在作为后台「技能策展」在运行:回看下面这段刚结束的对话,判断有没有值得沉淀进技能库的经验,有就更新技能库。',
   '',
   '技能库目录(已授权你读写,绝对路径):' + SKILLS_DIR + '。在这个目录下操作技能,每个技能是一个子目录,内含 SKILL.md(带 YAML frontmatter:name/description,description 一句话、说清这个技能"做什么、什么时候用")。',
@@ -3875,27 +4167,156 @@ const SKILL_REVIEW_PROMPT = [
   '· 只在本次会话里有意义的一次性叙事(「总结今天的行情」「分析这个 PR」不是一类值得建技能的工作)。',
   '',
   '硬规则:',
-  '· 用 Write/Edit/Read 工具直接在上面那个技能目录里建/改文件。新建技能就建 <技能名>/SKILL.md。',
+  '· 用 Write/Edit/Read 工具直接在上面那个技能目录里建/改文件。新建技能就建 <技能名>/SKILL.md；Relay 会在任务完成后自动补齐 agents/relay.yaml,不要手写展示元数据。',
+  '· patch 已有技能前必须先 Read 它的 SKILL.md；自动提炼只允许修改 SKILL.md,不要改 scripts/references/assets 等配套文件。',
+  '· 绝对不要读取或修改技能目录下任何 . 开头的目录或文件,尤其是 .history/.archive/.usage.json。',
   '· 一次最多动 1~2 个技能,不要刷一堆。',
   '· description 要精炼准确(它会被用来检索这个技能)。',
   '· 如果这次对话平顺、没有纠正、也没冒出新技巧——就直接回一句「无需更新」然后停下,不要硬凑。',
   '',
-  '下面是这次对话的内容:',
-  '',
 ].join('\n');
 
 let reviewInflight = false;   // 并发护栏:同时只允许一个 review 在跑
+const pendingSkillReviews = []; // 忙时排队；不能因上一轮 review 尚未结束就吞掉新的纠正信号
+const MAX_PENDING_SKILL_REVIEWS = 6;
+
+function buildSkillReviewPrompt(conversationText, triggerReason = '') {
+  let listText = '(技能库为空,如确有可复用经验可新建类级技能。)';
+  try {
+    const sidecar = readSkillUsage();
+    const skills = listSkillNames();
+    if (skills.length) {
+      listText = skills.map((skill) => {
+        const usage = sidecar[skill.name] || {};
+        const tags = [usage.pinned ? 'PINNED' : '', usage.createdBy === 'agent' ? '自动生成' : '']
+          .filter(Boolean).join(' / ');
+        const desc = String(skill.desc || skill.summary || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+        return `· ${skill.name}${skill.callName && skill.callName !== skill.name ? ` (调用 ID: ${skill.callName})` : ''}${tags ? ` [${tags}]` : ''}\n    ${desc || '(无 description)'}\n    文件: ${path.join(SKILLS_DIR, skill.name, 'SKILL.md')}`;
+      }).join('\n');
+    }
+  } catch (e) {
+    console.warn('[skill-review] 读取现有技能清单失败: %s', e.message);
+    listText = '(清单读取失败；先用 Glob 查看技能目录,确认没有现有技能可 patch 后才能新建。)';
+  }
+  return [
+    SKILL_REVIEW_PROMPT_HEAD,
+    '',
+    `触发原因:${triggerReason || '定期兜底检查'}`,
+    '',
+    '当前已安装技能清单(优先从这里选择候选并 patch,不要创建同义重复技能):',
+    listText,
+    '',
+    '下面是这次对话及紧凑工具轨迹:',
+    '',
+    String(conversationText || '').trim(),
+  ].join('\n');
+}
+
+const SKILL_HISTORY_DIR = () => path.join(SKILLS_DIR, '.history');
+const SKILL_HISTORY_KEEP = 20;
+
+function fileSha256(file) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); }
+  catch (_) { return null; }
+}
+
+// review 前把全部现有 SKILL.md 暂存。结束后只保留真正被修改/删除的旧版本；
+// 即使 Relay 中途退出,.pending 也保留可恢复的 pre-image,下次 review 会自动收口。
+function snapshotSkillsBeforeReview() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const id = `${stamp}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const pendingDir = path.join(SKILL_HISTORY_DIR(), '.pending', id);
+  const entries = [];
+  fs.mkdirSync(pendingDir, { recursive: true });
+  for (const skill of listSkillNames()) {
+    const source = path.join(SKILLS_DIR, skill.name, 'SKILL.md');
+    if (!fs.existsSync(source)) continue;
+    const backup = path.join(pendingDir, `${skill.name}.md`);
+    fs.copyFileSync(source, backup);
+    entries.push({ name: skill.name, source, backup, hash: fileSha256(source) });
+  }
+  const snapshot = { id, stamp, pendingDir, entries };
+  fs.writeFileSync(path.join(pendingDir, 'manifest.json'), JSON.stringify(snapshot, null, 2), 'utf8');
+  return snapshot;
+}
+
+function pruneSkillHistory(skillDir) {
+  try {
+    const files = fs.readdirSync(skillDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
+      .map((entry) => ({ file: path.join(skillDir, entry.name), mtime: fs.statSync(path.join(skillDir, entry.name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const stale of files.slice(SKILL_HISTORY_KEEP)) {
+      fs.rmSync(stale.file, { force: true });
+      fs.rmSync(stale.file.replace(/\.md$/i, '.json'), { force: true });
+    }
+  } catch (_) {}
+}
+
+function finalizeSkillReviewSnapshot(snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.entries)) return [];
+  const changed = [];
+  for (const entry of snapshot.entries) {
+    const currentHash = fileSha256(entry.source);
+    if (currentHash === entry.hash) continue;
+    try {
+      const destDir = path.join(SKILL_HISTORY_DIR(), entry.name);
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, `${snapshot.stamp}-before-review.md`);
+      fs.copyFileSync(entry.backup, dest);
+      fs.writeFileSync(dest.replace(/\.md$/i, '.json'), JSON.stringify({
+        skill: entry.name,
+        capturedAt: snapshot.stamp,
+        beforeHash: entry.hash,
+        afterHash: currentHash,
+        deleted: currentHash == null,
+      }, null, 2), 'utf8');
+      pruneSkillHistory(destDir);
+      changed.push(entry.name);
+    } catch (e) { console.warn('[skill-review] 保存 %s 历史版本失败: %s', entry.name, e.message); }
+  }
+  try { fs.rmSync(snapshot.pendingDir, { recursive: true, force: true }); } catch (_) {}
+  return changed;
+}
+
+function reconcileAbandonedSkillReviewSnapshots() {
+  const root = path.join(SKILL_HISTORY_DIR(), '.pending');
+  let dirs = [];
+  try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch (_) { return; }
+  for (const dir of dirs) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(root, dir.name, 'manifest.json'), 'utf8'));
+      const changed = finalizeSkillReviewSnapshot(manifest);
+      if (changed.length) console.warn('[skill-review] 已恢复上次中断任务的修改前版本: %s', changed.join(', '));
+    } catch (e) { console.warn('[skill-review] 清理中断快照失败 %s: %s', dir.name, e.message); }
+  }
+}
 
 // 后台跑一次技能 review。fire-and-forget;不串聊天 UI 事件、不计入 MAX_PARALLEL_JOBS。
-function runSkillReviewJob({ conversationText, workingDir } = {}) {
-  if (reviewInflight) { console.log('[skill-review] 上一次 review 仍在跑,跳过本次'); return; }
+function runSkillReviewJob({ conversationText, workingDir, triggerReason } = {}) {
+  if (reviewInflight) {
+    pendingSkillReviews.push({ conversationText, workingDir, triggerReason });
+    if (pendingSkillReviews.length > MAX_PENDING_SKILL_REVIEWS) {
+      pendingSkillReviews.splice(0, pendingSkillReviews.length - MAX_PENDING_SKILL_REVIEWS);
+    }
+    console.log('[skill-review] 上一次 review 仍在跑,已排队触发 queue=%d', pendingSkillReviews.length);
+    return { started: false, queued: true };
+  }
   const text = String(conversationText || '').trim();
-  if (!text) return;
+  if (!text) return { started: false, skipped: 'empty' };
 
   reviewInflight = true;
   try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); } catch (_) {}
+  reconcileAbandonedSkillReviewSnapshots();
+  let reviewSnapshot = null;
+  try { reviewSnapshot = snapshotSkillsBeforeReview(); }
+  catch (e) { console.warn('[skill-review] 创建修改前快照失败: %s', e.message); }
   // 跑前快照现有技能名(用于完成后 diff 出新生成的技能 → 标 createdBy:agent)
-  const beforeSet = new Set(listSkillNames().map((s) => s.name));
+  const beforeSet = new Set(
+    listSkillNames()
+      .filter((s) => fs.existsSync(path.join(SKILLS_DIR, s.name, 'SKILL.md')))
+      .map((s) => s.name),
+  );
 
   // review 在技能目录里跑(cwd),工作目录无关紧要;给个稳定 cwd 即可
   const cwd = (workingDir && fs.existsSync(workingDir)) ? workingDir : SKILLS_DIR;
@@ -3903,18 +4324,25 @@ function runSkillReviewJob({ conversationText, workingDir } = {}) {
   // 输出静默消费(不串聊天 UI);只在结束时看有没有新技能。
   //   仅授权技能目录写权限(不挂记忆/工作目录/cron);90s 硬超时防模型卡死。
   claudeSdk.runText({
-    prompt: SKILL_REVIEW_PROMPT + text,
+    prompt: buildSkillReviewPrompt(text, triggerReason),
     cwd,
     model: 'haiku',                       // review 走 haiku 档(用户选定;出问题再调)
     permissionMode: 'bypassPermissions',  // 后台无人值守,自动放行(只授权了技能目录)
     additionalDirectories: [SKILLS_DIR],
     timeoutMs: 90000,
-  }).then(() => {
-    reviewInflight = false;
+  }).then(async () => {
+    const finishedSnapshot = reviewSnapshot;
+    reviewSnapshot = null;
+    const patched = finalizeSkillReviewSnapshot(finishedSnapshot);
+    if (patched.length) console.log('[skill-review] 已保存修改前版本:', patched.join(', '));
     // diff:跑后新出现的技能 = 自动生成的
     let created = [];
     try {
-      const afterSet = new Set(listSkillNames().map((s) => s.name));
+      const afterSet = new Set(
+        listSkillNames()
+          .filter((s) => fs.existsSync(path.join(SKILLS_DIR, s.name, 'SKILL.md')))
+          .map((s) => s.name),
+      );
       created = [...afterSet].filter((n) => !beforeSet.has(n));
     } catch (e) { console.warn('[skill-review] 检测新技能失败: %s', e.message); }
     if (created.length) {
@@ -3929,7 +4357,22 @@ function runSkillReviewJob({ conversationText, workingDir } = {}) {
           sidecar[n] = rec;
         }
         writeSkillUsage(sidecar);
-      } catch (e) { console.warn('[skill-review] 更新技能元数据失败: %s', e.message); }
+      } catch (e) { console.warn('[skill-review] 更新技能生命周期失败: %s', e.message); }
+
+      // 自动生成 Skill 与导入/历史回填共用同一条展示元数据管线：
+      // LLM 优先生成中文标题和摘要，失败时仍会用 SKILL.md/openai.yaml 回退并落盘。
+      const createdSkillDirs = created
+        .map((name) => path.join(SKILLS_DIR, name))
+        .filter((dir) => fs.existsSync(path.join(dir, 'SKILL.md')));
+      if (createdSkillDirs.length) {
+        const metadataResult = await generateImportedSkillPresentations(createdSkillDirs);
+        console.log(
+          '[skill-review] 自动生成 Skill 展示元数据完成: llm=%d fallback=%d',
+          metadataResult.llmCount,
+          metadataResult.fallbackCount,
+        );
+      }
+
       // 轻量通知,让用户知道发生了什么(全自动但不黑箱)
       try {
         if (Notification.isSupported()) {
@@ -3941,9 +4384,18 @@ function runSkillReviewJob({ conversationText, workingDir } = {}) {
       console.log('[skill-review] 本次无新增技能');
     }
   }).catch((e) => {
-    reviewInflight = false;
+    const failedSnapshot = reviewSnapshot;
+    reviewSnapshot = null;
+    const patched = finalizeSkillReviewSnapshot(failedSnapshot);
+    if (patched.length) console.warn('[skill-review] 异常结束,已保留修改前版本: %s', patched.join(', '));
     console.error('[skill-review] 执行出错:', e && e.message);
+  }).finally(() => {
+    // relay.yaml 生成也属于同一次 review；全部落盘后才允许下一轮进入。
+    reviewInflight = false;
+    const pending = pendingSkillReviews.shift();
+    if (pending) setImmediate(() => runSkillReviewJob(pending));
   });
+  return { started: true, queued: false };
 }
 
 // 读/写 二期配置(总开关 + 频率)
@@ -3956,12 +4408,11 @@ function getReviewConfig() {
   };
 }
 
-// renderer 在 finishRun 里每 N 轮调它(已在 renderer 侧判好节奏/排除条件,这里只管跑)
-ipcMain.handle('skills:autoReview', (_e, { conversationText, workingDir } = {}) => {
+// renderer 在 finishRun 里按强信号或周期兜底调它(已在 renderer 侧判好节奏/排除条件,这里只管跑)
+ipcMain.handle('skills:autoReview', (_e, { conversationText, workingDir, triggerReason } = {}) => {
   try {
     if (!getReviewConfig().enabled) return { ok: false, skipped: 'disabled' };
-    runSkillReviewJob({ conversationText, workingDir });
-    return { ok: true };
+    return { ok: true, ...runSkillReviewJob({ conversationText, workingDir, triggerReason }) };
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
@@ -4006,6 +4457,7 @@ const SKILL_CURATOR_PROMPT_HEAD = [
   '4. 包完整性:某个技能带 references/ templates/ scripts/ assets/ 子文件、或 SKILL.md 里有指向这些的相对链接时,不要只把它的 SKILL.md 拍扁塞进别人的 references。三选一:要么整体保留为独立技能、要么连子文件一起搬进伞技能对应目录并改写路径、要么整包原样归档。绝不能留下指向"已被搬走的旧目录"的死链接。',
   '5. 名字太窄的技能(带 PR 号、某个报错串、功能代号、"fix-X/debug-Y/今天的Z"这种一次性命名)几乎都该作为某个伞技能的小节或子文件,而不是独立技能。',
   '6. 稳健:每次只处理你有把握的簇。拿不准是否该合并的,保持原样别动。技能数量很少时(比如就两三个、彼此无关),直接保持现状、什么都不做也是对的。',
+  '7. 质量遥测只是证据:纠正/重试/工具报错可能由任务本身或多个技能共同造成。不得仅凭单次负向信号归档技能;优先 Read 内容判断,多次稳定负向证据才用于提示合并或修订。',
   '',
   '做完后,在回复末尾输出一段结构化 YAML(给系统善后用),格式严格如下:',
   '```yaml',
@@ -4026,6 +4478,7 @@ function buildSkillCuratorPrompt() {
   let listText = '', count = 0;
   try {
     const sidecar = readSkillUsage();
+    const usageState = loadSkillUsageState();
     const skills = listSkillNames();
     count = skills.length;
     if (!skills.length) {
@@ -4034,7 +4487,11 @@ function buildSkillCuratorPrompt() {
       listText = skills.map((s) => {
         const pinned = sidecar[s.name] && sidecar[s.name].pinned ? '  [PINNED-跳过]' : '';
         const desc = (s.desc || '').slice(0, 120);
-        return `· ${s.name}${pinned}\n    ${desc}`;
+        const u = usageState.map.get(s.callName || s.name) || usageState.map.get(s.name) || {};
+        const telemetry = `调用 ${Number(u.useCount) || 0};反馈机会 ${Number(u.feedbackOpportunities) || 0};` +
+          `纠正 ${Number(u.correctionCount) || 0};重试 ${Number(u.retryCount) || 0};工具报错 ${Number(u.toolErrorCount) || 0};` +
+          `正向确认 ${Number(u.positiveCount) || 0}${u.lastNegativeAt ? `;最近负向 ${u.lastNegativeAt}` : ''}`;
+        return `· ${s.name}${pinned}\n    ${desc}\n    遥测:${telemetry}`;
       }).join('\n');
     }
   } catch (e) { console.warn('[curator] 读取技能清单失败: %s', e.message); listText = '(读取技能清单失败,请你自己用 Bash ls 看当前目录)'; }
@@ -4047,6 +4504,11 @@ let curatorBeforeSnapshot = null;
 function snapshotSkillsBeforeCurator() {
   try { curatorBeforeSnapshot = new Set(listSkillNames().map((s) => s.name)); }
   catch (e) { console.warn('[curator] 快照技能列表失败: %s', e.message); curatorBeforeSnapshot = null; }
+}
+
+async function prepareSkillCurator() {
+  try { await refreshSkillUsageInBackground({ force: true }); } catch (_) {}
+  snapshotSkillsBeforeCurator();
 }
 
 // 体检任务跑完后善后:把被 mv 进 .archive/ 的技能在 sidecar 里标 archived;真正新建的伞技能标 createdBy:agent。
@@ -4262,7 +4724,9 @@ function memoryFileAbs(file) {
 // 列出所有记忆条目(MEMORY.md 自身除外):名称 + frontmatter 摘要,按修改时间倒序。
 ipcMain.handle('memory:list', () => {
   try {
+    refreshSkillUsageInBackground().catch(() => {});
     if (!fs.existsSync(MEMORY_DIR)) return { ok: true, items: [], dir: MEMORY_DIR, hasIndex: false };
+    const sidecar = readMemoryUsage();
     const items = fs.readdirSync(MEMORY_DIR, { withFileTypes: true })
       .filter((e) => e.isFile() && e.name.toLowerCase().endsWith('.md') && e.name.toLowerCase() !== 'memory.md')
       .map((e) => {
@@ -4270,17 +4734,40 @@ ipcMain.handle('memory:list', () => {
         let fm = {}, mtime = 0;
         try { fm = parseFrontmatter(fs.readFileSync(p, 'utf8')); } catch (_) {}
         try { mtime = fs.statSync(p).mtimeMs; } catch (_) {}
+        const frontmatterPinned = memoryFlag(fm.core) || memoryFlag(fm.pinned);
+        const usage = memoryReadStats(e.name) || {};
         return {
           file: e.name,
           name: fm.name || e.name.replace(/\.md$/i, ''),
           description: fm.description || '',
           type: fm.type || '',
           mtime,
+          pinned: frontmatterPinned || !!(sidecar[e.name] && sidecar[e.name].pinned),
+          pinnedInFile: frontmatterPinned,
+          exposureCount: Math.max(0, Number(sidecar[e.name] && sidecar[e.name].exposureCount) || 0),
+          readCount: Math.max(0, Number(usage.readCount) || 0),
+          lastReadAt: usage.lastReadAt || null,
         };
       })
-      .sort((a, b) => b.mtime - a.mtime);
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.mtime - a.mtime);
     return { ok: true, items, dir: MEMORY_DIR, hasIndex: fs.existsSync(MEMORY_INDEX) };
   } catch (e) { return { ok: false, items: [], error: e.message }; }
+});
+
+ipcMain.handle('memory:setPinned', (_e, { file, pinned } = {}) => {
+  try {
+    const abs = memoryFileAbs(file);
+    if (!abs || path.basename(abs).toLowerCase() === 'memory.md') return { ok: false, message: '非法记忆文件' };
+    if (!fs.existsSync(abs)) return { ok: false, message: '文件不存在' };
+    const usage = readMemoryUsage();
+    const key = path.basename(abs);
+    const rec = usage[key] && typeof usage[key] === 'object' ? usage[key] : {};
+    rec.pinned = !!pinned;
+    usage[key] = rec;
+    flushMemoryUsage();
+    rebuildMemoryIndex();
+    return { ok: true, pinned: rec.pinned };
+  } catch (e) { return { ok: false, message: e.message }; }
 });
 
 // 读单条记忆原文(也用于读 MEMORY.md:传 file='MEMORY.md')
@@ -4321,6 +4808,9 @@ ipcMain.handle('memory:remove', (_e, file) => {
       return { ok: false, message: '索引由系统自动维护,不能单独删除。' };
     }
     if (fs.existsSync(abs)) fs.rmSync(abs, { force: true });
+    const usage = readMemoryUsage();
+    delete usage[path.basename(abs)];
+    flushMemoryUsage();
     rebuildMemoryIndex();   // #1:删了正文,索引里对应行自动清掉
     return { ok: true };
   } catch (e) { return { ok: false, message: e.message }; }
@@ -4462,14 +4952,16 @@ function initScheduler() {
       userDataDir: app.getPath('userData'),
       runClaudeJob,                       // 执行核心（上面抽出的纯函数）
       buildMemoryHint,                    // 长期记忆注入（chat 任务默认只读 'read'，整理任务 'full'）
+      buildSkillCuratorPrompt,            // 技能体检每次运行前动态注入最新清单与质量遥测
       generateImage: generateImageCore,   // 定时出图（type=image）复用图像生成核心
       saveConversation,                   // chat/出图结果落历史（v2 目录式:单条写入,不再整库读写）
       loadConversation,                   // 读单条会话（被删→null）：同一任务多次执行复用同一条会话
       readAppSettings, writeAppSettings,  // 开机自启等开关
       refreshTray: refreshTrayMenu,       // 托盘「下一个任务」提示刷新
       getMainWindow: () => mainWindow,    // 推送 sched:update 给 renderer
-      onSkillCuratorStart: snapshotSkillsBeforeCurator,      // 技能体检任务开始前拍技能名快照
+      onSkillCuratorStart: prepareSkillCurator,              // 刷新遥测并拍技能名快照
       onSkillCuratorDone: reconcileSkillSidecarFromArchive,  // 技能体检任务完成后善后 sidecar + 通知
+      onMemoryMaintenanceStart: () => refreshSkillUsageInBackground({ force: true }), // 整理前刷新记忆实读遥测
       notify: ({ title, body }) => {
         try {
           if (Notification.isSupported()) {
@@ -4594,6 +5086,7 @@ app.on('window-all-closed', () => {
 // 退出前兜底清理:无论从哪条路径退出,都确保子进程被杀、托盘被销毁(否则托盘图标残留)
 app.on('before-quit', () => {
   isQuitting = true;
+  if (_memoryUsageFlushTimer) flushMemoryUsage();
   for (const [, child] of jobs) { try { child.kill('SIGTERM'); } catch (_) {} }
   jobs.clear();
   for (const sess of [...liveSessions.values()]) killLiveSession(sess, '应用退出');

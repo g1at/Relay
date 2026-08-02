@@ -174,7 +174,18 @@ function runOneShot({ prompt, onEvent, ...rest }) {
 function createLiveSession({ onMessage, onExit, ...rest }) {
   const abortController = new AbortController();
   let child = null;
+  let queryInstance = null;
+  let baseMcpServers = {};
   let closed = false;
+  let resolveQuery;
+  let rejectQuery;
+  const queryReady = new Promise((resolve, reject) => {
+    resolveQuery = resolve;
+    rejectQuery = reject;
+  });
+  // 控制接口通常不会被调用；预先吞掉未观察的拒绝，避免 SDK 初始化失败时产生
+  // unhandledRejection。真正调用控制接口时仍会收到同一个错误。
+  queryReady.catch(() => {});
   const queue = [];              // 已入队待消费的用户消息
   let waiter = null;             // 消费者在等下一条时挂在这里
 
@@ -186,6 +197,15 @@ function createLiveSession({ onMessage, onExit, ...rest }) {
     }
   }
   const wake = () => { if (waiter) { const w = waiter; waiter = null; w(); } };
+
+  const control = async (method, ...args) => {
+    const query = await queryReady;
+    if (closed || !query) throw new Error('Claude 会话已关闭');
+    // initializationResult 会等待 CLI 控制通道准备完成；不依赖 renderer 猜测启动时机。
+    await query.initializationResult();
+    if (typeof query[method] !== 'function') throw new Error(`当前 Claude SDK 不支持 ${method}`);
+    return query[method](...args);
+  };
 
   const session = {
     get pid() { return child ? child.pid : null; },
@@ -208,6 +228,14 @@ function createLiveSession({ onMessage, onExit, ...rest }) {
       wake();
       try { abortController.abort(); } catch (_) {}
     },
+    // MCP 控制通道：只在流式 Query 中可用。Relay 主进程通过这些方法做状态查询和
+    // 热重连，不再为了普通连接故障丢弃整个 Claude session。
+    mcpServerStatus() { return control('mcpServerStatus'); },
+    reconnectMcpServer(name) { return control('reconnectMcpServer', name); },
+    toggleMcpServer(name, enabled) { return control('toggleMcpServer', name, !!enabled); },
+    // 保留会话启动时由 Relay 注入的进程内 MCP（例如 relay-cron）。SDK 的
+    // setMcpServers 是“替换动态集合”语义，直接传用户配置会误把这些内置服务移除。
+    setMcpServers(servers) { return control('setMcpServers', { ...baseMcpServers, ...(servers || {}) }); },
   };
 
   (async () => {
@@ -216,11 +244,15 @@ function createLiveSession({ onMessage, onExit, ...rest }) {
     try {
       const sdk = await loadSdk();
       const options = buildOptions({ ...rest, abortController, onSpawn: (c) => { child = c; } }, sdk);
-      for await (const msg of sdk.query({ prompt: inputStream(), options })) {
+      baseMcpServers = { ...(options.mcpServers || {}) };
+      queryInstance = sdk.query({ prompt: inputStream(), options });
+      resolveQuery(queryInstance);
+      for await (const msg of queryInstance) {
         try { onMessage(msg); }
         catch (e) { console.error('[sdk] onMessage 失败: %s type=%s', e.message, msg && msg.type); }
       }
     } catch (e) {
+      if (!queryInstance) rejectQuery(e);
       if (!abortController.signal.aborted) {
         error = String((e && e.message) || e);
         console.error('[sdk] 常驻会话出错: %s', error);

@@ -140,9 +140,12 @@ contextBridge.exposeInMainWorld('api', {
 
   // MCP 服务器结构化管理(列表 / 启停 / 删除)——读写 .claude.json 的 mcpServers + sidecar
   mcp: {
-    list:   ()              => ipcRenderer.invoke('mcp:list'),
-    toggle: (name, enabled) => ipcRenderer.invoke('mcp:toggle', { name, enabled }),
-    remove: (name)          => ipcRenderer.invoke('mcp:delete', { name }),
+    list:      ()                        => ipcRenderer.invoke('mcp:list'),
+    status:    (convId)                  => ipcRenderer.invoke('mcp:status', { convId }),
+    reconnect: (convId, name)            => ipcRenderer.invoke('mcp:reconnect', { convId, name }),
+    sync:      (convId)                  => ipcRenderer.invoke('mcp:sync', { convId }),
+    toggle:    (name, enabled, convId)   => ipcRenderer.invoke('mcp:toggle', { name, enabled, convId }),
+    remove:    (name, convId)            => ipcRenderer.invoke('mcp:delete', { name, convId }),
   },
 
   // 技能生命周期(Curator):用量遥测 + 闲置标记 + 置顶/归档/恢复 + 自动提炼
@@ -154,8 +157,8 @@ contextBridge.exposeInMainWorld('api', {
     restore:      (name)          => ipcRenderer.invoke('skills:restore', { name }),
     deleteArchived:(name)         => ipcRenderer.invoke('skills:deleteArchived', { name }),
     setStaleDays: (days)          => ipcRenderer.invoke('skills:setStaleDays', { days }),
-    // 二期:自动提炼技能(每 N 轮由 finishRun 触发)+ 配置读写
-    autoReview:      (conversationText, workingDir) => ipcRenderer.invoke('skills:autoReview', { conversationText, workingDir }),
+    // 二期:自动提炼技能(强信号即时触发、每 N 轮兜底)+ 配置读写
+    autoReview:      (conversationText, workingDir, triggerReason) => ipcRenderer.invoke('skills:autoReview', { conversationText, workingDir, triggerReason }),
     getReviewConfig: ()                  => ipcRenderer.invoke('skills:getReviewConfig'),
     setReviewConfig: (cfg)               => ipcRenderer.invoke('skills:setReviewConfig', cfg),
     // 三期:技能体检(伞状合并)——建 builtin 定时任务时取技能目录 + 体检 prompt
@@ -173,6 +176,7 @@ contextBridge.exposeInMainWorld('api', {
     list:   ()            => ipcRenderer.invoke('memory:list'),
     read:   (file)        => ipcRenderer.invoke('memory:read', file),
     write:  (file, content) => ipcRenderer.invoke('memory:write', { file, content }),
+    setPinned: (file, pinned) => ipcRenderer.invoke('memory:setPinned', { file, pinned }),
     remove: (file)        => ipcRenderer.invoke('memory:remove', file),
     reveal: ()            => ipcRenderer.invoke('memory:reveal'),
     revealFile: (file)     => ipcRenderer.invoke('memory:revealFile', file),

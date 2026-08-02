@@ -846,7 +846,7 @@
     if (state.items.some((item) => item.status === 'running' || item.status === 'preparing')) {
       return { title: '正在处理', meta: failed ? `· ${failed} 项失败，已继续` : `· ${state.received} 个事件` };
     }
-    return { title: '正在连接 Claude Code', meta: state.received ? `· ${state.received} 个事件` : '· 刚刚' };
+    return { title: '正在准备 AI 助手', meta: state.received ? `· ${state.received} 个事件` : '· 刚刚' };
   }
 
   function itemSignature(item, expanded) {

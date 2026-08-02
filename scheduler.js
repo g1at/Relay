@@ -21,7 +21,9 @@ let deps = null;
 //   deps = {
 //     userDataDir: string,                  // app.getPath('userData')
 //     runClaudeJob: fn,                      // main.js 的执行核心
-//     buildMemoryHint: fn(mode),             // 长期记忆注入（'read'=只读索引 / 'full'=可读写）
+//     buildMemoryHint: fn(mode, query),      // 长期记忆注入（相关性裁剪；maintenance 附使用遥测）
+//     buildSkillCuratorPrompt: fn(),         // 每次体检运行前动态生成最新技能清单与质量遥测
+//     onSkillCuratorStart / onMemoryMaintenanceStart,
 //     saveConversation: fn(conv),            // 单条会话落历史（v2 目录式存储,只写当条）
 //     loadConversation: fn(id) → conv|null,  // 读单条会话（不存在/被删→null，用于复用同任务会话）
 //     notify: fn({title, body}),            // 系统通知
@@ -301,7 +303,10 @@ async function fireTask(taskId, opts = {}) {
 
   // 技能体检任务开始前拍技能名快照(供完成后 diff 出真正新建的伞技能)
   if (task && task.builtin === 'skill-curator' && typeof deps.onSkillCuratorStart === 'function') {
-    try { deps.onSkillCuratorStart(); } catch (_) {}
+    try { await Promise.resolve(deps.onSkillCuratorStart()); } catch (_) {}
+  }
+  if (task && task.builtin === 'memory-consolidate' && typeof deps.onMemoryMaintenanceStart === 'function') {
+    try { await Promise.resolve(deps.onMemoryMaintenanceStart()); } catch (_) {}
   }
 
   let result;
@@ -408,6 +413,10 @@ function execCommand(task) {
 function execChat(task) {
   return new Promise((resolve) => {
     const a = task.action || {};
+    let actionPrompt = a.prompt || '';
+    if (task.builtin === 'skill-curator' && deps && typeof deps.buildSkillCuratorPrompt === 'function') {
+      try { actionPrompt = deps.buildSkillCuratorPrompt() || actionPrompt; } catch (_) {}
+    }
     const os = require('os');
     let cwd = os.homedir();
     let validWorkingDir = null;
@@ -428,7 +437,12 @@ function execChat(task) {
     const memMode = ['off', 'read', 'readwrite'].includes(a.memory) ? a.memory : 'read';
     let memHint = '';
     if (memMode !== 'off' && deps && typeof deps.buildMemoryHint === 'function') {
-      try { memHint = deps.buildMemoryHint(memMode === 'readwrite' ? 'full' : 'read') || ''; } catch (_) {}
+      try {
+        const hintMode = task.builtin === 'memory-consolidate'
+          ? 'maintenance'
+          : (memMode === 'readwrite' ? 'full' : 'read');
+        memHint = deps.buildMemoryHint(hintMode, actionPrompt) || '';
+      } catch (_) {}
     }
 
     let assistantText = '';
@@ -449,7 +463,7 @@ function execChat(task) {
 
     try {
       runClaudeJobSafe({
-        prompt: (a.prompt || '') + memHint,
+        prompt: actionPrompt + memHint,
         cwd, validWorkingDir,
         agentProjectRoot: null,
         model: a.model,
