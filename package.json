@@ -48,7 +48,7 @@
       "scheduler.js",
       "updater.js",
       "logger.js",
-      "cron-mcp-server.js",
+      "cron-mcp.js",
       "renderer/**/*",
       "installer/**/*",
       "!**/*.map",
@@ -67,7 +67,6 @@
       }
     ],
     "asarUnpack": [
-      "cron-mcp-server.js",
       "skill-usage-worker.js",
       "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
     ],

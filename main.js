@@ -741,19 +741,12 @@ ipcMain.handle('wizard:complete', () => {
 //   原 feishu:authorize / feishu:status IPC 因新建 cmd 窗口拿不到 npx 而必失败,已移除。
 
 // ─────────────────────────────────────────
-// 对话内管理定时任务:cron MCP server 路径解析 + 临时配置生成
+// 对话内管理定时任务:cron MCP
 // ─────────────────────────────────────────
-//   server 脚本 cron-mcp-server.js 打包后在 asar.unpacked 里（package.json asarUnpack），
-//   dev 时在 __dirname。claude.exe 会 spawn `node <path>`，路径必须是真实可执行文件（不能在 asar 内）。
-function cronMcpServerPath() {
-  const candidates = app.isPackaged
-    ? [
-        path.join(process.resourcesPath, 'app.asar.unpacked', 'cron-mcp-server.js'),
-        path.join(__dirname, 'cron-mcp-server.js'),
-      ]
-    : [path.join(__dirname, 'cron-mcp-server.js')];
-  return candidates.find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
-}
+//   工具实现在 cron-mcp.js，以【进程内 MCP server】形式挂载（见 cronMcpFactory）。
+//   原来它是独立的 stdio server 脚本（cron-mcp-server.js），每个会话都要 spawn 一个
+//   Electron 子进程去跑、还要写临时 MCP 配置文件；改成进程内后子进程、临时文件、
+//   以及那套手写的 JSON-RPC 主循环一并消失。
 // 渲染层快筛词的后端镜像:判断这轮 prompt 是否「可能涉及定时任务」（只有这时才挂 cron MCP，避免每轮都挂）。
 // 判断本轮是否「可能涉及定时任务」——命中才挂 cron MCP。
 //   两类要覆盖：① 明确的定时任务词（定时任务/cron/每天…）；
@@ -762,21 +755,27 @@ function cronMcpServerPath() {
 const CRON_HINT_RE = /定时任务|定时|计划任务|任务列表|我的任务|哪些任务|提醒我|定期|每天|每周|每月|每隔|cron|schedule|(删除|删掉|移除|取消|暂停|停用|禁用|启用|开启|恢复|修改|更改|改成|改为|编辑|运行|执行|触发|查看|列出|列举).{0,6}(任务|它|他|这个|那个|第[一二三四五六七八九十\d]+个?)/i;
 function promptMaybeCron(text) { return typeof text === 'string' && CRON_HINT_RE.test(text); }
 
-// cron MCP 的 SDK 配置。原来要写一个临时 JSON 配置文件再用 --mcp-config 传给 CLI，
-//   现在 SDK 直接收结构化配置，临时文件与它的清理逻辑一并消失。
-//   server 直接读写 userData/schedules.json（写操作即时生效，不再走待确认）。
-function cronMcpServers() {
-  const server = cronMcpServerPath();
-  if (!server) return null;
-  // command 用 Electron 自身 exe + ELECTRON_RUN_AS_NODE=1 当 node 跑（不依赖系统 PATH 上的 node）。
-  //   userData 路径用【命令行参数】传给 server（透传 args 最稳；env 字段实测不一定透传）。
-  return {
-    'relay-cron': {
-      type: 'stdio',
-      command: process.execPath,
-      args: [server, app.getPath('userData')],
-      env: { ELECTRON_RUN_AS_NODE: '1' },
-    },
+// cron MCP 现在是【进程内】托管（见 cron-mcp.js）。
+//   构造它需要 SDK 本身（createSdkMcpServer / tool），而 SDK 是异步加载的 ESM，
+//   所以这里只返回一个工厂，由 claude-sdk.js 在拿到 sdk 后调用。
+//   这样也顺带去掉了原来的临时配置文件与它的清理逻辑。
+function cronMcpFactory() {
+  const userDataDir = app.getPath('userData');
+  return (sdk) => {
+    try {
+      const { createCronMcpServer } = require('./cron-mcp');
+      return {
+        'relay-cron': createCronMcpServer({
+          createSdkMcpServer: sdk.createSdkMcpServer,
+          tool: sdk.tool,
+          z: require('zod').z,
+          userDataDir,
+        }),
+      };
+    } catch (e) {
+      console.error('[cron-mcp] 进程内 server 构造失败(本轮不挂载): %s', e.message);
+      return null;
+    }
   };
 }
 
@@ -797,7 +796,7 @@ function buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, a
     sessionId,
     // 无交互终端弹不出权限框，自动放行；用户可在设置改 acceptEdits/plan。
     permissionMode: readAppSettings().permissionMode || 'bypassPermissions',
-    mcpServers: attachCronMcp ? cronMcpServers() : null,
+    mcpServersFactory: attachCronMcp ? cronMcpFactory() : null,
   };
 }
 

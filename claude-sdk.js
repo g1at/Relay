@@ -80,8 +80,8 @@ function bundledExecutable() {
 // （这正是原来 buildClaudeArgs 的职责）。
 function buildOptions({
   cwd, validWorkingDir, agentProjectRoot, model, sessionId,
-  permissionMode, mcpServers, appendSystemPrompt, memoryDir, onSpawn, abortController,
-}) {
+  permissionMode, mcpServers, mcpServersFactory, appendSystemPrompt, memoryDir, onSpawn, abortController,
+}, sdk) {
   const additionalDirectories = [];
   if (memoryDir) additionalDirectories.push(memoryDir);
   if (validWorkingDir) additionalDirectories.push(validWorkingDir);
@@ -104,7 +104,13 @@ function buildOptions({
   // 模型档位 haiku/sonnet/opus → settings.json 的 ANTHROPIC_DEFAULT_*_MODEL 映射
   if (['haiku', 'sonnet', 'opus'].includes(model)) options.model = model;
   if (sessionId) options.resume = sessionId;
-  if (mcpServers && Object.keys(mcpServers).length) options.mcpServers = mcpServers;
+  // MCP 有两种给法：
+  //   · mcpServers        —— 现成的配置对象（如 stdio 型的外部 server）
+  //   · mcpServersFactory —— 需要 SDK 本身才能构造的（进程内 server 要用 createSdkMcpServer/tool），
+  //     所以延迟到这里、拿到已加载的 sdk 再造。这样 claude-sdk.js 不必知道具体是哪个业务 server。
+  const factored = typeof mcpServersFactory === 'function' && sdk ? mcpServersFactory(sdk) : null;
+  const allMcp = { ...(mcpServers || {}), ...(factored || {}) };
+  if (Object.keys(allMcp).length) options.mcpServers = allMcp;
   if (appendSystemPrompt) options.systemPrompt = { type: 'preset', preset: 'claude_code', append: appendSystemPrompt };
   if (abortController) options.abortController = abortController;
 
@@ -144,9 +150,9 @@ function runOneShot({ prompt, onEvent, ...rest }) {
   (async () => {
     let exitCode = 0;
     try {
-      const { query } = await loadSdk();
-      const options = buildOptions({ ...rest, abortController, onSpawn: (c) => { child = c; } });
-      for await (const msg of query({ prompt, options })) emit(msg);
+      const sdk = await loadSdk();
+      const options = buildOptions({ ...rest, abortController, onSpawn: (c) => { child = c; } }, sdk);
+      for await (const msg of sdk.query({ prompt, options })) emit(msg);
     } catch (e) {
       if (!abortController.signal.aborted) {
         console.error('[sdk] 一次性任务出错: %s', e && e.message);
@@ -208,9 +214,9 @@ function createLiveSession({ onMessage, onExit, ...rest }) {
     let exitCode = 0;
     let error;
     try {
-      const { query } = await loadSdk();
-      const options = buildOptions({ ...rest, abortController, onSpawn: (c) => { child = c; } });
-      for await (const msg of query({ prompt: inputStream(), options })) {
+      const sdk = await loadSdk();
+      const options = buildOptions({ ...rest, abortController, onSpawn: (c) => { child = c; } }, sdk);
+      for await (const msg of sdk.query({ prompt: inputStream(), options })) {
         try { onMessage(msg); }
         catch (e) { console.error('[sdk] onMessage 失败: %s type=%s', e.message, msg && msg.type); }
       }
