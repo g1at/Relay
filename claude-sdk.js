@@ -79,7 +79,7 @@ function bundledExecutable() {
 // 把 Relay 的调用参数翻译成 SDK Options。一次性与常驻共用，保证两条路行为一致
 // （这正是原来 buildClaudeArgs 的职责）。
 function buildOptions({
-  cwd, validWorkingDir, agentProjectRoot, model, sessionId,
+  cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId,
   permissionMode, mcpServers, mcpServersFactory, appendSystemPrompt, memoryDir, onSpawn, abortController,
 }, sdk) {
   const additionalDirectories = [];
@@ -101,8 +101,10 @@ function buildOptions({
     includePartialMessages: true,   // 打字机效果所需的 stream_event
     pathToClaudeCodeExecutable: bundledExecutable(),
   };
-  // 模型档位 haiku/sonnet/opus → settings.json 的 ANTHROPIC_DEFAULT_*_MODEL 映射
-  if (['haiku', 'sonnet', 'opus'].includes(model)) options.model = model;
+  // SDK 的 supportedModels() 可能返回带上下文窗口后缀的值（例如 opus[1m]）。
+  // 保留 Relay 的 haiku/sonnet/opus 别名兼容，同时允许把 SDK 返回的真实 value 原样传回。
+  if (typeof model === 'string' && model.trim()) options.model = model.trim();
+  if (['low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) options.effort = effort;
   if (sessionId) options.resume = sessionId;
   // MCP 有两种给法：
   //   · mcpServers        —— 现成的配置对象（如 stdio 型的外部 server）
@@ -228,6 +230,12 @@ function createLiveSession({ onMessage, onExit, ...rest }) {
       wake();
       try { abortController.abort(); } catch (_) {}
     },
+    // 常驻会话控制：中止当前轮但保留 Query/MCP，及运行时能力、模型与上下文控制。
+    interrupt() { return control('interrupt'); },
+    getContextUsage() { return control('getContextUsage'); },
+    supportedModels() { return control('supportedModels'); },
+    setModel(model) { return control('setModel', model); },
+    applyFlagSettings(settings) { return control('applyFlagSettings', settings); },
     // MCP 控制通道：只在流式 Query 中可用。Relay 主进程通过这些方法做状态查询和
     // 热重连，不再为了普通连接故障丢弃整个 Claude session。
     mcpServerStatus() { return control('mcpServerStatus'); },
@@ -300,7 +308,7 @@ function runText({ prompt, cwd, model, timeoutMs = 30000, permissionMode = 'bypa
         if (Array.isArray(additionalDirectories) && additionalDirectories.length) {
           options.additionalDirectories = additionalDirectories;
         }
-        if (['haiku', 'sonnet', 'opus'].includes(model)) options.model = model;
+        if (typeof model === 'string' && model.trim()) options.model = model.trim();
         for await (const msg of query({ prompt, options })) {
           if (msg.type === 'assistant' && msg.message && Array.isArray(msg.message.content)) {
             for (const b of msg.message.content) if (b && b.type === 'text') text += b.text;
@@ -319,7 +327,7 @@ function runText({ prompt, cwd, model, timeoutMs = 30000, permissionMode = 'bypa
 }
 
 // 内置运行时的版本。取自 SDK package.json 的 claudeCodeVersion 字段
-// （SDK 0.3.220 ↔ CLI 2.1.220 同 commit 发布）。
+// （SDK 0.3.226 ↔ CLI 2.1.226 同 commit 发布）。
 function bundledClaudeVersion() {
   try {
     return require('@anthropic-ai/claude-agent-sdk/package.json').claudeCodeVersion || '';

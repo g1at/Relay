@@ -368,6 +368,23 @@ function saveConversation(conv) {
   if (i >= 0) items[i] = convMeta(conv); else items.unshift(convMeta(conv));
   writeHistoryIndex(items);
 }
+// 上下文占用是会话的派生快照：单独写回正文，不能刷新 updatedAt，
+// 否则仅仅打开一条历史对话就会把它错误顶到“最近对话”最前面。
+function persistConversationContextUsage(id, raw) {
+  const context = compactContextUsage(raw);
+  if (!id || !context || !context.maxTokens) return null;
+  const conv = loadConversation(id);
+  if (!conv) return null;
+  const cached = { ...context, cachedAt: new Date().toISOString() };
+  conv.contextUsage = cached;
+  try {
+    writeJsonAtomic(convFilePath(id), conv);
+    return cached;
+  } catch (e) {
+    console.warn('[history] 保存上下文占用失败 id=%s: %s', id, e.message);
+    return context;
+  }
+}
 function deleteConversation(id) {
   try { fs.rmSync(convFilePath(id), { force: true }); } catch (e) { console.warn('[history] 删除会话文件失败: %s id=%s', e.message, id); }
   writeHistoryIndex(readHistoryIndex().filter((m) => m.id !== id));
@@ -891,7 +908,7 @@ function cronMcpFactory() {
 //
 //   注：cron MCP 用【合并】语义挂载（不设 strictMcpConfig）——飞书及用户导入的其它 MCP 照常可用。
 //   不能 strict：否则会屏蔽用户导入的所有其它 MCP，那一轮就只剩 cron。
-function buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }) {
+function buildSdkParams({ validWorkingDir, agentProjectRoot, model, effort, sessionId, attachCronMcp }) {
   // 长期记忆库目录须先存在，否则授权被忽略且首条记忆 Write 也需要它在。
   try { fs.mkdirSync(MEMORY_DIR, { recursive: true }); } catch (_) {}
   return {
@@ -899,6 +916,7 @@ function buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, a
     validWorkingDir,
     agentProjectRoot,
     model,
+    effort,
     sessionId,
     // 无交互终端弹不出权限框，自动放行；用户可在设置改 acceptEdits/plan。
     permissionMode: readAppSettings().permissionMode || 'bypassPermissions',
@@ -915,14 +933,14 @@ function buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, a
 //   与原来的 ChildProcess 在调用点上等价,jobs map 与 claude:abort 因此无需改动。
 //   完成由 onEvent 的 'job-done' 事件通知（不等 Promise）。
 // ─────────────────────────────────────────
-function runClaudeJob({ prompt, cwd, validWorkingDir, agentProjectRoot, model, sessionId, onEvent, attachCronMcp }) {
+function runClaudeJob({ prompt, cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId, onEvent, attachCronMcp }) {
   const jobId = require('crypto').randomUUID();
   const emit = (evt) => { try { onEvent({ jobId, ...evt }); } catch (e) { console.error('[claude] emit 失败: %s type=%s', e.message, evt && evt.type); } };
 
   const { handle } = claudeSdk.runOneShot({
     prompt,
     cwd,
-    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }),
+    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, effort, sessionId, attachCronMcp }),
     onEvent: (evt) => {
       if (evt && evt.type === 'job-done') {
         console.log('[claude] done jobId=%s exitCode=%s', jobId, evt.exitCode);
@@ -975,10 +993,65 @@ const MAX_LIVE_SESSIONS = 2;      // 常驻上限:实测本机稳态 ~630MB/会�
                                   //   其余是 MCP 子进程)。但这是【本机配置】的数字 —— 用户配了什么
                                   //   我们并不知道,故先取保守值,后续可改为按内存预算动态回收。
 const LIVE_IDLE_MS = 30 * 60 * 1000;   // 闲置超时回收(实测 18min 闲置进程存活正常、内存无漂移)
+const LIVE_CONTROL_TIMEOUT_MS = 10000;
+const SDK_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+let supportedModelsCache = [];
+
+function withLiveControlTimeout(promise, label, timeoutMs = LIVE_CONTROL_TIMEOUT_MS) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label}超时`)), timeoutMs);
+      if (timer.unref) timer.unref();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function publicModelInfo(model) {
+  if (!model || typeof model !== 'object') return null;
+  return {
+    value: String(model.value || ''),
+    resolvedModel: model.resolvedModel ? String(model.resolvedModel) : null,
+    displayName: String(model.displayName || model.value || ''),
+    description: String(model.description || ''),
+    supportsEffort: !!model.supportsEffort,
+    supportedEffortLevels: Array.isArray(model.supportedEffortLevels)
+      ? model.supportedEffortLevels.filter((level) => SDK_EFFORT_LEVELS.has(level))
+      : [],
+    supportsAdaptiveThinking: !!model.supportsAdaptiveThinking,
+  };
+}
+
+async function readSupportedModels(sess) {
+  if (!sess || sess.dead || !sess.child) return supportedModelsCache;
+  const models = await withLiveControlTimeout(sess.child.supportedModels(), '读取模型列表');
+  const clean = (Array.isArray(models) ? models : []).map(publicModelInfo).filter((m) => m && m.value);
+  if (clean.length) {
+    sess.supportedModels = clean;
+    supportedModelsCache = clean;
+  }
+  return clean.length ? clean : supportedModelsCache;
+}
+
+function compactContextUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    totalTokens: Number(raw.totalTokens) || 0,
+    maxTokens: Number(raw.maxTokens) || 0,
+    percentage: Math.max(0, Math.min(100, Number(raw.percentage) || 0)),
+    model: String(raw.model || ''),
+    categories: (Array.isArray(raw.categories) ? raw.categories : []).map((item) => ({
+      name: String(item && item.name || ''),
+      tokens: Number(item && item.tokens) || 0,
+      color: String(item && item.color || ''),
+    })).filter((item) => item.name),
+  };
+}
 
 // 本轮 spawn 时定死、变了就必须重启进程的参数。模型档/工作目录/agent 都在此列。
-function sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp }) {
-  return JSON.stringify([cwd || '', validWorkingDir || '', agentProjectRoot || '', model || '', !!attachCronMcp]);
+function sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, effort, attachCronMcp }) {
+  return JSON.stringify([cwd || '', validWorkingDir || '', agentProjectRoot || '', model || '', effort || '', !!attachCronMcp]);
 }
 
 // watchdog：记录该常驻进程的 MCP server pid，之后每轮复用前用 process.kill(pid, 0) 逐个校验存活
@@ -1161,12 +1234,12 @@ function retryMissingOrchestrateAgents(sess, resultEvt) {
 //   SDK 的流式输入模式等价于原来的 `--input-format stream-json`：一个进程服务多轮。
 //   这里仍保留 sess.child 这个字段名，但它现在是 claude-sdk.js 给的会话句柄
 //   （.pid / .push() / .kill()）—— pid 仍是真实 claude 进程的，MCP watchdog 照常工作。
-function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }) {
+function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId, attachCronMcp }) {
   const sess = {
     convId, child: null,
-    fingerprint: sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp }),
+    fingerprint: sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, effort, attachCronMcp }),
     // 重新加载 MCP 时必须原样复用这些启动参数。fingerprint 只适合比较，不能反解。
-    launchSpec: { convId, cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp },
+    launchSpec: { convId, cwd, validWorkingDir, agentProjectRoot, model, effort, attachCronMcp },
     sessionId: sessionId || null,   // claude 的 session_id,首轮从 init 事件学到
     busy: false, dead: false,
     jobId: null, onEvent: null,
@@ -1246,7 +1319,7 @@ function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, mode
 
   sess.child = claudeSdk.createLiveSession({
     cwd,
-    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp }),
+    ...buildSdkParams({ validWorkingDir, agentProjectRoot, model, effort, sessionId, attachCronMcp }),
     onMessage,
     onExit,
   });
@@ -1256,6 +1329,8 @@ function spawnLiveSession({ convId, cwd, validWorkingDir, agentProjectRoot, mode
 
   liveSessions.set(convId, sess);
   touchIdleTimer(sess);
+  // 初始化完成后缓存 SDK 实际可用模型；不阻塞预启动和首轮发送。
+  readSupportedModels(sess).catch((e) => console.warn('[live] 读取模型能力失败 convId=%s: %s', convId, e.message));
   // 拍 MCP 子进程快照供 watchdog 用。延到 60s 是有原因的(见 snapshotMcpChildren 的坑③);
   //   unref 掉,别为了一个诊断用的定时器拖住进程退出。
   const snapTimer = setTimeout(() => snapshotMcpChildren(sess), SNAPSHOT_DELAY_MS);
@@ -1309,8 +1384,8 @@ function prespawnSession(opts) {
 // 跑一轮。能复用常驻进程就复用(仅写 stdin);否则(不存在/已死/参数变了/MCP 树塌了)重启一个,
 //   并用已知 session_id --resume 接回上下文。返回 jobId + 运行时已学到的 sessionId;
 //   拿不到常驻位则返回 null 让调用方回退。
-function runLiveTurn({ convId, prompt, cwd, validWorkingDir, agentProjectRoot, model, sessionId, attachCronMcp, forceFreshSession, keepAliveForAsyncAgents, orchestrateMode, onEvent }) {
-  const fp = sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp });
+function runLiveTurn({ convId, prompt, cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId, attachCronMcp, forceFreshSession, keepAliveForAsyncAgents, orchestrateMode, onEvent }) {
+  const fp = sessionFingerprint({ cwd, validWorkingDir, agentProjectRoot, model, effort, attachCronMcp });
   let sess = liveSessions.get(convId);
   // 重启后要靠 session_id --resume 接回上下文(已验证优雅/强杀都能接回)。取值优先级:
   //   进程自己学到的 > 墓碑(上个进程死时留下的) > 前端传来的。
@@ -1339,7 +1414,7 @@ function runLiveTurn({ convId, prompt, cwd, validWorkingDir, agentProjectRoot, m
     if (!evictIfNeeded()) return null;   // 常驻位全忙 → 回退一次性 job(行为等同改造前)
     try {
       sess = spawnLiveSession({
-        convId, cwd, validWorkingDir, agentProjectRoot, model, attachCronMcp,
+        convId, cwd, validWorkingDir, agentProjectRoot, model, effort, attachCronMcp,
         sessionId: learnedSid || sessionId || null,
       });
     } catch (e) {
@@ -1382,7 +1457,7 @@ function busyLiveCount() {
 // ─────────────────────────────────────────
 // IPC: 启动一次 claude 对话
 // ─────────────────────────────────────────
-ipcMain.handle('claude:run', async (event, { prompt, sessionId, mode, files, model, agentName, workingDir, orchestrateAgents, convId, forceFreshSession }) => {
+ipcMain.handle('claude:run', async (event, { prompt, sessionId, mode, files, model, effort, agentName, workingDir, orchestrateAgents, convId, forceFreshSession }) => {
   // 并发上限:一次性 job + 正在跑的常驻轮 一起算(常驻但闲置的不算 —— 它不吃 CPU,只占内存,
   //   由 MAX_LIVE_SESSIONS / 闲置回收 单独管)。
   const running = jobs.size + busyLiveCount();
@@ -1527,7 +1602,7 @@ ${prompt}`;
   // 主路径:常驻会话(需要 convId 做稳定的池 key)。复用进程 = MCP 不重启 = 模型开局就有全部工具。
   if (convId) {
     const liveRun = runLiveTurn({
-      convId, prompt, cwd, validWorkingDir, agentProjectRoot, model, sessionId,
+      convId, prompt, cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId,
       attachCronMcp: cronOk, forceFreshSession: !!forceFreshSession,
       // 普通对话、指定 Agent 和协奏都可能在运行中自主派遣后台 Agent。
       // 常驻会话必须统一保持事件监听；只有协奏额外启用虚假等待纠偏。
@@ -1540,7 +1615,7 @@ ${prompt}`;
   // 回退:没有 convId(旧前端/边缘路径)或常驻位全忙 —— 行为与改造前完全一致。
   try {
     const { jobId } = runClaudeJob({
-      prompt, cwd, validWorkingDir, agentProjectRoot, model, sessionId,
+      prompt, cwd, validWorkingDir, agentProjectRoot, model, effort, sessionId,
       attachCronMcp: cronOk && promptMaybeCron(prompt),
       onEvent,
     });
@@ -1586,7 +1661,7 @@ function waitForChildClose(child, timeoutMs = 1500) {
 // IPC:为当前 Relay 对话创建全新 Claude session，让 MCP 工具清单从零重新发现。
 // 不能 --resume 旧 session：Claude Code 会保留旧 session 启动时的工具集，这正是“旧对话不能用、新对话能用”的根因。
 // 对话上下文由 renderer 在下一条消息里以 Relay 历史文本带入，不依赖旧 Claude session。
-ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, workingDir } = {}) => {
+ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, effort, workingDir } = {}) => {
   let resetCommitted = false;
   try {
     if (!convId) return { ok: false, message: '请先打开一个已有对话' };
@@ -1627,7 +1702,7 @@ ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, workingD
       } catch (_) {}
     }
     const fresh = prespawnSession({
-      convId, cwd, validWorkingDir, agentProjectRoot: null, model,
+      convId, cwd, validWorkingDir, agentProjectRoot: null, model, effort,
       sessionId: null,
       attachCronMcp: true,
     });
@@ -1646,7 +1721,7 @@ ipcMain.handle('claude:resetSession', async (_e, { convId, mode, model, workingD
 // IPC: 预启动常驻会话 —— 前端在【打开/切换对话】时调用(fire-and-forget)。
 //   此刻起进程,MCP 就在用户打字的几秒里连好,首轮 init 也是零延迟(实测空等 12s 后发首条消息,
 //   init 0.04s 返回、工具全 connected)。失败完全无害:下面 claude:run 会照常自己 spawn。
-ipcMain.handle('claude:prespawn', async (_e, { convId, sessionId, mode, model, agentName, workingDir }) => {
+ipcMain.handle('claude:prespawn', async (_e, { convId, sessionId, mode, model, effort, agentName, workingDir }) => {
   try {
     if (!convId) return { ok: false };
     if (mode === 'agent' || mode === 'orchestrate') return { ok: false, skipped: 'agent 模式的 prompt 包装依赖本轮内容,不预启动' };
@@ -1658,7 +1733,7 @@ ipcMain.handle('claude:prespawn', async (_e, { convId, sessionId, mode, model, a
       } catch (_) {}
     }
     const sess = prespawnSession({
-      convId, cwd, validWorkingDir, agentProjectRoot: null, model,
+      convId, cwd, validWorkingDir, agentProjectRoot: null, model, effort,
       sessionId: sessionId || null, attachCronMcp: true,
     });
     return { ok: !!sess };
@@ -1668,14 +1743,112 @@ ipcMain.handle('claude:prespawn', async (_e, { convId, sessionId, mode, model, a
   }
 });
 
-// IPC: 中止任务(按 jobId 杀单个;不传则杀全部 —— 兜底)
-ipcMain.handle('claude:abort', (_e, jobId) => {
-  // 常驻会话的「中止」= 杀掉整个常驻进程。stream-json 输入模式没有「取消当前轮」的协议,
-  //   而且这一轮的部分输出已经进了 claude 的会话历史,留着进程反而状态不干净。
-  //   杀掉不丢上下文:下一轮会用学到的 session_id --resume 接回(已验证优雅/强杀都能接回)。
-  //   代价只是下一轮要重连一次 MCP —— 用户主动中止本就不是热路径。
-  //   (session_id 由 killLiveSession 统一记进墓碑,下轮自动 --resume 接回)
-  const abortLive = (sess) => killLiveSession(sess, '用户中止');
+// IPC:读取当前常驻会话的模型能力与上下文占用。模型列表可复用全局缓存；
+// 上下文只在空闲时查询，避免与正在生成的轮次争用控制通道。
+ipcMain.handle('claude:runtimeInfo', async (_e, convId) => {
+  const sess = convId ? liveSessions.get(convId) : null;
+  if (!sess || sess.dead) {
+    return { ok: true, connected: false, models: supportedModelsCache, context: null };
+  }
+  try {
+    const models = await readSupportedModels(sess);
+    let context = null;
+    if (!sess.busy) {
+      try {
+        const freshContext = await withLiveControlTimeout(
+          sess.child.getContextUsage(), '读取上下文占用', 8000,
+        );
+        context = persistConversationContextUsage(convId, freshContext)
+          || compactContextUsage(freshContext);
+      } catch (e) {
+        console.warn('[live] 上下文占用读取失败 convId=%s: %s', convId, e.message);
+      }
+    }
+    return {
+      ok: true,
+      connected: true,
+      busy: !!sess.busy,
+      model: sess.launchSpec && sess.launchSpec.model || null,
+      effort: sess.launchSpec && sess.launchSpec.effort || null,
+      models,
+      context,
+    };
+  } catch (e) {
+    return { ok: false, connected: true, models: supportedModelsCache, context: null, message: e.message };
+  }
+});
+
+// IPC:空闲常驻会话原地切换模型和 effort。成功后同步更新 fingerprint，确保下一轮继续复用
+// 同一个 Query/MCP；会话尚未预启动时返回 deferred，由下一轮启动参数应用。
+ipcMain.handle('claude:setRuntime', async (_e, { convId, model, effort } = {}) => {
+  const sess = convId ? liveSessions.get(convId) : null;
+  if (!sess || sess.dead) {
+    // 已被 LRU/闲置回收时不能在下一轮偷偷从旧墓碑恢复成旧模型；renderer 会按既有
+    // 跨模型逻辑把 Relay 历史作为文字上下文带进新 session。
+    if (convId) liveTombstones.delete(convId);
+    return { ok: true, applied: false, deferred: true };
+  }
+  if (sess.busy) return { ok: false, busy: true, message: '当前对话仍在回复中，请结束后再切换模型' };
+  const cleanModel = String(model || '').trim();
+  const cleanEffort = SDK_EFFORT_LEVELS.has(effort) ? effort : null;
+  try {
+    const models = await readSupportedModels(sess);
+    const info = models.find((item) => item.value === cleanModel || item.resolvedModel === cleanModel) || null;
+    if (models.length && !info) return { ok: false, message: `当前账户不支持模型 ${cleanModel}` };
+    if (cleanEffort && info && info.supportedEffortLevels.length
+        && !info.supportedEffortLevels.includes(cleanEffort)) {
+      return { ok: false, message: `${info.displayName} 不支持 ${cleanEffort} effort` };
+    }
+
+    if (cleanModel && cleanModel !== sess.launchSpec.model) {
+      await withLiveControlTimeout(sess.child.setModel(cleanModel), '切换模型');
+    }
+    const previousEffort = sess.launchSpec.effort || null;
+    if (cleanEffort !== previousEffort) {
+      await withLiveControlTimeout(
+        sess.child.applyFlagSettings({ effortLevel: cleanEffort }), '切换推理强度',
+      );
+    }
+    sess.launchSpec.model = cleanModel || sess.launchSpec.model || null;
+    sess.launchSpec.effort = cleanEffort;
+    sess.fingerprint = sessionFingerprint(sess.launchSpec);
+    return { ok: true, applied: true, model: sess.launchSpec.model, effort: cleanEffort, models };
+  } catch (e) {
+    console.warn('[live] 运行时切换失败 convId=%s: %s', convId, e.message);
+    return { ok: false, message: e.message || '运行时切换失败' };
+  }
+});
+
+async function waitForLiveTurnIdle(sess, jobId, timeoutMs = 4500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!sess || sess.dead || !sess.busy || sess.jobId !== jobId) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !sess || sess.dead || !sess.busy || sess.jobId !== jobId;
+}
+
+async function interruptLiveTurn(sess) {
+  const jobId = sess.jobId;
+  try {
+    const receipt = await withLiveControlTimeout(sess.child.interrupt(), '中止当前轮', 3000);
+    // SDK 先返回 interrupt receipt，再发本轮 aborted result；等 result 经 finishTurn 收尾后才允许下一轮。
+    if (await waitForLiveTurnIdle(sess, jobId)) {
+      console.log('[claude:abort] 已中止当前轮并保留会话 jobId=%s convId=%s queued=%d',
+        jobId, sess.convId, Array.isArray(receipt && receipt.still_queued) ? receipt.still_queued.length : 0);
+      return { aborted: true, preservedSession: true, receipt: receipt || null };
+    }
+    throw new Error('中止后未收到轮次收尾事件');
+  } catch (e) {
+    console.warn('[claude:abort] 当前轮中止失败，回退为回收会话 convId=%s: %s', sess.convId, e.message);
+    killLiveSession(sess, '中止控制失败，回退回收');
+    return { aborted: true, preservedSession: false, fallback: true, message: e.message };
+  }
+}
+
+// IPC: 中止任务。一次性任务仍终止进程；常驻会话优先用 SDK interrupt() 只停当前轮，
+// 控制接口失败或收尾超时时才回退到原来的整会话回收路径。
+ipcMain.handle('claude:abort', async (_e, jobId) => {
   if (jobId) {
     const child = jobs.get(jobId);
     if (child) {
@@ -1688,8 +1861,7 @@ ipcMain.handle('claude:abort', (_e, jobId) => {
     for (const sess of liveSessions.values()) {
       if (sess.busy && sess.jobId === jobId) {
         console.log('[claude:abort] 中止常驻轮 jobId=%s convId=%s pid=%d', jobId, sess.convId, sess.child.pid);
-        abortLive(sess);
-        return { aborted: true, jobId };
+        return { ...(await interruptLiveTurn(sess)), jobId };
       }
     }
     console.warn('[claude:abort] 未找到任务 jobId=%s', jobId);
@@ -1703,12 +1875,14 @@ ipcMain.handle('claude:abort', (_e, jobId) => {
     jobs.delete(id);
     n++;
   }
+  const liveInterrupts = [];
   for (const sess of [...liveSessions.values()]) {
     if (!sess.busy) continue;
     console.log('[claude:abort] 批量中止常驻轮 convId=%s pid=%d', sess.convId, sess.child.pid);
-    abortLive(sess);
+    liveInterrupts.push(interruptLiveTurn(sess));
     n++;
   }
+  if (liveInterrupts.length) await Promise.allSettled(liveInterrupts);
   refreshTrayMenu();
   return { aborted: n > 0, count: n };
 });

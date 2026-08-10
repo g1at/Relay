@@ -88,6 +88,14 @@ const btnAttach    = $('btnAttach');
 const btnModelSwitch = $('btnModelSwitch');
 const msIco        = $('msIco');
 const msLabel      = $('msLabel');
+const contextUsageEl = $('contextUsage');
+const contextUsageLabel = $('contextUsageLabel');
+const contextUsagePopover = $('contextUsagePopover');
+const contextUsagePercent = $('contextUsagePercent');
+const contextUsageTokens = $('contextUsageTokens');
+const contextUsageFill = $('contextUsageFill');
+const contextUsageModel = $('contextUsageModel');
+const msEffortLabel = $('msEffortLabel');
 const btnSkillQuick = $('btnSkillQuick');
 const skillQuickLabel = $('skillQuickLabel');
 const skillQuickClear = $('skillQuickClear');
@@ -96,7 +104,10 @@ const composerSkillLabel = $('composerSkillLabel');
 
 let attachedFiles = [];            // 待发送附件 [{ path, name, ext, size }]
 let currentModel  = 'haiku';       // 模型档位:haiku=快速 / sonnet=思考 / opus=专家
+let currentEffort = null;          // SDK effort；拿到 supportedModels() 后才按模型能力设置
 let defaultModel  = 'haiku';       // 用户在设置里选的「默认使用」档;「新对话」回到它(不带历史会话的档位)
+let supportedClaudeModels = [];    // SDK supportedModels() 返回的当前账户实际能力
+const contextUsageByConv = new Map();
 let selectedQuickSkill = null;      // 输入区快捷选择的技能；仅作用于下一条消息
 let skillQuickPopup = null;
 let quickSkillItems = [];
@@ -414,7 +425,7 @@ async function resetCurrentMcpSession(triggerBtn = null) {
   }
   try {
     const r = await window.api.resetClaudeSession(
-      targetConvId, currentMode, currentModel,
+      targetConvId, currentMode, runtimeModelForValue(currentModel), currentEffort,
       currentWorkingDir && currentWorkingDir.path ? currentWorkingDir.path : null,
     );
     if (!r || !r.ok) {
@@ -488,6 +499,7 @@ async function initTheme() {
     const s = await window.api.settings.read();
     if (s?.claude?.defaultModel) { defaultModel = s.claude.defaultModel; currentModel = defaultModel; }
   } catch {}
+  currentEffort = effortForTier(currentTier());
   updateModelSwitchUI();
   updateComposerForMode();
   // 应用自更新:订阅状态推送,好让「发现新版」的气泡能自己冒出来 ——
@@ -924,12 +936,20 @@ async function loadConversation(id, jumpTo = null) {
   currentWorkingDir = conv.workingDir || null;  // 恢复该会话的工作目录
   setSelectedQuickSkill(null);  // 技能选择是输入草稿态，不跨会话继承
   hideSkillQuickPopup();
+  // 先于任何品牌/工作目录等异步恢复显示上下文，保证历史切换的首帧就能看到。
+  // 优先使用当前进程里的最新值；Relay 刚启动时从会话正文恢复上次快照。
+  if (!contextUsageByConv.has(id) && conv.contextUsage && Number(conv.contextUsage.maxTokens) > 0) {
+    contextUsageByConv.set(id, conv.contextUsage);
+  }
+  renderContextUsage(id);
   // 历史协奏必须先拿到 PM 的自定义名称/头像再重建群聊。
   // 新建协奏时原本是 fire-and-forget 预取；应用刚启动就直接点历史时缓存仍为空，
   // appendChatBubble 会退回默认 “PM” 徽章，造成“自定义信息丢失”的假象。
   if (currentMode === 'orchestrate' && !pmBrandCache) await ensureOrchLabels();
   applyWorkdirUI();
-  if (conv.model) { currentModel = conv.model; updateModelSwitchUI(); }  // 恢复该会话的模型档位
+  if (conv.model) currentModel = conv.model;  // 恢复该会话的模型档位
+  currentEffort = conv.effort || effortForTier(currentTier());
+  updateModelSwitchUI();
   updateComposerForMode();  // 按会话模式显示/隐藏模型切换器
   detachStreamRenderTarget();
   pendingPmBubble = null;   // DOM 即将清空,作废上次的待出 PM 气泡引用
@@ -941,8 +961,10 @@ async function loadConversation(id, jumpTo = null) {
   //   等他真发消息时工具已经全就位(不预启动的话首轮模型会看到一个没有 MCP 工具的世界)。
   //   fire-and-forget:失败无害,发送时主进程会自己 spawn。
   try {
-    window.api.prespawnClaude(id, currentSessionId, currentMode, currentModel, currentAgent,
-      currentWorkingDir && currentWorkingDir.path ? currentWorkingDir.path : null);
+    window.api.prespawnClaude(id, currentSessionId, currentMode, runtimeModelForValue(currentModel), currentEffort, currentAgent,
+      currentWorkingDir && currentWorkingDir.path ? currentWorkingDir.path : null)
+      .then(() => refreshClaudeRuntimeInfo(id))
+      .catch(() => {});
   } catch (_) {}
 
   // 这个会话是否正在后台跑?(有 run 即在跑)
@@ -1046,9 +1068,11 @@ function startNewConv(mode = 'plain', agentName = null, agentLabel = null, orche
   currentAgentLabel = (mode === 'agent') ? (agentLabel || agentName) : null;
   currentOrchestrateAgents = (mode === 'orchestrate') ? (orchestrateAgents || null) : null;
   currentModel = defaultModel;   // 新对话回到用户设置的默认档(不沿用刚看的历史会话的档位)
+  currentEffort = effortForTier(currentTier());
   updateComposerForMode();  // plain 显示模型切换器 / agent 隐藏(锁定模型)
   updateModelSwitchUI();    // 让切换器 UI 同步回默认档
   currentConv = null;
+  renderContextUsage(null);
   currentSessionId = null;
   detachStreamRenderTarget();
   pendingPmBubble = null;     // 清掉上个会话残留的待出 PM 气泡引用
@@ -1097,8 +1121,10 @@ function startNewConv(mode = 'plain', agentName = null, agentLabel = null, orche
 async function finishRun(jobId, doneEvt) {
   const run = runForJob(jobId);
   if (!run) return;
+  run.finishing = true;
   const convId = run.convId;
   const wasViewing = currentConv && currentConv.id === convId;
+  const explicitlyAborted = !!run.abortRequested;
 
   // 流式结束:立即渲染最终内容,并补上代码块的「运行/复制/折叠」按钮(流式中故意不挂,避免闪烁)
   //   双保险:渲染只是锦上添花,即便抛异常也绝不能阻断下面的收尾(关转圈/写回 turn)。
@@ -1115,7 +1141,7 @@ async function finishRun(jobId, doneEvt) {
 
   // spawn 失败/异常退出且没产出任何文字 → 给个错误提示(可自愈的会话失效除外)
   const exitCode = doneEvt && typeof doneEvt.exitCode === 'number' ? doneEvt.exitCode : 0;
-  if (!run.error && exitCode !== 0 && !run.turn.assistant) {
+  if (!explicitlyAborted && !run.error && exitCode !== 0 && !run.turn.assistant) {
     const detail = (run.stderrBuf || '').trim();
     // 带图却失败:几乎都是当前模型不支持图片输入 —— 纯文本模型一旦读到图片 image block 就会
     //   整轮报错退出(错误码 1)。这种情况给一句友好提示,而不是裸露的「错误码 1」。
@@ -1145,11 +1171,14 @@ async function finishRun(jobId, doneEvt) {
   //   失败轮不能写回 sessionId(CLI 可能创建了一个又随即报错退出的"幽灵 session",
   //   存了它下一轮 --resume 会撞 "No conversation found with session ID")。
   //   也不该拿失败的报错文本去生成标题。
-  const failed = !!run.error || (exitCode !== 0 && !run.turn.assistant);
+  const failed = !explicitlyAborted && (!!run.error || (exitCode !== 0 && !run.turn.assistant));
 
   // result 正常到达时归并器已完成；异常退出/中止 result 缺失时由 job-done 补齐最终状态。
   if (run.activityState && window.RelayActivity) {
-    window.RelayActivity.finish(run.activityState, failed ? (run.error || `运行异常结束（错误码 ${exitCode}）`) : null);
+    window.RelayActivity.finish(
+      run.activityState,
+      explicitlyAborted ? '已由用户中止' : (failed ? (run.error || `运行异常结束（错误码 ${exitCode}）`) : null),
+    );
     updateRunActivity(run, wasViewing, true);
   }
 
@@ -1219,8 +1248,10 @@ async function finishRun(jobId, doneEvt) {
     if (!failed && run.sessionId) currentSessionId = run.sessionId;  // 失败轮不更新,避免下一轮 resume 幽灵 session
     removeThinking();
     setRunning(false);
+    if (explicitlyAborted) appendMessage('system', '已中止');
   }
   await refreshHistoryList();
+  refreshClaudeRuntimeInfo(convId).catch(() => {});
 
   // 仅当首轮【成功】时才用快模型生成标题(否则会把"Not logged in"之类报错当成标题)
   if (!failed && conv && (conv.turns || []).length === 1) maybeGenerateTitle(conv);
@@ -1365,7 +1396,8 @@ async function relaunchWithoutResume(conv, userText, files, skill = null) {
 
   const convId = conv.id;
   const sessionModel = conv.sessionModel || conv.model || null;
-  const modelToSend = sessionModel;
+  const modelToSend = runtimeModelForValue(sessionModel);
+  const effortToSend = conv.effort || null;
   const agentName = conv.agent || null;
   const orchAgents = conv.orchestrateAgents || null;
   const workingDirPath = (conv.workingDir && conv.workingDir.path) ? conv.workingDir.path : null;
@@ -1385,7 +1417,10 @@ async function relaunchWithoutResume(conv, userText, files, skill = null) {
   // 关键:sessionId 传 null —— 当全新会话开,不再撞 "No conversation found"。
   //   convId 也传 null:这条路正是因为常驻/续接出了问题才走到的,必须彻底另起炉灶,
   //   不能复用该对话的常驻进程(它挂着的正是那个坏掉的 session)。
-  const result = await window.api.runClaude(promptToSend, null, mode, filesToSend, modelToSend, agentName, workingDirPath, orchAgents, null);
+  const result = await window.api.runClaude(
+    promptToSend, null, mode, filesToSend, modelToSend, effortToSend,
+    agentName, workingDirPath, orchAgents, null,
+  );
   if (!result || result.error) {
     if (turn.activityState && window.RelayActivity) {
       window.RelayActivity.finish(turn.activityState, (result && result.error) || '自动重试启动失败');
@@ -1406,6 +1441,7 @@ async function relaunchWithoutResume(conv, userText, files, skill = null) {
     convId,
     sessionId: null,
     sessionModel,
+    sessionEffort: effortToSend,
     turn,
     error: null,
     stderrBuf: '',
@@ -1802,7 +1838,7 @@ function handleClaudeEvent(evt) {
       if (onView) currentSessionId = evt.session_id;
     }
     if (onView) removeThinking();
-    if (evt.is_error || (evt.subtype && evt.subtype !== 'success')) {
+    if (!run.abortRequested && (evt.is_error || (evt.subtype && evt.subtype !== 'success'))) {
       run.error = (Array.isArray(evt.errors) && evt.errors.join('\n')) || evt.result || '执行出错';
       if (onView) appendMessage('error', `❌ ${run.error}`);
     }
@@ -2289,7 +2325,8 @@ async function send() {
   //   这里不再做意图识别拦截，含定时任务词的消息照常走 claude，点发送即刻转圈，无卡顿。
 
   // 模型档位:新对话和 Agent 模式都用用户当前选中的档位(Agent 也可自由切换模型)。
-  const modelToSend = currentModel;
+  const modelToSend = runtimeModelForValue(currentModel);
+  const effortToSend = currentEffort;
   const skillForTurn = selectedQuickSkill
     ? {
         name: selectedQuickSkill.name,
@@ -2316,7 +2353,7 @@ async function send() {
     needCarryContext = true;
     switchNotice = '已在全新 Claude 会话中重新加载 MCP（已带上前面的对话继续）';
   }
-  if (currentMode === 'plain' && currentConv && currentSessionId &&
+  if (currentConv && currentSessionId &&
       currentConv.sessionModel && currentConv.sessionModel !== currentModel) {
     currentSessionId = null;
     currentConv.sessionId = null;
@@ -2391,6 +2428,7 @@ async function send() {
       agentLabel: currentAgentLabel,
       orchestrateAgents: currentOrchestrateAgents,   // 协同模式:用户勾选的 agent 名数组(空=PM 全权)
       model: currentModel,
+      effort: currentEffort,
       sessionModel: currentModel,
       workingDir: currentWorkingDir,   // 工作目录随会话保存
       turns: [],
@@ -2398,6 +2436,7 @@ async function send() {
   } else {
     currentConv.sessionId = currentSessionId;
     currentConv.model = currentModel;
+    currentConv.effort = currentEffort;
     currentConv.sessionModel = currentModel;
     currentConv.workingDir = currentWorkingDir;
   }
@@ -2420,6 +2459,7 @@ async function send() {
   const sentConv = currentConv;
   const resumeSessionId = currentSessionId;
   const sessionModel = currentModel;
+  const sessionEffort = currentEffort;
   const workingDirPath = currentWorkingDir && currentWorkingDir.path ? currentWorkingDir.path : null;
   const sentMode = currentMode;
   const sentAgent = currentAgent;
@@ -2432,7 +2472,7 @@ async function send() {
 
   // 末位 convId:主进程据它复用本对话的常驻 claude 进程(MCP 不必每轮重启)。
   const result = await window.api.runClaude(
-    promptToSend, resumeSessionId, sentMode, filesToSend, modelToSend, sentAgent,
+    promptToSend, resumeSessionId, sentMode, filesToSend, modelToSend, effortToSend, sentAgent,
     workingDirPath, sentOrchestrateAgents, convId, carryContextForMcpReset,
   );
 
@@ -2466,6 +2506,7 @@ async function send() {
     convId,
     sessionId: result.sessionId || resumeSessionId,
     sessionModel,
+    sessionEffort,
     turn,
     error: null,
     stderrBuf: '',   // 累积 stderr;失败收尾时回放(不再因用户没看着该会话而丢失错误详情)
@@ -2491,6 +2532,7 @@ function setRunning(running) {
   isRunning = !!viewingRunning;
   sendBtn.classList.toggle('is-stop', !!viewingRunning);
   sendBtn.title = viewingRunning ? '中止' : '发送 (Enter)';
+  if (btnModelSwitch) btnModelSwitch.disabled = !!viewingRunning;
   syncMcpReconnectButtons(!!viewingRunning);
 }
 // 按当前所看会话刷新发送按钮状态
@@ -2501,7 +2543,18 @@ async function abortCurrent() {
   const convId = currentConv && currentConv.id;
   const run = convId && runs.get(convId);
   if (!run) { setRunning(false); return; }
-  await window.api.abortClaude(run.jobId);
+  run.abortRequested = true;
+  const abortResult = await window.api.abortClaude(run.jobId);
+  // 常驻会话的 SDK interrupt 会先让后端收到 result/job-done，再返回 IPC。
+  // 若 finishRun 已接管收尾，就不要重复保存、删 run 或追加第二条“已中止”。
+  if (run.finishing || runs.get(convId) !== run) return;
+  if (abortResult && abortResult.preservedSession) {
+    const deadline = Date.now() + 300;
+    while (!run.finishing && runs.get(convId) === run && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (run.finishing || runs.get(convId) !== run) return;
+  }
   if (run.activityState && window.RelayActivity) {
     window.RelayActivity.finish(run.activityState, '已由用户中止');
     updateRunActivity(run, true, true);
@@ -2520,6 +2573,7 @@ async function abortCurrent() {
   jobToConv.delete(run.jobId);
   removeThinking();
   setRunning(false);
+  refreshClaudeRuntimeInfo(convId).catch(() => {});
   refreshHistoryList();
 }
 
@@ -2550,6 +2604,103 @@ inputEl.addEventListener('input', autoGrowInput);
 // ─────────────────────────────────────────
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'tif', 'tiff', 'heic', 'heif'];
 
+// 附件类型视觉映射。只依赖扩展名，保证拖拽、文件选择和历史消息都能离线稳定复现。
+const ATTACHMENT_KIND_EXTS = {
+  pdf:        ['pdf'],
+  word:       ['doc', 'docx', 'rtf', 'odt'],
+  sheet:      ['xls', 'xlsx', 'ods', 'csv', 'tsv'],
+  slides:     ['ppt', 'pptx', 'odp', 'key'],
+  python:     ['py', 'pyw', 'ipynb'],
+  javascript: ['js', 'jsx', 'mjs', 'cjs'],
+  typescript: ['ts', 'tsx'],
+  markdown:   ['md', 'mdx'],
+  data:       ['json', 'jsonl', 'yaml', 'yml', 'toml', 'xml', 'ini', 'env'],
+  archive:    ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'],
+  audio:      ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'],
+  video:      ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv'],
+  code:       ['java', 'c', 'h', 'cpp', 'cc', 'hpp', 'cs', 'go', 'rs', 'swift', 'kt', 'kts', 'rb', 'php', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'cmd', 'sql', 'html', 'htm', 'css', 'scss', 'vue', 'svelte'],
+  text:       ['txt', 'log', 'tex'],
+};
+
+function attachmentExt(f) {
+  const explicit = String(f && f.ext || '').trim().toLowerCase().replace(/^\./, '');
+  if (explicit) return explicit;
+  const name = String(f && f.name || '');
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function attachmentTypeInfo(ext) {
+  const clean = String(ext || '').toLowerCase();
+  if (IMAGE_EXTS.includes(clean)) return { kind: 'image', label: clean.toUpperCase() || 'IMG', mark: '' };
+  let kind = 'file';
+  for (const [candidate, exts] of Object.entries(ATTACHMENT_KIND_EXTS)) {
+    if (exts.includes(clean)) { kind = candidate; break; }
+  }
+  const normalizedLabel = kind === 'word' ? 'DOC'
+    : kind === 'sheet' && ['xls', 'xlsx', 'ods'].includes(clean) ? 'XLS'
+    : kind === 'slides' ? 'PPT'
+    : kind === 'python' ? 'PY'
+    : kind === 'javascript' ? 'JS'
+    : kind === 'typescript' ? 'TS'
+    : kind === 'markdown' ? 'MD'
+    : kind === 'archive' && clean === '7z' ? '7Z'
+    : (clean || 'FILE').toUpperCase().slice(0, 8);
+  const mark = kind === 'pdf' ? 'PDF'
+    : kind === 'word' ? 'W'
+    : kind === 'sheet' ? 'X'
+    : kind === 'slides' ? 'P'
+    : kind === 'javascript' ? 'JS'
+    : kind === 'typescript' ? 'TS'
+    : kind === 'markdown' ? 'M↓'
+    : kind === 'data' ? '{ }'
+    : kind === 'text' ? 'TXT'
+    : kind === 'file' ? normalizedLabel.slice(0, 4)
+    : '';
+  return { kind, label: normalizedLabel, mark };
+}
+
+function attachmentIconSvg(kind) {
+  if (kind === 'python') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path fill="#3776ab" d="M16 4.2c-6.2 0-5.8 2.7-5.8 2.7v2.8h6v.9H7.8S3.7 10.1 3.7 16s3.6 5.7 3.6 5.7h2.2v-3.1s-.1-3.6 3.5-3.6h6s3.4.1 3.4-3.3V7.4s.5-3.2-6.4-3.2Zm-3.3 2.1a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2Z"/><path fill="#ffd343" d="M16 27.8c6.2 0 5.8-2.7 5.8-2.7v-2.8h-6v-.9h8.4s4.1.5 4.1-5.4-3.6-5.7-3.6-5.7h-2.2v3.1s.1 3.6-3.5 3.6h-6s-3.4-.1-3.4 3.3v4.3s-.5 3.2 6.4 3.2Zm3.3-2.1a1.1 1.1 0 1 1 0-2.2 1.1 1.1 0 0 1 0 2.2Z"/></svg>`;
+  }
+  if (kind === 'sheet') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9 5.5h12l4 4v17H9z" fill="currentColor" opacity=".24"/><path d="M19.5 5.5v5h5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M14 13.5h8v8h-8zM14 17.5h8M18 13.5v8" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+  }
+  if (kind === 'slides') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="7" y="7.5" width="18" height="14" rx="2.5" fill="currentColor" opacity=".25"/><path d="M10.5 18V11h11v7zM16 21.5v4M12.5 25.5h7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
+  }
+  if (kind === 'archive') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 5.5h12l4 4v17H8z" fill="currentColor" opacity=".22"/><path d="M18.5 5.5v5h5M14.5 6v3M14.5 11v3M14.5 16v3M13 21h3v3h-3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+  }
+  if (kind === 'audio') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M13 8v14.2a3.2 3.2 0 1 1-2-3V11l12-2.5v11.7a3.2 3.2 0 1 1-2-3V6.5z" fill="currentColor"/></svg>`;
+  }
+  if (kind === 'video') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="5" y="7" width="22" height="18" rx="4" fill="currentColor" opacity=".24"/><path d="m14 12 7 4-7 4z" fill="currentColor"/></svg>`;
+  }
+  if (kind === 'code') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="m12.5 10-6 6 6 6M19.5 10l6 6-6 6M18 7l-4 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  if (kind === 'data') {
+    return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M12 6.5H9.5v6L7 15l2.5 2.5v6H12M20 6.5h2.5v6L25 15l-2.5 2.5v6H20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+  // PDF、Office、Markdown、文本和未知文件共用干净的折角文档底形，颜色与角标由 kind 控制。
+  return `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 4.5h11l5 5v18H8z" fill="currentColor" opacity=".24"/><path d="M18.5 4.5v6h5.5M11.5 14h9M11.5 18h9M11.5 22h6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function renderAttachmentFallbackIcon(icon, info) {
+  icon.replaceChildren();
+  icon.className = `ac-icon ac-kind-${info.kind}`;
+  icon.innerHTML = attachmentIconSvg(info.kind);
+  if (info.mark) {
+    const mark = document.createElement('span');
+    mark.className = 'ac-icon-mark';
+    mark.textContent = info.mark;
+    icon.appendChild(mark);
+  }
+}
+
 function toFileUrl(p) {
   return 'file:///' + String(p).replace(/\\/g, '/').replace(/^\/+/, '');
 }
@@ -2566,18 +2717,25 @@ function buildChipEl(f) {
   chip.className = 'attachment-chip';
 
   const icon = document.createElement('div');
-  icon.className = 'ac-icon';
-  const ext = (f.ext || (f.name || '').split('.').pop() || '').toLowerCase();
+  icon.setAttribute('aria-hidden', 'true');
+  const ext = attachmentExt(f);
+  const typeInfo = attachmentTypeInfo(ext);
+  chip.dataset.fileKind = typeInfo.kind;
+  if (typeInfo.kind === 'image') {
+    // 输入区的图片卡片会隐藏文件名，仍通过悬浮提示保留完整信息。
+    chip.title = f.name || f.path || '图片附件';
+  }
   if (IMAGE_EXTS.includes(ext) && f.path) {
+    icon.className = 'ac-icon ac-image-preview';
     const img = document.createElement('img');
     // 参考图传的是 data: URL,直接用;本地文件路径才转 file://
     img.src = /^data:/.test(f.path) ? f.path : toFileUrl(f.path);
     img.alt = '';
-    // 缩略图加载失败时退回扩展名标签
-    img.onerror = () => { icon.textContent = (ext || 'IMG').toUpperCase().slice(0, 4); };
+    // 缩略图加载失败时退回图片文件图标，避免留下破图占位。
+    img.onerror = () => renderAttachmentFallbackIcon(icon, { kind: 'file', mark: 'IMG' });
     icon.appendChild(img);
   } else {
-    icon.textContent = (ext || 'FILE').toUpperCase().slice(0, 4);
+    renderAttachmentFallbackIcon(icon, typeInfo);
   }
 
   const meta = document.createElement('div');
@@ -2587,10 +2745,11 @@ function buildChipEl(f) {
   name.textContent = f.name || f.path || '文件';
   name.title = f.name || f.path || '';
   meta.appendChild(name);
-  if (f.size) {
+  const detailParts = [typeInfo.label, fmtSize(f.size)].filter(Boolean);
+  if (detailParts.length) {
     const size = document.createElement('div');
     size.className = 'ac-size';
-    size.textContent = fmtSize(f.size);
+    size.textContent = detailParts.join(' · ');
     meta.appendChild(size);
   }
 
@@ -2609,10 +2768,13 @@ function renderAttachments() {
   attachmentsEl.classList.remove('hidden');
   attachedFiles.forEach((f, idx) => {
     const chip = buildChipEl(f);
+    chip.classList.add('is-removable');
     const del = document.createElement('button');
     del.className = 'ac-del';
+    del.type = 'button';
     del.textContent = '×';
     del.title = '移除';
+    del.setAttribute('aria-label', `移除附件 ${f.name || '文件'}`);
     del.addEventListener('click', () => {
       attachedFiles.splice(idx, 1);
       renderAttachments();
@@ -2831,6 +2993,7 @@ document.addEventListener('click', (e) => {
 const MODEL_TIERS = [
   {
     value: 'haiku',
+    preferredEffort: 'low',
     label: '快速',
     desc: '适用于大部分情况',
     // 闪电(描边)
@@ -2838,6 +3001,7 @@ const MODEL_TIERS = [
   },
   {
     value: 'sonnet',
+    preferredEffort: 'high',
     label: '思考',
     desc: '擅长解决更难的问题',
     // 灯泡(描边)
@@ -2845,12 +3009,73 @@ const MODEL_TIERS = [
   },
   {
     value: 'opus',
+    preferredEffort: 'max',
     label: '专家',
     desc: '研究级智能模型',
     // 原子(描边):中心原子核 + 三条均匀分布(0°/60°/120°)的电子轨道,径向对称、是通用的原子符号写法
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="12" rx="9" ry="3.6"/><ellipse cx="12" cy="12" rx="9" ry="3.6" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="9" ry="3.6" transform="rotate(120 12 12)"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>',
   },
 ];
+
+const EFFORT_LABELS = { low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大' };
+
+function modelCapability(value) {
+  const clean = String(value || '').trim().toLowerCase();
+  if (!clean) return null;
+  const exact = supportedClaudeModels.find((model) => {
+    return String(model.value || '').toLowerCase() === clean
+      || String(model.resolvedModel || '').toLowerCase() === clean;
+  });
+  if (exact) return exact;
+  // Relay 的 UI 继续保存稳定的三档别名；SDK 可返回 opus[1m] / claude-opus-5[1m] 等真实标识。
+  if (!['haiku', 'sonnet', 'opus'].includes(clean)) return null;
+  return supportedClaudeModels.find((model) => {
+    const sdkValue = String(model.value || '').toLowerCase();
+    const resolved = String(model.resolvedModel || '').toLowerCase();
+    return sdkValue.startsWith(`${clean}[`)
+      || resolved.startsWith(`claude-${clean}-`)
+      || resolved.includes(`-${clean}-`);
+  }) || null;
+}
+
+function runtimeModelForValue(value) {
+  const capability = modelCapability(value);
+  return capability && capability.value ? capability.value : value;
+}
+
+function effortForTier(tier) {
+  if (!tier) return null;
+  const capability = modelCapability(tier.value);
+  if (!capability) return null;
+  const levels = Array.isArray(capability.supportedEffortLevels) ? capability.supportedEffortLevels : [];
+  if (!capability.supportsEffort || !levels.length) return null;
+  if (levels.includes(tier.preferredEffort)) return tier.preferredEffort;
+  return levels[levels.length - 1] || null;
+}
+
+function supportedEffortLevelsForTier(tier = currentTier()) {
+  const capability = tier && modelCapability(tier.value);
+  // 新对话尚未预启动 SDK 时仍展示完整入口；真正应用时主进程会用 supportedModels 校验。
+  if (!capability && !supportedClaudeModels.length) return Object.keys(EFFORT_LABELS);
+  if (!capability || !capability.supportsEffort) return [];
+  return Array.isArray(capability.supportedEffortLevels)
+    ? capability.supportedEffortLevels.filter((level) => EFFORT_LABELS[level])
+    : [];
+}
+
+function effectiveEffortForTier(tier = currentTier()) {
+  const levels = supportedEffortLevelsForTier(tier);
+  if (currentEffort && levels.includes(currentEffort)) return currentEffort;
+  const preferred = effortForTier(tier);
+  if (preferred && levels.includes(preferred)) return preferred;
+  return levels[0] || null;
+}
+
+function availableModelTiers() {
+  if (!supportedClaudeModels.length) return MODEL_TIERS;
+  const available = MODEL_TIERS.filter((tier) => modelCapability(tier.value));
+  return available.length ? available : MODEL_TIERS;
+}
 
 function currentTier() {
   return MODEL_TIERS.find((t) => t.value === currentModel) || MODEL_TIERS[0];
@@ -2859,6 +3084,188 @@ function updateModelSwitchUI() {
   const t = currentTier();
   if (msIco)   msIco.innerHTML = t.icon;
   if (msLabel) msLabel.textContent = t.label;
+  const capability = modelCapability(t.value);
+  const effort = effectiveEffortForTier(t);
+  if (msEffortLabel) msEffortLabel.textContent = effort ? (EFFORT_LABELS[effort] || effort) : '';
+  if (btnModelSwitch) {
+    const modelName = capability && capability.displayName ? capability.displayName : t.value;
+    btnModelSwitch.title = `切换模型 · ${modelName}${effort ? ` · effort ${EFFORT_LABELS[effort] || effort}` : ''}`;
+  }
+}
+
+function compactTokenCount(value) {
+  const n = Number(value) || 0;
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function fullTokenCount(value) {
+  return new Intl.NumberFormat('zh-CN').format(Math.max(0, Math.round(Number(value) || 0)));
+}
+
+function positionContextUsagePopover() {
+  if (!contextUsageEl || !contextUsagePopover || contextUsageEl.classList.contains('hidden')) return;
+  const anchor = contextUsageEl.getBoundingClientRect();
+  const popover = contextUsagePopover.getBoundingClientRect();
+  const viewportGap = 12;
+  let left = anchor.right - popover.width;
+  left = Math.max(viewportGap, Math.min(left, window.innerWidth - popover.width - viewportGap));
+  let top = anchor.top - popover.height - 10;
+  let placement = 'top';
+  if (top < viewportGap) {
+    top = anchor.bottom + 10;
+    placement = 'bottom';
+  }
+  const anchorCenter = anchor.left + anchor.width / 2;
+  const arrowLeft = Math.max(16, Math.min(popover.width - 16, anchorCenter - left));
+  contextUsagePopover.style.left = `${Math.round(left)}px`;
+  contextUsagePopover.style.top = `${Math.round(top)}px`;
+  contextUsagePopover.style.setProperty('--context-arrow-left', `${Math.round(arrowLeft)}px`);
+  contextUsagePopover.dataset.placement = placement;
+}
+
+function showContextUsagePopover() {
+  if (!contextUsagePopover || !contextUsageEl || contextUsageEl.classList.contains('hidden')) return;
+  positionContextUsagePopover();
+  contextUsagePopover.classList.add('visible');
+  contextUsagePopover.setAttribute('aria-hidden', 'false');
+}
+
+function hideContextUsagePopover() {
+  if (!contextUsagePopover) return;
+  contextUsagePopover.classList.remove('visible');
+  contextUsagePopover.setAttribute('aria-hidden', 'true');
+}
+
+if (contextUsageEl) {
+  contextUsageEl.addEventListener('mouseenter', showContextUsagePopover);
+  contextUsageEl.addEventListener('mouseleave', hideContextUsagePopover);
+  contextUsageEl.addEventListener('focus', showContextUsagePopover);
+  contextUsageEl.addEventListener('blur', hideContextUsagePopover);
+}
+window.addEventListener('resize', () => {
+  if (contextUsagePopover && contextUsagePopover.classList.contains('visible')) positionContextUsagePopover();
+});
+
+function renderContextUsage(convId = currentConv && currentConv.id) {
+  if (!contextUsageEl || !contextUsageLabel) return;
+  const usage = convId ? contextUsageByConv.get(convId) : null;
+  if (!usage || !usage.maxTokens) {
+    contextUsageEl.classList.add('hidden');
+    contextUsageEl.removeAttribute('title');
+    contextUsageEl.removeAttribute('aria-label');
+    hideContextUsagePopover();
+    return;
+  }
+  const percentage = Math.max(0, Math.min(100, Math.round(Number(usage.percentage) || 0)));
+  contextUsageLabel.textContent = `${percentage}%`;
+  contextUsageEl.classList.remove('hidden', 'warn', 'critical');
+  if (contextUsagePopover) contextUsagePopover.classList.remove('warn', 'critical');
+  if (percentage >= 90) {
+    contextUsageEl.classList.add('critical');
+    if (contextUsagePopover) contextUsagePopover.classList.add('critical');
+  } else if (percentage >= 75) {
+    contextUsageEl.classList.add('warn');
+    if (contextUsagePopover) contextUsagePopover.classList.add('warn');
+  }
+  contextUsageEl.removeAttribute('title');
+  contextUsageEl.setAttribute('aria-label', `上下文占用 ${percentage}%，已用 ${fullTokenCount(usage.totalTokens)}，上限 ${fullTokenCount(usage.maxTokens)}`);
+  if (contextUsagePercent) contextUsagePercent.textContent = `${percentage}%`;
+  if (contextUsageTokens) contextUsageTokens.textContent = `已用 ${fullTokenCount(usage.totalTokens)} / ${fullTokenCount(usage.maxTokens)} tokens`;
+  if (contextUsageFill) contextUsageFill.style.width = `${percentage}%`;
+  if (contextUsageModel) {
+    contextUsageModel.textContent = usage.model || '当前模型';
+    contextUsageModel.title = usage.model || '';
+  }
+  if (contextUsagePopover && contextUsagePopover.classList.contains('visible')) positionContextUsagePopover();
+}
+
+async function refreshClaudeRuntimeInfo(convId, { includeContext = true } = {}) {
+  if (!convId || !window.api.claudeRuntimeInfo) return null;
+  try {
+    const info = await window.api.claudeRuntimeInfo(convId);
+    if (!info) return null;
+    if (Array.isArray(info.models) && info.models.length) {
+      supportedClaudeModels = info.models;
+      currentEffort = info.effort || (currentConv && currentConv.effort) || null;
+      updateModelSwitchUI();
+    }
+    if (includeContext && info.context) {
+      contextUsageByConv.set(convId, info.context);
+      if (currentConv && currentConv.id === convId) currentConv.contextUsage = info.context;
+    }
+    if (currentConv && currentConv.id === convId) renderContextUsage(convId);
+    return info;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function selectModelTier(tier) {
+  const previousModel = currentModel;
+  const previousEffort = currentEffort;
+  const nextEffort = effortForTier(tier);
+  currentModel = tier.value;
+  currentEffort = nextEffort;
+  updateModelSwitchUI();
+  hideModelPopup();
+
+  const convId = currentConv && currentConv.id;
+  if (!convId || !window.api.setClaudeRuntime) return;
+  btnModelSwitch.disabled = true;
+  try {
+    const result = await window.api.setClaudeRuntime(
+      convId, runtimeModelForValue(currentModel), currentEffort,
+    );
+    if (!result || !result.ok) throw new Error(result && result.message || '模型切换失败');
+    if (result.applied) {
+      // SDK 已在原 Query 内完成切换；同步 sessionModel，下一轮无需丢弃 session 或重连 MCP。
+      currentConv.sessionModel = currentModel;
+    }
+    currentConv.model = currentModel;
+    currentConv.effort = currentEffort;
+    try { await window.api.history.save(currentConv); } catch (_) {}
+  } catch (e) {
+    currentModel = previousModel;
+    currentEffort = previousEffort;
+    updateModelSwitchUI();
+    showToast(e.message || '模型切换失败');
+  } finally {
+    btnModelSwitch.disabled = !!(currentConv && isConvRunning(currentConv.id));
+  }
+}
+
+async function selectEffortLevel(level) {
+  const allowed = supportedEffortLevelsForTier();
+  if (!allowed.includes(level) || level === currentEffort) return;
+  const previousEffort = currentEffort;
+  currentEffort = level;
+  updateModelSwitchUI();
+
+  const convId = currentConv && currentConv.id;
+  if (!convId || !window.api.setClaudeRuntime) return;
+  btnModelSwitch.disabled = true;
+  try {
+    const result = await window.api.setClaudeRuntime(
+      convId, runtimeModelForValue(currentModel), currentEffort,
+    );
+    if (!result || !result.ok) throw new Error(result && result.message || '推理速度切换失败');
+    if (result.applied) currentConv.sessionModel = currentModel;
+    currentConv.model = currentModel;
+    currentConv.effort = currentEffort;
+    try { await window.api.history.save(currentConv); } catch (_) {}
+  } catch (e) {
+    currentEffort = previousEffort;
+    updateModelSwitchUI();
+    if (modelPopup && modelPopup.classList.contains('show')) {
+      modelPopupTransition = 'refresh';
+      renderModelPopup();
+    }
+    showToast(e.message || '推理速度切换失败');
+  } finally {
+    btnModelSwitch.disabled = !!(currentConv && isConvRunning(currentConv.id));
+  }
 }
 
 // 模型切换器只在「新对话」(plain)显示;「Agent」模式隐藏 = 锁定模型
@@ -2869,47 +3276,207 @@ function updateComposerForMode() {
 }
 
 let modelPopup = null;
+const MODEL_POPUP_HOME_KEY = 'relay:model-popup-home';
+function readModelPopupHome() {
+  try { return localStorage.getItem(MODEL_POPUP_HOME_KEY) === 'advanced' ? 'advanced' : 'root'; }
+  catch (_) { return 'root'; }
+}
+function rememberModelPopupHome(page) {
+  modelPopupHomePage = page === 'advanced' ? 'advanced' : 'root';
+  try { localStorage.setItem(MODEL_POPUP_HOME_KEY, modelPopupHomePage); } catch (_) {}
+}
+let modelPopupHomePage = readModelPopupHome();
+let modelPopupPage = modelPopupHomePage;
+let modelPopupTransition = 'open';
 function ensureModelPopup() {
   if (modelPopup) return modelPopup;
   modelPopup = document.createElement('div');
-  modelPopup.className = 'model-popup';
+  modelPopup.className = 'model-popup model-switch-popup';
   document.body.appendChild(modelPopup);
   return modelPopup;
 }
-function renderModelPopup() {
-  const pop = ensureModelPopup();
-  pop.innerHTML = '';
-  MODEL_TIERS.forEach((t) => {
+function modelMenuChevron(direction = 'right') {
+  const paths = {
+    left: 'M10 3 5 8l5 5',
+    right: 'M6 3l5 5-5 5',
+    up: 'M3 10l5-5 5 5',
+    down: 'M3 6l5 5 5-5',
+  };
+  const path = paths[direction] || paths.right;
+  return `<svg class="model-menu-chevron" viewBox="0 0 16 16" fill="none"><path d="${path}" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+
+function appendModelSubmenuHead(pop, title, value) {
+  const head = document.createElement('div');
+  head.className = 'model-submenu-head';
+  head.innerHTML = `
+    <button class="model-submenu-back" type="button">
+      ${modelMenuChevron('left')}
+      <span>${escapeHtml(title)}</span>
+    </button>
+    <span class="model-submenu-current">${escapeHtml(value || '')}</span>`;
+  head.querySelector('.model-submenu-back').addEventListener('click', (e) => {
+    e.stopPropagation();
+    modelPopupPage = 'root';
+    modelPopupTransition = 'back';
+    renderModelPopup();
+  });
+  pop.appendChild(head);
+}
+
+function renderModelPopupRoot(pop) {
+  const tier = currentTier();
+  const effortLevels = supportedEffortLevelsForTier(tier);
+  const effectiveEffort = effectiveEffortForTier(tier);
+  const rows = [
+    { page: 'model', name: '模型', value: tier.label, disabled: false },
+    {
+      page: 'advanced', name: '推理速度',
+      value: effortLevels.length ? (EFFORT_LABELS[effectiveEffort] || effectiveEffort) : '不可用',
+      disabled: !effortLevels.length,
+    },
+  ];
+  rows.forEach((item) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'model-menu-row';
+    row.disabled = item.disabled;
+    row.innerHTML = `
+      <span class="model-menu-name">${item.name}</span>
+      <span class="model-menu-value">${escapeHtml(item.value)}</span>
+      ${modelMenuChevron('right')}`;
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      modelPopupPage = item.page;
+      if (item.page === 'advanced') rememberModelPopupHome('advanced');
+      else rememberModelPopupHome('root');
+      modelPopupTransition = 'forward';
+      renderModelPopup();
+    });
+    pop.appendChild(row);
+  });
+}
+
+function renderModelPopupModels(pop) {
+  appendModelSubmenuHead(pop, '模型', currentTier().label);
+  availableModelTiers().forEach((t) => {
+    const capability = modelCapability(t.value);
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'mp-row' + (t.value === currentModel ? ' selected' : '');
+    if (capability && capability.displayName) row.title = capability.displayName;
     row.innerHTML = `
       <span class="mp-ico">${t.icon}</span>
       <span class="mp-meta">
         <span class="mp-title">${t.label}</span>
-        <span class="mp-desc">${t.desc}</span>
+        <span class="mp-desc">${escapeHtml(t.desc)}</span>
       </span>
       <svg class="mp-check" width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path d="M3 8.5l3.2 3.2L13 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>`;
     row.addEventListener('click', (e) => {
       e.stopPropagation();
-      currentModel = t.value;
-      if (currentConv) currentConv.model = currentModel;  // 记到当前会话
-      updateModelSwitchUI();
-      hideModelPopup();
+      selectModelTier(t);
     });
     pop.appendChild(row);
   });
 }
+
+function renderModelPopupAdvanced(pop) {
+  const levels = supportedEffortLevelsForTier();
+  const selectedIndex = Math.max(0, levels.indexOf(effectiveEffortForTier()));
+  const head = document.createElement('div');
+  head.className = 'model-submenu-head model-advanced-head';
+  head.innerHTML = `
+    <button class="model-submenu-back model-advanced-back" type="button">
+      <span>高级</span>
+      ${modelMenuChevron('right')}
+    </button>`;
+  head.querySelector('.model-advanced-back').addEventListener('click', (e) => {
+    e.stopPropagation();
+    rememberModelPopupHome('root');
+    modelPopupPage = 'root';
+    modelPopupTransition = 'back';
+    renderModelPopup();
+  });
+  pop.appendChild(head);
+  if (!levels.length) return;
+
+  const slider = document.createElement('div');
+  slider.className = 'model-effort-slider-shell';
+  slider.innerHTML = `
+    <div class="model-effort-range-wrap">
+      <div class="model-effort-track" aria-hidden="true"><div class="model-effort-fill"></div></div>
+      <input class="model-effort-range" type="range" min="0" max="${levels.length - 1}" step="1" value="${selectedIndex}" aria-label="推理速度">
+      <div class="model-effort-dots"></div>
+    </div>`;
+  const range = slider.querySelector('.model-effort-range');
+  const fill = slider.querySelector('.model-effort-fill');
+  const dots = slider.querySelector('.model-effort-dots');
+  levels.forEach((level, index) => {
+    const dot = document.createElement('span');
+    dot.className = 'model-effort-dot';
+    dot.style.left = `${levels.length === 1 ? 50 : (index / (levels.length - 1)) * 100}%`;
+    dots.appendChild(dot);
+  });
+  const paint = (index) => {
+    const safe = Math.max(0, Math.min(levels.length - 1, Number(index) || 0));
+    const percent = levels.length === 1 ? 100 : (safe / (levels.length - 1)) * 100;
+    // 填充到滑块中心并向内部多压 4px 消除高档位的抗锯齿白缝；白色滑块会覆盖交界处，
+    // 因而左侧保持完整蓝色，同时右侧不会再露出蓝边。
+    fill.style.width = `calc(19px + (100% - 30px) * ${percent / 100})`;
+    range.setAttribute('aria-valuetext', EFFORT_LABELS[levels[safe]] || levels[safe]);
+    [...dots.children].forEach((dot, i) => {
+      dot.classList.toggle('filled', i < safe);
+      dot.classList.toggle('current', i === safe);
+    });
+  };
+  paint(selectedIndex);
+  range.disabled = levels.length < 2;
+  range.addEventListener('input', () => paint(range.value));
+  range.addEventListener('change', () => selectEffortLevel(levels[Number(range.value)]));
+  const resetDotProximity = () => {
+    [...dots.children].forEach((dot) => dot.style.removeProperty('--dot-scale'));
+  };
+  range.addEventListener('pointermove', (event) => {
+    const dotTrack = dots.getBoundingClientRect();
+    const pointerX = event.clientX - dotTrack.left;
+    const lastIndex = Math.max(1, levels.length - 1);
+    [...dots.children].forEach((dot, index) => {
+      const dotX = (index / lastIndex) * dotTrack.width;
+      const proximity = Math.max(0, 1 - Math.abs(pointerX - dotX) / 34);
+      dot.style.setProperty('--dot-scale', String(1 + proximity * .9));
+    });
+  });
+  range.addEventListener('pointerleave', resetDotProximity);
+  range.addEventListener('pointercancel', resetDotProximity);
+  slider.addEventListener('click', (e) => e.stopPropagation());
+  pop.appendChild(slider);
+}
+
+function renderModelPopup() {
+  const pop = ensureModelPopup();
+  pop.innerHTML = '';
+  const page = document.createElement('div');
+  page.className = `model-menu-page model-menu-page-${modelPopupTransition}`;
+  pop.appendChild(page);
+  if (modelPopupPage === 'model') renderModelPopupModels(page);
+  else if (modelPopupPage === 'advanced') renderModelPopupAdvanced(page);
+  else renderModelPopupRoot(page);
+  modelPopupTransition = 'refresh';
+}
 function showModelPopup() {
   hideSkillQuickPopup();
+  modelPopupPage = modelPopupHomePage;
+  modelPopupTransition = 'open';
   renderModelPopup();
   const pop = ensureModelPopup();
   // 向上弹出,左对齐触发按钮(用 fixed 脱离 input-card 的 overflow:hidden 裁剪)
   const r = btnModelSwitch.getBoundingClientRect();
+  const popupWidth = Math.min(232, Math.max(200, window.innerWidth - 16));
   pop.style.position = 'fixed';
-  pop.style.left = `${r.left}px`;
+  pop.style.width = `${popupWidth}px`;
+  pop.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - popupWidth - 8))}px`;
   pop.style.bottom = `${window.innerHeight - r.top + 8}px`;
   pop.classList.add('show');
   btnModelSwitch.classList.add('open');
@@ -7912,7 +8479,8 @@ async function saveMainSettings() {
       const card = document.createElement('div');
       card.className = 'sv-card' + (task.enabled ? '' : ' paused');
 
-      const badge = task.lastStatus === 'ok' ? '<span class="sv-badge ok">上次成功</span>'
+      const badge = task.running ? '<span class="sv-badge running">运行中</span>'
+        : task.lastStatus === 'ok' ? '<span class="sv-badge ok">上次成功</span>'
         : task.lastStatus === 'error' ? '<span class="sv-badge error">上次失败</span>'
         : '<span class="sv-badge idle">未运行</span>';
 
@@ -7925,6 +8493,12 @@ async function saveMainSettings() {
         `<label class="sv-switch" title="${task.enabled ? '点击暂停' : '点击启用'}"><input type="checkbox" ${task.enabled ? 'checked' : ''}/><span class="sv-slider"></span></label>`;
       top.querySelector('.sv-card-name').textContent = task.name || '未命名任务';
       const runBtn = top.querySelector('.sv-card-run');
+      if (task.running) {
+        runBtn.disabled = true;
+        runBtn.classList.add('running');
+        runBtn.title = '任务正在运行';
+        runBtn.setAttribute('aria-label', '任务正在运行');
+      }
       runBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (runBtn.disabled) return;
@@ -7936,8 +8510,6 @@ async function saveMainSettings() {
         } catch (_) {
           showToast('运行失败');
         } finally {
-          runBtn.disabled = false;
-          runBtn.classList.remove('running');
           refresh();
         }
       });

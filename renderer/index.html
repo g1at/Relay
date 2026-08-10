@@ -181,6 +181,7 @@
                 <button class="ms-trigger" id="btnModelSwitch" type="button" title="切换模型">
                   <span class="ms-ico" id="msIco"></span>
                   <span class="ms-label" id="msLabel">快速</span>
+                  <span class="ms-effort-label" id="msEffortLabel"></span>
                   <svg class="ms-caret" width="10" height="10" viewBox="0 0 10 10" fill="none">
                     <path d="M2 6l3-3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
@@ -202,17 +203,23 @@
                 <span class="sq-label" id="skillQuickLabel">技能</span>
               </button>
             </div>
-            <button id="btnSend" title="发送 (Enter)">
-              <!-- 发送箭头(默认) -->
-              <svg class="ico-send" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="12" y1="19" x2="12" y2="5"></line>
-                <polyline points="5 12 12 5 19 12"></polyline>
-              </svg>
-              <!-- 停止方块(运行中) -->
-              <svg class="ico-stop" width="14" height="14" viewBox="0 0 14 14">
-                <rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/>
-              </svg>
-            </button>
+            <div class="ib-right">
+              <span class="context-usage hidden" id="contextUsage" aria-live="polite" tabindex="0" aria-describedby="contextUsagePopover">
+                <span class="context-usage-dot"></span>
+                <span id="contextUsageLabel">0%</span>
+              </span>
+              <button id="btnSend" title="发送 (Enter)">
+                <!-- 发送箭头(默认) -->
+                <svg class="ico-send" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="19" x2="12" y2="5"></line>
+                  <polyline points="5 12 12 5 19 12"></polyline>
+                </svg>
+                <!-- 停止方块(运行中) -->
+                <svg class="ico-stop" width="14" height="14" viewBox="0 0 14 14">
+                  <rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -402,6 +409,18 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="context-usage-popover" id="contextUsagePopover" role="tooltip" aria-hidden="true">
+    <div class="context-usage-popover-head">
+      <span>上下文占用</span>
+      <span class="context-usage-popover-percent" id="contextUsagePercent">0%</span>
+    </div>
+    <div class="context-usage-popover-tokens" id="contextUsageTokens">已用 0 / 0 tokens</div>
+    <div class="context-usage-popover-track" aria-hidden="true">
+      <span class="context-usage-popover-fill" id="contextUsageFill"></span>
+    </div>
+    <div class="context-usage-popover-model" id="contextUsageModel"></div>
   </div>
 
   <script src="activity-stream.js"></script>

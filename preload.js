@@ -7,19 +7,22 @@ contextBridge.exposeInMainWorld('api', {
   //   orchestrateAgents=协同模式下用户勾选的子智能体 name 数组(可空=全量交 PM 自选)
   //   convId=会话 id：主进程据它复用该对话的常驻 claude 进程(MCP 不必每轮重启)。
   //     不传也能跑 —— 主进程会回退到每轮新起进程的老行为。
-  runClaude: (prompt, sessionId, mode, files, model, agentName, workingDir, orchestrateAgents, convId, forceFreshSession) =>
-    ipcRenderer.invoke('claude:run', { prompt, sessionId, mode, files, model, agentName, workingDir, orchestrateAgents, convId, forceFreshSession }),
+  runClaude: (prompt, sessionId, mode, files, model, effort, agentName, workingDir, orchestrateAgents, convId, forceFreshSession) =>
+    ipcRenderer.invoke('claude:run', { prompt, sessionId, mode, files, model, effort, agentName, workingDir, orchestrateAgents, convId, forceFreshSession }),
 
   // 预启动该对话的常驻 claude 进程(打开/切换对话时调,fire-and-forget)。
   //   目的:让 MCP 在用户打字的这几秒里连好,首轮就能拿到完整工具列表。失败完全无害。
-  prespawnClaude: (convId, sessionId, mode, model, agentName, workingDir) =>
-    ipcRenderer.invoke('claude:prespawn', { convId, sessionId, mode, model, agentName, workingDir }),
+  prespawnClaude: (convId, sessionId, mode, model, effort, agentName, workingDir) =>
+    ipcRenderer.invoke('claude:prespawn', { convId, sessionId, mode, model, effort, agentName, workingDir }),
 
   // 丢弃该对话的常驻进程 + 已记住的 session_id(降级重跑前调,避免拿坏 session 再续接)
   dropClaudeSession: (convId) => ipcRenderer.invoke('claude:dropSession', convId),
   // 新建 Claude session 重新加载 MCP；Relay 会在下一条消息中带入历史上下文。
-  resetClaudeSession: (convId, mode, model, workingDir) =>
-    ipcRenderer.invoke('claude:resetSession', { convId, mode, model, workingDir }),
+  resetClaudeSession: (convId, mode, model, effort, workingDir) =>
+    ipcRenderer.invoke('claude:resetSession', { convId, mode, model, effort, workingDir }),
+  claudeRuntimeInfo: (convId) => ipcRenderer.invoke('claude:runtimeInfo', convId),
+  setClaudeRuntime: (convId, model, effort) =>
+    ipcRenderer.invoke('claude:setRuntime', { convId, model, effort }),
   openFileDialog: () => ipcRenderer.invoke('dialog:openFiles'),
   openFolderDialog: () => ipcRenderer.invoke('dialog:openFolder'),
 

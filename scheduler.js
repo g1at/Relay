@@ -46,7 +46,7 @@ const RUNS_CAP = 200;        // runs 环形历史上限
 // ─────────────────────────────────────────
 function storePath() { return path.join(deps.userDataDir, 'schedules.json'); }
 
-function readStore() {
+function readStore({ strict = false } = {}) {
   try {
     const raw = fs.readFileSync(storePath(), 'utf8');
     const d = JSON.parse(raw);
@@ -54,7 +54,11 @@ function readStore() {
     d.tasks = Array.isArray(d.tasks) ? d.tasks : [];
     d.runs = Array.isArray(d.runs) ? d.runs : [];
     return d;
-  } catch (_) {
+  } catch (e) {
+    // 首次启动时文件尚不存在是正常状态；其它 I/O / JSON 错误不能在执行入口伪装成“空任务库”。
+    if (e && e.code === 'ENOENT') return { version: 1, tasks: [], runs: [] };
+    if (strict) throw e;
+    console.warn('[scheduler] 读取 schedules.json 失败: %s', e && e.message ? e.message : e);
     return { version: 1, tasks: [], runs: [] };
   }
 }
@@ -281,12 +285,20 @@ function onTick() {
 const inflight = new Set();   // 防同一任务并发重入
 
 async function fireTask(taskId, opts = {}) {
-  if (inflight.has(taskId)) return;
-  inflight.add(taskId);
+  if (inflight.has(taskId)) {
+    return { ok: false, code: 'TASK_RUNNING', error: '任务正在运行，请稍候' };
+  }
   const startedAt = Date.now();
-  let store = readStore();
+  let store;
+  try {
+    store = readStore({ strict: true });
+  } catch (e) {
+    console.warn('[scheduler] 运行任务前读取存储失败 taskId=%s: %s', taskId, e.message);
+    return { ok: false, code: 'STORE_READ_FAILED', error: '读取定时任务失败，请稍后重试' };
+  }
   let task = store.tasks.find((t) => t.id === taskId);
-  if (!task) { inflight.delete(taskId); return; }
+  if (!task) return { ok: false, code: 'TASK_NOT_FOUND', error: '任务不存在' };
+  inflight.add(taskId);
 
   // 推进调度状态：先把 nextRunAt 推到未来（避免重入），lastRunAt 置当前。
   task.lastRunAt = new Date(startedAt).toISOString();
@@ -298,58 +310,73 @@ async function fireTask(taskId, opts = {}) {
     const next = computeNextRun(task, startedAt + 1000);
     task.nextRunAt = next ? new Date(next).toISOString() : null;
   }
-  writeStore(store);
-  notifyRenderer();
-
-  // 技能体检任务开始前拍技能名快照(供完成后 diff 出真正新建的伞技能)
-  if (task && task.builtin === 'skill-curator' && typeof deps.onSkillCuratorStart === 'function') {
-    try { await Promise.resolve(deps.onSkillCuratorStart()); } catch (_) {}
-  }
-  if (task && task.builtin === 'memory-consolidate' && typeof deps.onMemoryMaintenanceStart === 'function') {
-    try { await Promise.resolve(deps.onMemoryMaintenanceStart()); } catch (_) {}
-  }
-
-  let result;
   try {
-    result = await execAction(task);
-    task = refetch(taskId);   // 期间可能被编辑，重新读
-    if (task) {
-      task.lastStatus = result.ok ? 'ok' : 'error';
-      task.lastError = result.ok ? null : (result.error || '执行失败');
-      persistTask(task);
-    }
-    // 技能体检任务跑完 → 通知 main 善后(标归档/新伞技能 + 完成通知)。失败不影响调度。
-    if (result && result.ok && task && task.builtin === 'skill-curator' && typeof deps.onSkillCuratorDone === 'function') {
-      try { deps.onSkillCuratorDone(result); } catch (_) {}
-    }
+    writeStore(store);
   } catch (e) {
-    task = refetch(taskId);
-    if (task) { task.lastStatus = 'error'; task.lastError = e.message; persistTask(task); }
-    result = { ok: false, error: e.message };
+    inflight.delete(taskId);
+    console.warn('[scheduler] 保存任务启动状态失败 taskId=%s: %s', taskId, e.message);
+    return { ok: false, code: 'STORE_WRITE_FAILED', error: '保存定时任务状态失败，请稍后重试' };
+  }
+  notifyRenderer();
+  if (typeof opts.onStarted === 'function') {
+    try { opts.onStarted({ ok: true, code: 'TASK_STARTED' }); } catch (_) {}
   }
 
-  // 记 runs 环形历史
-  appendRun({
-    taskId,
-    at: new Date(startedAt).toISOString(),
-    status: result.ok ? 'ok' : 'error',
-    ms: Date.now() - startedAt,
-    summary: result.ok ? (result.summary || '') : '',
-    error: result.ok ? null : (result.error || ''),
-  });
+  try {
+    // 技能体检任务开始前拍技能名快照(供完成后 diff 出真正新建的伞技能)
+    if (task && task.builtin === 'skill-curator' && typeof deps.onSkillCuratorStart === 'function') {
+      try { await Promise.resolve(deps.onSkillCuratorStart()); } catch (_) {}
+    }
+    if (task && task.builtin === 'memory-consolidate' && typeof deps.onMemoryMaintenanceStart === 'function') {
+      try { await Promise.resolve(deps.onMemoryMaintenanceStart()); } catch (_) {}
+    }
 
-  // 完成通知
-  const t2 = refetch(taskId);
-  if (t2 && t2.delivery && t2.delivery.notify !== false) {
-    const title = result.ok ? `定时任务完成：${t2.name || taskId}` : `定时任务失败：${t2.name || taskId}`;
-    const body = result.ok ? (result.summary || '已执行完成').slice(0, 180)
-                           : ('错误：' + (result.error || '').slice(0, 180));
-    try { deps.notify({ title, body }); } catch (_) {}
+    let result;
+    try {
+      result = await execAction(task);
+      task = refetch(taskId);   // 期间可能被编辑，重新读
+      if (task) {
+        task.lastStatus = result.ok ? 'ok' : 'error';
+        task.lastError = result.ok ? null : (result.error || '执行失败');
+        persistTask(task);
+      }
+      // 技能体检任务跑完 → 通知 main 善后(标归档/新伞技能 + 完成通知)。失败不影响调度。
+      if (result && result.ok && task && task.builtin === 'skill-curator' && typeof deps.onSkillCuratorDone === 'function') {
+        try { deps.onSkillCuratorDone(result); } catch (_) {}
+      }
+    } catch (e) {
+      task = refetch(taskId);
+      if (task) { task.lastStatus = 'error'; task.lastError = e.message; persistTask(task); }
+      result = { ok: false, error: e.message };
+    }
+
+    // 记 runs 环形历史。历史写入失败不应把任务永久卡在“运行中”。
+    try {
+      appendRun({
+        taskId,
+        at: new Date(startedAt).toISOString(),
+        status: result.ok ? 'ok' : 'error',
+        ms: Date.now() - startedAt,
+        summary: result.ok ? (result.summary || '') : '',
+        error: result.ok ? null : (result.error || ''),
+      });
+    } catch (e) {
+      console.warn('[scheduler] 写入任务历史失败 taskId=%s: %s', taskId, e.message);
+    }
+
+    // 完成通知
+    const t2 = refetch(taskId);
+    if (t2 && t2.delivery && t2.delivery.notify !== false) {
+      const title = result.ok ? `定时任务完成：${t2.name || taskId}` : `定时任务失败：${t2.name || taskId}`;
+      const body = result.ok ? (result.summary || '已执行完成').slice(0, 180)
+                             : ('错误：' + (result.error || '').slice(0, 180));
+      try { deps.notify({ title, body }); } catch (_) {}
+    }
+    return result;
+  } finally {
+    inflight.delete(taskId);
+    try { reschedule(); } catch (e) { console.warn('[scheduler] 任务完成后重排失败: %s', e.message); }
   }
-
-  inflight.delete(taskId);
-  reschedule();
-  return result;
 }
 
 // 真正执行动作。chat（runClaudeJob）/ image（generateImage）/ command（PowerShell 脚本）。
@@ -743,10 +770,11 @@ function onResume() { reschedule(); }
 // ─────────────────────────────────────────
 function list() {
   const store = readStore();
-  return store.tasks.map((t) => ({ ...t }));
+  return store.tasks.map((t) => ({ ...t, running: inflight.has(t.id) }));
 }
 function get(id) {
-  return refetch(id);
+  const task = refetch(id);
+  return task ? { ...task, running: inflight.has(id) } : null;
 }
 function create(input) {
   const store = readStore();
@@ -800,8 +828,21 @@ function toggle(id, enabled) {
 }
 async function runNow(id) {
   // 手动立即跑一次（不影响调度；一次性任务手动跑不归档）。
-  const r = await fireTask(id, { keepEnabled: true });
-  return r || { ok: false, error: '任务不存在' };
+  // IPC 只等待“成功进入执行态”，不等待可能长达数分钟的任务本体；完成状态由 sched:update 推送。
+  return await new Promise((resolve) => {
+    let acknowledged = false;
+    const resolveOnce = (result) => {
+      if (acknowledged) return;
+      acknowledged = true;
+      resolve(result);
+    };
+    fireTask(id, { keepEnabled: true, onStarted: resolveOnce })
+      .then(resolveOnce)
+      .catch((e) => {
+        console.warn('[scheduler] 启动立即运行任务失败 taskId=%s: %s', id, e.message);
+        resolveOnce({ ok: false, code: 'TASK_START_FAILED', error: '启动定时任务失败，请稍后重试' });
+      });
+  });
 }
 function runs(id) {
   const store = readStore();
