@@ -8,6 +8,8 @@
 
 当前开发与 CI 基线为 **Windows x64、Node.js 24、Python 3.11 和 Git**。项目使用 Electron、Claude Agent SDK 与 `node-pty`；Windows 的原生行为不能只用 WSL 中的 Node.js 测试代替。
 
+CI 固定使用带 Visual Studio 2022 的 `windows-2022` runner。当前锁定构建链中的 `node-gyp` 9 能识别 VS 2022，尚不识别 VS 2026；因此不使用已切换编译器的 `windows-latest` / `windows-2025`。原生模块仍会完整重编译，目录构建仍会执行。
+
 `node-pty` 优先使用预编译资源。如果安装时需要本地编译，请安装 Visual Studio 2022 Build Tools 的 C++ 桌面开发工具、Windows SDK，以及相应的 MSVC x64/x86 Spectre-mitigated libraries。Python 3.11 需要能被构建工具找到。
 
 ```powershell

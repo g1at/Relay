@@ -16,7 +16,8 @@ concurrency:
 jobs:
   check:
     name: Node 24 / Windows x64
-    runs-on: windows-latest
+    # The locked node-gyp 9 recognizes VS 2022, but not the VS 2026 image now used by latest.
+    runs-on: windows-2022
     timeout-minutes: 45
     defaults:
       run:
