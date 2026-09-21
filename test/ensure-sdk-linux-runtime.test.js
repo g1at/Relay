@@ -58,12 +58,15 @@ test('a redirected dependency directory cannot write outside the project', async
 });
 test('every distributable build prepares and unpacks the exact Linux runtime', () => {
   const pkg = require('../package.json');
-  for (const script of ['build', 'build:dir', 'release']) {
+  for (const script of ['build', 'build:dir']) {
     const steps = pkg.scripts[script].split('&&').map(step => step.trim());
     const preparation = steps.indexOf('npm run prepare:sdk-runtime');
     const packaging = steps.findIndex(step => step.startsWith('electron-builder '));
     assert.ok(preparation >= 0 && packaging > preparation, `${script} must prepare the runtime before packaging`);
   }
+  // The staged release entrypoint prepares the runtime itself; its command
+  // ordering and publish-never behavior are exercised in release-policy.test.js.
+  assert.equal(pkg.scripts.release, 'node build/release.cjs');
   const directory = 'node_modules/' + name;
   assert.ok(pkg.build.files.some(entry => entry && entry.from === directory && entry.to === directory && entry.filter.includes('**/*')));
   assert.ok(pkg.build.asarUnpack.includes('**/' + directory + '/**'));

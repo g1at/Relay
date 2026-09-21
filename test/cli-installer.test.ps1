@@ -52,21 +52,24 @@ $ErrorActionPreference = 'Stop'
         }
     }
     function New-Release {
+        param([string]$Version = '3.0.1', [string]$Repository = 'g1at/Relay')
         [pscustomobject]@{
-            draft = $false; prerelease = $false; tag_name = 'v3.0.0'
+            draft = $false; prerelease = $false; tag_name = "v$Version"
+            html_url = "https://github.com/$Repository/releases/tag/v$Version"
             assets = @([pscustomobject]@{
-                name = 'Relay-3.0.0-Setup.exe'; state = 'uploaded'; size = [long]$fixtureBytes.Length
-                browser_download_url = 'https://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe'
+                name = "Relay-$Version-Setup.exe"; state = 'uploaded'; size = [long]$fixtureBytes.Length
+                browser_download_url = "https://github.com/$Repository/releases/download/v$Version/Relay-$Version-Setup.exe"
                 digest = 'sha256:' + $fixtureHash
             })
         }
     }
     function New-Manifest {
+        param([string]$Version = '3.0.1', [string]$Repository = 'g1at/Relay')
         [pscustomobject]@{
-            schemaVersion = 1; version = '3.0.0'; tag = 'v3.0.0'; platform = 'win32'; arch = 'x64'
+            schemaVersion = 1; version = $Version; tag = "v$Version"; platform = 'win32'; arch = 'x64'
             installer = [pscustomobject]@{
-                name = 'Relay-3.0.0-Setup.exe'
-                url = 'https://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe'
+                name = "Relay-$Version-Setup.exe"
+                url = "https://github.com/$Repository/releases/download/v$Version/Relay-$Version-Setup.exe"
                 size = [long]$fixtureBytes.Length; sha256 = $fixtureHash; closeRunningAppGuard = $false
             }
         }
@@ -146,7 +149,7 @@ $ErrorActionPreference = 'Stop'
     function Read-RelayRegistryInstallations {
         $state.InstallationReads++
         if ($state.TamperOnInstallationRead -eq $state.InstallationReads) {
-            [IO.File]::WriteAllBytes((Join-Path $state.Directory 'Relay-3.0.0-Setup.exe'), $corruptBytes)
+            [IO.File]::WriteAllBytes((Join-Path $state.Directory 'Relay-3.0.1-Setup.exe'), $corruptBytes)
         }
         if ($state.InstallationSequence.Count -gt 0) { return $state.InstallationSequence.Dequeue() }
         if ($state.ProcessCalls -gt 0) { return $state.PostInstallations }
@@ -162,7 +165,7 @@ $ErrorActionPreference = 'Stop'
         Assert-Equal $Name 'Relay' 'Only the Relay process may be inspected'
         $state.ClosedChecks++
         if ($state.TamperAtCheck -eq $state.ClosedChecks) {
-            [IO.File]::WriteAllBytes((Join-Path $state.Directory 'Relay-3.0.0-Setup.exe'), $corruptBytes)
+            [IO.File]::WriteAllBytes((Join-Path $state.Directory 'Relay-3.0.1-Setup.exe'), $corruptBytes)
         }
         if ($state.RunningAtChecks -contains $state.ClosedChecks) { [pscustomobject]@{ Id = 123; Name = 'Relay' } }
     }
@@ -172,12 +175,12 @@ $ErrorActionPreference = 'Stop'
         $state.ReleaseCalls++; $state.ReleaseUri = $Uri; $state.ReleaseHeaders = $Headers
         Assert-Equal $TimeoutSec 15 'Metadata request timeout must remain bounded'
         $state.JsonUris.Add($Uri)
-        if ($Uri.StartsWith('https://raw.githubusercontent.com/g1at/relay-updates/main/')) {
+        if ($Uri.StartsWith('https://raw.githubusercontent.com/g1at/Relay/main/distribution/') -or $Uri.StartsWith('https://raw.githubusercontent.com/g1at/relay-updates/main/')) {
             $state.ManifestCalls++
             if ($state.ManifestCalls -le $state.ManifestFailures) { throw 'Fixture manifest request failure' }
             return $state.Manifest
         }
-        Assert-True ($Uri.StartsWith('https://api.github.com/repos/g1at/relay-updates/releases/')) 'Unexpected metadata endpoint'
+        Assert-True ($Uri.StartsWith('https://api.github.com/repos/g1at/Relay/releases/') -or $Uri.StartsWith('https://api.github.com/repos/g1at/relay-updates/releases/')) 'Unexpected metadata endpoint'
         $state.ApiCalls++
         if ($state.ApiCalls -le $state.ApiFailures) { throw 'Fixture API request failure' }
         return $state.Release
@@ -241,18 +244,18 @@ $ErrorActionPreference = 'Stop'
             Assert-Equal $state.ProcessCalls 0 'Parsing must not run an installer'
         }
         Invoke-Case 'valid release and requested version select the exact asset' {
-            $asset = Get-RelayReleaseAsset (New-Release) 'v3.0.0'
-            Assert-Equal $asset.Version '3.0.0' 'Release version'
+            $asset = Get-RelayReleaseAsset (New-Release) 'v3.0.1'
+            Assert-Equal $asset.Version '3.0.1' 'Release version'
             Assert-Equal $asset.Hash $fixtureHash 'SHA-256 digest'
             Assert-Equal $asset.Size $fixtureBytes.Length 'Download length'
-            Assert-Equal $asset.Name 'Relay-3.0.0-Setup.exe' 'Exact installer name'
+            Assert-Equal $asset.Name 'Relay-3.0.1-Setup.exe' 'Exact installer name'
         }
         Invoke-Case 'static manifest validates version platform hash and installer guard' {
             $manifest = New-Manifest
             $manifest.installer.closeRunningAppGuard = $true
-            $asset = Get-RelayManifestAsset $manifest 'v3.0.0'
+            $asset = Get-RelayManifestAsset $manifest 'v3.0.1'
             Assert-Equal $asset.Hash $fixtureHash 'Manifest hash'
-            Assert-Equal $asset.Version '3.0.0' 'Manifest version'
+            Assert-Equal $asset.Version '3.0.1' 'Manifest version'
             Assert-True $asset.CloseRunningAppGuard 'Explicit boolean guard capability'
             $manifest.installer.closeRunningAppGuard = 'true'
             Assert-True (-not (Get-RelayManifestAsset $manifest).CloseRunningAppGuard) 'A string cannot enable installer guard arguments'
@@ -262,7 +265,7 @@ $ErrorActionPreference = 'Stop'
                 { $state.Manifest.schemaVersion = 2 },
                 { $state.Manifest.platform = 'linux' },
                 { $state.Manifest.arch = 'arm64' },
-                { $state.Manifest.version = '3.0.0-rc.1' },
+                { $state.Manifest.version = '3.0.1-rc.1' },
                 { $state.Manifest.tag = 'v2.1.0' },
                 { $state.Manifest.installer.url = 'https://evil.example/Relay.exe' },
                 { $state.Manifest.installer.sha256 = '' },
@@ -278,10 +281,44 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'static latest and pinned manifests avoid GitHub API calls' {
             $null = Get-RelayAsset
-            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/relay-updates/main/latest.json' 'Static latest endpoint'
-            $null = Get-RelayAsset 'v3.0.0'
-            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/relay-updates/main/releases/v3.0.0.json' 'Static pinned endpoint'
+            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/latest.json' 'Static latest endpoint'
+            $null = Get-RelayAsset 'v3.0.1'
+            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/releases/v3.0.1.json' 'Static pinned endpoint'
             Assert-Equal $state.ApiCalls 0 'Available static metadata avoids API quota'
+        }
+        Invoke-Case 'explicitly pinned historical releases use only the legacy repository' {
+            $state.Manifest = New-Manifest -Version '3.0.0' -Repository 'g1at/relay-updates'
+            $asset = Get-RelayAsset 'v3.0.0'
+            Assert-Equal $asset.Version '3.0.0' 'Historical release version'
+            Assert-Equal $asset.Url 'https://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe' 'Historical installer URL'
+            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/relay-updates/main/releases/v3.0.0.json' 'Historical pinned manifest'
+            $state.ManifestFailures = 99
+            $state.Release = New-Release -Version '3.0.0' -Repository 'g1at/relay-updates'
+            $null = Get-RelayAsset '3.0.0'
+            Assert-Equal $state.ReleaseUri 'https://api.github.com/repos/g1at/relay-updates/releases/tags/v3.0.0' 'Historical pinned API fallback'
+            Assert-True (-not ($state.JsonUris -match '/latest')) 'Historical lookup never uses latest'
+            $state.ManifestFailures = 0
+            foreach ($version in @('2.1.0', '2.9.9')) {
+                $state.Manifest = New-Manifest -Version $version -Repository 'g1at/relay-updates'
+                $asset = Get-RelayAsset $version
+                Assert-Equal $asset.Version $version 'Older historical release'
+                Assert-Equal $state.ReleaseUri "https://raw.githubusercontent.com/g1at/relay-updates/main/releases/v$version.json" 'Older pinned legacy endpoint'
+            }
+        }
+        Invoke-Case 'bridge and future versions resolve only inside the new repository' {
+            foreach ($version in @('3.0.1', '3.0.2', '4.0.0')) {
+                $state.Manifest = New-Manifest -Version $version
+                $asset = Get-RelayAsset $version
+                Assert-Equal $asset.Version $version 'Pinned new release'
+                Assert-Equal $state.ReleaseUri "https://raw.githubusercontent.com/g1at/Relay/main/distribution/releases/v$version.json" 'New source manifest'
+            }
+            Assert-True (-not ($state.JsonUris -match 'relay-updates')) 'New releases never consult the legacy repository'
+        }
+        Invoke-Case 'default latest rejects a legacy bridge manifest without fallback' {
+            $state.Manifest = New-Manifest -Repository 'g1at/relay-updates'
+            Assert-Throws { Get-RelayAsset } 'download URL is unexpected'
+            Assert-Equal $state.ApiCalls 0 'Invalid retrieved metadata must not fall back'
+            Assert-True (-not ($state.JsonUris -match 'relay-updates')) 'Latest endpoint remains in new repository'
         }
         Invoke-Case 'static metadata transient failure retries before success' {
             $state.ManifestFailures = 2
@@ -293,11 +330,11 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'unavailable static metadata falls back to retried pinned GitHub API' {
             $state.ManifestFailures = 3; $state.ApiFailures = 2
-            $asset = Get-RelayAsset 'v3.0.0'
-            Assert-Equal $asset.Version '3.0.0' 'API fallback version'
+            $asset = Get-RelayAsset 'v3.0.1'
+            Assert-Equal $asset.Version '3.0.1' 'API fallback version'
             Assert-Equal $state.ManifestCalls 3 'Static requests exhaust their retry budget'
             Assert-Equal $state.ApiCalls 3 'API retry count'
-            Assert-Equal $state.ReleaseUri 'https://api.github.com/repos/g1at/relay-updates/releases/tags/v3.0.0' 'Pinned fallback endpoint'
+            Assert-Equal $state.ReleaseUri 'https://api.github.com/repos/g1at/Relay/releases/tags/v3.0.1' 'Pinned fallback endpoint'
             Assert-True (-not $asset.CloseRunningAppGuard) 'API fallback cannot assume a custom installer capability'
         }
         Invoke-Case 'both metadata sources failing never downloads or executes' {
@@ -307,6 +344,22 @@ $ErrorActionPreference = 'Stop'
             Assert-Equal $state.ApiCalls 3 'API failure attempts'
             Assert-Equal $state.DownloadCalls 0 'No asset means no download'
             Assert-Equal $state.ProcessCalls 0 'No asset means no execution'
+            Assert-True (-not ($state.JsonUris -match 'relay-updates')) 'New source failures cannot silently fall back to the old latest'
+        }
+        Invoke-Case 'API fallback validates the release repository as well as the asset URL' {
+            $state.ManifestFailures = 99
+            foreach ($url in @(
+                'https://github.com/g1at/relay-updates/releases/tag/v3.0.1',
+                'https://github.com/g1at/Relay/releases/tag/v3.0.0',
+                'https://github.com/other/Relay/releases/tag/v3.0.1',
+                'https://github.com/g1at/Relay/releases/tag/v3.0.1?redirect=evil',
+                ''
+            )) {
+                $state.Release = New-Release
+                $state.Release.html_url = $url
+                Assert-Throws { Get-RelayAsset } 'release URL'
+            }
+            Assert-Equal $state.DownloadCalls 0 'Foreign releases cannot download'
         }
         Invoke-Case 'API fallback still rejects an unverified or wrong-version release' {
             $state.ManifestFailures = 99
@@ -318,12 +371,12 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'malicious and altered URLs are rejected' {
             foreach ($url in @(
-                'http://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe',
-                'https://github.com.evil.example/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe',
-                'https://github.com@evil.example/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe',
-                'https://github.com/other/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe',
-                'https://github.com/g1at/relay-updates/releases/download/v3.0.0/../Relay-3.0.0-Setup.exe',
-                'https://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe?redirect=evil'
+                'http://github.com/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe',
+                'https://github.com.evil.example/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe',
+                'https://github.com@evil.example/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe',
+                'https://github.com/other/relay-updates/releases/download/v3.0.1/Relay-3.0.1-Setup.exe',
+                'https://github.com/g1at/Relay/releases/download/v3.0.1/../Relay-3.0.1-Setup.exe',
+                'https://github.com/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe?redirect=evil'
             )) {
                 $release = New-Release; $release.assets[0].browser_download_url = $url
                 Assert-Throws { Get-RelayReleaseAsset $release } 'download URL is unexpected'
@@ -342,7 +395,7 @@ $ErrorActionPreference = 'Stop'
             Assert-Throws { Get-RelayReleaseAsset $release } 'published stable'
         }
         Invoke-Case 'invalid tags and requested-version mismatch are rejected' {
-            $release = New-Release; $release.tag_name = 'v3.0.0-rc.1'
+            $release = New-Release; $release.tag_name = 'v3.0.1-rc.1'
             Assert-Throws { Get-RelayReleaseAsset $release } 'tag is invalid'
             Assert-Throws { Get-RelayReleaseAsset (New-Release) '2.1.0' } 'does not match the requested version'
         }
@@ -501,7 +554,7 @@ $ErrorActionPreference = 'Stop'
             Assert-Equal $state.ConfirmCalls 0 'Untrusted installation path must not reach post-validation'
         }
         Invoke-Case 'same-version uninstall-only registration cannot report a verified latest install' {
-            $installed = New-Installation -Version '3.0.0'
+            $installed = New-Installation -Version '3.0.1'
             $installed.InstallLocationRegistered = $false
             $state.Installations = @($installed)
             $state.ConfirmMode = 'real'
@@ -525,7 +578,7 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'fully installed latest version skips download launch and running-app checks' {
             $state.ConfirmMode = 'real'
-            $state.Installations = @(New-Installation -Version '3.0.0')
+            $state.Installations = @(New-Installation -Version '3.0.1')
             $state.RunningAtChecks = @(1)
             Install-Relay -DownloadDirectory $state.Directory
             Assert-Equal $state.ConfirmCalls 1 'Latest-version skip must verify actual installation files'
@@ -535,21 +588,21 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'same-version incomplete registration does not silently report latest' {
             $state.ConfirmMode = 'real'
-            $state.Installations = @(New-Installation -Version '3.0.0' -Incomplete)
+            $state.Installations = @(New-Installation -Version '3.0.1' -Incomplete)
             Assert-Throws { Install-Relay -DownloadDirectory $state.Directory } 'incomplete|Interactive'
             Assert-Equal $state.DownloadCalls 0 'Incomplete same-version install requires explicit interactive recovery'
             Assert-Equal $state.ProcessCalls 0 'No implicit reinstall for incomplete registration'
         }
         Invoke-Case 'same-version executable mismatch cannot be mistaken for an intact latest install' {
             $state.ConfirmMode = 'real'
-            $installed = New-Installation -Version '3.0.0'
+            $installed = New-Installation -Version '3.0.1'
             $state.ExecutableVersions[(Join-Path $installed.Location 'Relay.exe')] = '2.1.0'
             $state.Installations = @($installed)
             Assert-Throws { Install-Relay -DownloadDirectory $state.Directory } 'executable version does not match|Interactive'
             Assert-Equal $state.ProcessCalls 0 'Mismatched installed executable must not count as a verified no-op'
         }
         Invoke-Case 'interactive mode can explicitly reinstall the same version' {
-            $state.Installations = @(New-Installation -Version '3.0.0')
+            $state.Installations = @(New-Installation -Version '3.0.1')
             Install-Relay -Interactive -DownloadDirectory $state.Directory
             Assert-Equal $state.DownloadCalls 1 'Interactive same-version request must acquire installer'
             Assert-Equal $state.ProcessCalls 1 'Interactive request must not be converted into a latest-version no-op'
@@ -579,23 +632,23 @@ $ErrorActionPreference = 'Stop'
             Assert-Equal $state.ProcessCalls 0 'Actual executable must not be downgraded'
         }
         Invoke-Case 'silent installation passes only /S and waits for completion' {
-            Install-Relay -Version 'v3.0.0' -DownloadDirectory $state.Directory
+            Install-Relay -Version 'v3.0.1' -DownloadDirectory $state.Directory
             Assert-Equal $state.ProcessCalls 1 'Installer launch count'
             Assert-Equal @($state.Start.Arguments).Count 1 'Only one NSIS argument is allowed'
             Assert-Equal $state.Start.Arguments[0] '/S' 'Only silent NSIS flag'
             Assert-True $state.Start.Wait 'Wait must be set'
             Assert-True $state.Start.PassThru 'PassThru must be set'
-            Assert-Equal $state.Start.FilePath (Join-Path $state.Directory 'Relay-3.0.0-Setup.exe') 'Verified installer path'
+            Assert-Equal $state.Start.FilePath (Join-Path $state.Directory 'Relay-3.0.1-Setup.exe') 'Verified installer path'
             Assert-Equal $state.ExpectedScope 'CurrentUser' 'Default install scope'
-            Assert-Equal $state.ExpectedVersion '3.0.0' 'Expected post-install version'
-            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/relay-updates/main/releases/v3.0.0.json' 'Pinned manifest endpoint'
+            Assert-Equal $state.ExpectedVersion '3.0.1' 'Expected post-install version'
+            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/releases/v3.0.1.json' 'Pinned manifest endpoint'
             Assert-Equal $state.ClosedChecks 1 'App state must be checked immediately before execution'
         }
         Invoke-Case 'interactive installation passes no NSIS arguments' {
             Install-Relay -Interactive -DownloadDirectory $state.Directory
             Assert-Equal $state.ProcessCalls 1 'Interactive launch count'
             Assert-True (-not $state.Start.HasArguments) 'Interactive invocation must omit ArgumentList'
-            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/relay-updates/main/latest.json' 'Latest manifest endpoint'
+            Assert-Equal $state.ReleaseUri 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/latest.json' 'Latest manifest endpoint'
         }
         Invoke-Case 'existing machine-wide scope is retained without forcing NSIS scope flags' {
             $installed = New-Installation -Scope 'LocalMachine'
@@ -613,7 +666,7 @@ $ErrorActionPreference = 'Stop'
             Assert-Equal ($state.Start.Arguments -join ' ') '--relay-no-close' 'Interactive guarded installer arguments'
         }
         Invoke-Case 'installation appearing during download is rechecked before launch' {
-            $installed = New-Installation -Version '3.0.0'
+            $installed = New-Installation -Version '3.0.1'
             $state.ConfirmMode = 'real'
             $state.ResponsePlan.Enqueue({
                 param($Offset)
@@ -653,7 +706,7 @@ $ErrorActionPreference = 'Stop'
             Assert-Throws { Install-Relay -DownloadDirectory $state.Directory } 'Relay is running'
             Assert-Equal $state.ReleaseCalls 1 'Running application must not prevent metadata lookup'
             Assert-Equal $state.DownloadCalls 1 'Running application must not prevent a verified download'
-            Assert-True (Test-RelayDownload (Join-Path $state.Directory 'Relay-3.0.0-Setup.exe') (Get-RelayManifestAsset $state.Manifest)) 'Running-app rejection must retain verified cache'
+            Assert-True (Test-RelayDownload (Join-Path $state.Directory 'Relay-3.0.1-Setup.exe') (Get-RelayManifestAsset $state.Manifest)) 'Running-app rejection must retain verified cache'
             Assert-Equal $state.ProcessCalls 0 'Running application must not be installed over'
         }
         Invoke-Case 'Relay started during download is rejected before execution' {
@@ -677,7 +730,7 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'automatic downgrade is rejected before download' {
             $state.Installations = @([pscustomobject]@{ Scope = 'CurrentUser'; Version = '3.1.0'; Location = $state.Directory; Recognized = $true; RegistryView = 'Registry64'; InstallLocationRegistered = $true })
-            Assert-Throws { Install-Relay -Version '3.0.0' -DownloadDirectory $state.Directory } 'Automatic downgrade is not supported'
+            Assert-Throws { Install-Relay -Version '3.0.1' -DownloadDirectory $state.Directory } 'Automatic downgrade is not supported'
             Assert-Equal $state.DownloadCalls 0 'Downgrade must block download'
             Assert-Equal $state.ProcessCalls 0 'Downgrade must block execution'
         }
@@ -697,7 +750,7 @@ $ErrorActionPreference = 'Stop'
         }
         Invoke-Case 'zero exit with missing installed files is still a failure' {
             $state.ConfirmMode = 'real'
-            $state.PostInstallations = @([pscustomobject]@{ Scope = 'CurrentUser'; Version = '3.0.0'; Location = $state.Directory; Recognized = $true; RegistryView = 'Registry64'; InstallLocationRegistered = $true })
+            $state.PostInstallations = @([pscustomobject]@{ Scope = 'CurrentUser'; Version = '3.0.1'; Location = $state.Directory; Recognized = $true; RegistryView = 'Registry64'; InstallLocationRegistered = $true })
             Assert-Throws { Install-Relay -DownloadDirectory $state.Directory } 'installed Relay files are incomplete'
             Assert-Equal $state.ProcessCalls 1 'Zero-exit mock must not imply installed files exist'
         }
@@ -707,7 +760,7 @@ $ErrorActionPreference = 'Stop'
             $state.Installations = @($original)
             $changedLocation = Join-Path $state.Directory 'unexpected-location'
             $state.PostInstallations = @([pscustomobject]@{
-                Scope = 'CurrentUser'; Version = '3.0.0'; Location = $changedLocation; Recognized = $true; RegistryView = 'Registry64'; InstallLocationRegistered = $true
+                Scope = 'CurrentUser'; Version = '3.0.1'; Location = $changedLocation; Recognized = $true; RegistryView = 'Registry64'; InstallLocationRegistered = $true
             })
             Assert-Throws { Install-Relay -DownloadDirectory $state.Directory } 'not installed in its original directory'
             Assert-Equal $state.ProcessCalls 1 'Post-install directory mismatch is checked after mocked zero exit'

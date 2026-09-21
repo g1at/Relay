@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Relay - 个人 AI 助手",
   "main": "main.js",
   "author": "g0at",
@@ -30,7 +30,8 @@
     "prepare:sdk-runtime": "node ensure-sdk-linux-runtime.js",
     "build": "npm run verify:installer-skin && npm run prepare:sdk-runtime && electron-builder --win",
     "build:dir": "npm run prepare:sdk-runtime && electron-builder --win --dir",
-    "release": "npm run verify:installer-skin && npm run prepare:sdk-runtime && electron-builder --win --publish always",
+    "release": "node build/release.cjs",
+    "release:publish": "node build/release.cjs --publish",
     "test:workspace-pty": "electron test/workspace-pty-smoke.cjs",
     "test:workspace-ipc": "electron test/workspace-ipc-smoke.cjs",
     "test:workspace-asar": "node test/workspace-asar-fixture.cjs && electron test/workspace-asar-smoke.cjs",
@@ -87,7 +88,7 @@
     "publish": {
       "provider": "github",
       "owner": "g1at",
-      "repo": "relay-updates"
+      "repo": "Relay"
     },
     "directories": {
       "output": "dist"

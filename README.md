@@ -11,13 +11,13 @@
 <p align="center">一个面向 Windows 的本地 AI 工作区。连接你的模型与工具，在对话旁边处理文件、预览网页、运行终端，让任务从想法走到结果。</p>
 
 <p align="center">
-  <a href="https://github.com/g1at/relay-updates/releases/latest">下载 Windows 版</a> ·
+  <a href="https://github.com/g1at/Relay/releases/latest">下载 Windows 版</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#不止是一段对话">功能介绍</a> ·
   <a href="#参与开发">参与开发</a>
 </p>
 
-<p align="center"><strong>Relay 3.0.0</strong> · Windows x64 · Claude Agent SDK</p>
+<p align="center"><strong>Relay 3.0.1 · 迁移版准备中</strong> · Windows x64 · Claude Agent SDK</p>
 
 > **开源准备中**：当前仓库正在整理源码与构建流程，许可证尚未确定。正式授权以之后加入的 `LICENSE` 为准；本 README 不代表已经完成开源发布。
 
@@ -77,13 +77,13 @@ Relay 维护自己的记忆流程，默认关闭 SDK 的自动记忆，减少两
 
 ### 下载安装
 
-当前提供 **Windows x64** 安装包。直接前往 [最新正式版本](https://github.com/g1at/relay-updates/releases/latest)，或在 PowerShell 5.1 / 7 中执行：
+当前提供 **Windows x64** 安装包。以下新入口在仓库公开并发布 3.0.1 后生效；迁移前仍可下载 [已发布的 3.0.0](https://github.com/g1at/relay-updates/releases/tag/v3.0.0)。迁移完成后，直接前往 [最新正式版本](https://github.com/g1at/Relay/releases/latest)，或在 PowerShell 5.1 / 7 中执行：
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/g1at/relay-updates/main/install.ps1')))
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/install.ps1')))
 ```
 
-新用户安装最新版；识别到登记完整的已有安装时，沿原安装目录与范围升级，已是最新版则跳过。脚本支持下载校验和断点续传；安装前需退出 Relay，包括托盘实例。仅下载、指定版本和安装向导用法见 [命令行安装说明](https://github.com/g1at/relay-updates#readme)。
+新用户安装最新版；识别到登记完整的已有安装时，沿原安装目录与范围升级，已是最新版则跳过。脚本支持下载校验和断点续传；安装前需退出 Relay，包括托盘实例。仅下载、指定版本和安装向导用法见 [命令行安装说明](distribution/README.md)。
 
 ### 配置一次，开始工作
 
@@ -153,7 +153,7 @@ npm run test:ui
 npm run build -- --x64 --publish never
 ```
 
-构建会核验安装器皮肤并准备匹配版本的 Linux SDK 运行时，用于 WSL。原生组件与安装器皮肤还需要对应资源或构建工具；本机曾成功打包不代表干净克隆已经可以复现。`npm run release` 会执行远端发布，不属于普通开发验证命令。
+构建会核验安装器皮肤并准备匹配版本的 Linux SDK 运行时，用于 WSL。原生组件与安装器皮肤还需要对应资源或构建工具；本机曾成功打包不代表干净克隆已经可以复现。`npm run release` 仅准备安装包及发布计划；`npm run release:publish -- <产物目录>` 才会上传该组已验证产物。完整流程见 [迁移发布说明](distribution/PUBLISHING.md)。
 
 ### 代码导航
 
@@ -169,7 +169,7 @@ npm run build -- --x64 --publish never
 | `test/` | 单元、回归与桌面 UI 检查 |
 | `build/` / `distribution/` | 安装器、品牌资源与命令行分发 |
 
-源码仓库为 [g1at/Relay](https://github.com/g1at/Relay)，正式安装包与自动更新文件位于 [g1at/relay-updates](https://github.com/g1at/relay-updates)。
+从 3.0.1 起，源码、正式安装包和自动更新统一使用 [g1at/Relay](https://github.com/g1at/Relay)。3.0.1 同时发布到 [g1at/relay-updates](https://github.com/g1at/relay-updates)，作为旧仓库最后一个版本；旧版用户升级后，后续更新自动使用新仓库。旧仓库保留历史版本与兼容安装入口。
 
 ## 反馈与贡献
 

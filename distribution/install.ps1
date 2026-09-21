@@ -3,7 +3,7 @@
 .SYNOPSIS
 Downloads, verifies and installs Relay from its official GitHub releases.
 .EXAMPLE
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/g1at/relay-updates/main/install.ps1)))
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/g1at/Relay/main/distribution/install.ps1)))
 .EXAMPLE
 .\install.ps1 -Version 3.0.0 -DownloadOnly
 #>
@@ -135,17 +135,32 @@ function Assert-RelayInstallScope {
     }
 }
 
+function Get-RelayReleaseRepository {
+    param([string]$RequestedVersion)
+    # Only explicitly pinned historical releases use the old repository.
+    # Latest and the migration release never fall back across repositories.
+    if ($RequestedVersion) {
+        if ($RequestedVersion -cnotmatch '\Av?\d+\.\d+\.\d+\z') { throw 'The requested release version is invalid.' }
+        if ([version]$RequestedVersion.TrimStart('v') -lt [version]'3.0.1') { return 'g1at/relay-updates' }
+    }
+    return 'g1at/Relay'
+}
+
 function Get-RelayReleaseAsset {
     param([object]$Release, [string]$RequestedVersion)
     if ($Release.draft -or $Release.prerelease) { throw 'Only published stable Relay releases are supported.' }
     if ([string]$Release.tag_name -notmatch '^v?(\d+\.\d+\.\d+)$') { throw 'The release tag is invalid.' }
     $number = $Matches[1]
     if ($RequestedVersion -and $number -ne $RequestedVersion.TrimStart('v')) { throw 'The returned release does not match the requested version.' }
+    $repository = Get-RelayReleaseRepository $RequestedVersion
+    if ($Release.html_url -cne "https://github.com/$repository/releases/tag/$($Release.tag_name)") {
+        throw 'The release URL does not belong to the expected official repository and tag.'
+    }
     $name = "Relay-$number-Setup.exe"
     $assets = @($Release.assets | Where-Object { $_.name -ceq $name })
     if ($assets.Count -ne 1) { throw "The release must contain exactly one $name asset." }
     $asset = $assets[0]
-    $expectedUrl = "https://github.com/g1at/relay-updates/releases/download/$($Release.tag_name)/$name"
+    $expectedUrl = "https://github.com/$repository/releases/download/$($Release.tag_name)/$name"
     if ($asset.state -ne 'uploaded' -or [long]$asset.size -le 0 -or $asset.browser_download_url -cne $expectedUrl) {
         throw 'The installer asset is incomplete or its download URL is unexpected.'
     }
@@ -163,8 +178,10 @@ function Get-RelayManifestAsset {
     $number = Get-RelayVersionNumber $Manifest.version
     if (-not $number -or $Manifest.version -cne $number -or $Manifest.tag -cne "v$number") { throw 'The manifest version is invalid.' }
     $installer = $Manifest.installer
+    $repository = Get-RelayReleaseRepository $RequestedVersion
     $asset = Get-RelayReleaseAsset ([pscustomobject]@{
         draft = $false; prerelease = $false; tag_name = $Manifest.tag
+        html_url = "https://github.com/$repository/releases/tag/$($Manifest.tag)"
         assets = @([pscustomobject]@{ name = $installer.name; state = 'uploaded'; size = $installer.size; browser_download_url = $installer.url; digest = 'sha256:' + $installer.sha256 })
     }) $RequestedVersion
     $asset.CloseRunningAppGuard = $installer.closeRunningAppGuard -is [bool] -and $installer.closeRunningAppGuard
@@ -187,18 +204,21 @@ function Invoke-RelayJson {
 
 function Get-RelayAsset {
     param([string]$Version)
-    $manifestUrl = 'https://raw.githubusercontent.com/g1at/relay-updates/main/latest.json'
-    $apiUrl = 'https://api.github.com/repos/g1at/relay-updates/releases/latest'
+    $repository = Get-RelayReleaseRepository $Version
+    $manifestRoot = "https://raw.githubusercontent.com/$repository/main/distribution"
+    if ($repository -ceq 'g1at/relay-updates') { $manifestRoot = "https://raw.githubusercontent.com/$repository/main" }
+    $manifestUrl = "$manifestRoot/latest.json"
+    $apiUrl = "https://api.github.com/repos/$repository/releases/latest"
     if ($Version) {
         $number = $Version.TrimStart('v')
-        $manifestUrl = "https://raw.githubusercontent.com/g1at/relay-updates/main/releases/v$number.json"
-        $apiUrl = "https://api.github.com/repos/g1at/relay-updates/releases/tags/v$number"
+        $manifestUrl = "$manifestRoot/releases/v$number.json"
+        $apiUrl = "https://api.github.com/repos/$repository/releases/tags/v$number"
     }
     try { $manifest = Invoke-RelayJson $manifestUrl }
     catch {
         Write-Warning 'The static release manifest is unavailable. Checking GitHub Releases...'
         try { $release = Invoke-RelayJson $apiUrl @{ Accept = 'application/vnd.github+json'; 'User-Agent' = 'Relay-Installer'; 'X-GitHub-Api-Version' = '2022-11-28' } }
-        catch { throw 'Cannot retrieve the Relay release. Check your connection/proxy and retry, or download from https://github.com/g1at/relay-updates/releases/latest.' }
+        catch { throw "Cannot retrieve the Relay release. Check your connection/proxy and retry, or download from https://github.com/$repository/releases." }
         return Get-RelayReleaseAsset $release $Version
     }
     # A retrieved but invalid manifest must not silently bypass verification.

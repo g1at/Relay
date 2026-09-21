@@ -7,13 +7,17 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 
-const REPOSITORY_URL = 'https://github.com/g1at/relay-updates';
+const DEFAULT_REPOSITORY = 'g1at/Relay';
+const LEGACY_REPOSITORY = 'g1at/relay-updates';
 const USAGE = `Usage:
-  node distribution/create-install-manifest.cjs --release-json <release.json> --installer <Relay-X.Y.Z-Setup.exe> --output <manifest.json> [--close-running-app-guard]
+  node distribution/create-install-manifest.cjs --release-json <release.json> --installer <Relay-X.Y.Z-Setup.exe> --output <manifest.json> [--repository g1at/Relay|g1at/relay-updates] [--close-running-app-guard]
 
 The release JSON must contain the GitHub REST fields tag_name, html_url,
 draft, prerelease, published_at, and assets with name, state, size, digest,
 and browser_download_url. Only published stable releases are accepted.
+The default repository is g1at/Relay. Explicit --repository g1at/relay-updates
+is supported only for legacy versions through 3.0.1. Both release and installer
+URLs must belong to the selected repository.
 
 Generate releases/vX.Y.Z.json first, then update latest.json after checking it.
 The installer guard is false unless --close-running-app-guard is explicitly
@@ -21,7 +25,15 @@ specified for an installer built with that protection. Metadata cannot enable it
 No network requests or remote publication are performed.
 `;
 
-function validateReleaseMetadata(release) {
+function validateRepository(repository) {
+  if (repository !== DEFAULT_REPOSITORY && repository !== LEGACY_REPOSITORY) {
+    throw new Error('Repository must be g1at/Relay or g1at/relay-updates.');
+  }
+  return repository;
+}
+
+function validateReleaseMetadata(release, { repository = DEFAULT_REPOSITORY } = {}) {
+  validateRepository(repository);
   if (!release || typeof release !== 'object' || Array.isArray(release)) {
     throw new Error('Release JSON must be an object from the GitHub Releases REST API.');
   }
@@ -36,13 +48,20 @@ function validateReleaseMetadata(release) {
     && /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(release.tag_name);
   if (!match) throw new Error('Release tag must be a stable vX.Y.Z version.');
   const version = match[1], tag = release.tag_name;
-  if (release.html_url !== `${REPOSITORY_URL}/releases/tag/${tag}`) {
-    throw new Error('Release URL must belong to the expected g1at/relay-updates tag.');
+  if (repository === LEGACY_REPOSITORY) {
+    const [major, minor, patch] = version.split('.').map(value => BigInt(value));
+    if (major > 3n || major === 3n && (minor > 0n || patch > 1n)) {
+      throw new Error('Legacy repository g1at/relay-updates supports versions through 3.0.1 only.');
+    }
+  }
+  const repositoryUrl = `https://github.com/${repository}`;
+  if (release.html_url !== `${repositoryUrl}/releases/tag/${tag}`) {
+    throw new Error(`Release URL must belong to the expected ${repository} tag.`);
   }
   const name = `Relay-${version}-Setup.exe`;
   const assets = Array.isArray(release.assets) ? release.assets.filter(asset => asset && asset.name === name) : [];
   if (assets.length !== 1) throw new Error(`Release must contain exactly one ${name} asset.`);
-  const asset = assets[0], url = `${REPOSITORY_URL}/releases/download/${tag}/${name}`;
+  const asset = assets[0], url = `${repositoryUrl}/releases/download/${tag}/${name}`;
   if (asset.state !== 'uploaded') throw new Error('Installer asset must have state=uploaded.');
   if (asset.browser_download_url !== url) throw new Error('Installer download URL does not match the official release asset.');
   if (!Number.isSafeInteger(asset.size) || asset.size <= 0) throw new Error('Installer asset size must be a positive safe integer.');
@@ -51,9 +70,9 @@ function validateReleaseMetadata(release) {
   return { version, tag, name, url, size: asset.size, sha256: digest[1].toLowerCase() };
 }
 
-async function createInstallManifest({ release, installerPath, closeRunningAppGuard = false }) {
+async function createInstallManifest({ release, installerPath, closeRunningAppGuard = false, repository = DEFAULT_REPOSITORY }) {
   if (typeof closeRunningAppGuard !== 'boolean') throw new Error('Installer guard must be an explicit boolean.');
-  const expected = validateReleaseMetadata(release);
+  const expected = validateReleaseMetadata(release, { repository });
   if (typeof installerPath !== 'string' || path.basename(installerPath) !== expected.name) {
     throw new Error(`Local installer must be named ${expected.name}.`);
   }
@@ -86,8 +105,8 @@ async function createInstallManifest({ release, installerPath, closeRunningAppGu
 
 function parseArguments(args) {
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) return { help: true };
-  const options = { closeRunningAppGuard: false };
-  const flags = new Map([['--release-json', 'releaseJson'], ['--installer', 'installerPath'], ['--output', 'outputPath']]);
+  const options = { closeRunningAppGuard: false, repository: DEFAULT_REPOSITORY };
+  const flags = new Map([['--release-json', 'releaseJson'], ['--installer', 'installerPath'], ['--output', 'outputPath'], ['--repository', 'repository']]);
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
@@ -101,6 +120,7 @@ function parseArguments(args) {
     options[key] = value;
   }
   for (const [flag, key] of flags) if (!options[key]) throw new Error(`Required option missing: ${flag}`);
+  validateRepository(options.repository);
   return options;
 }
 

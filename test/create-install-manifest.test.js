@@ -9,19 +9,19 @@ const { spawnSync } = require('node:child_process');
 const { createInstallManifest, validateReleaseMetadata, parseArguments } = require('../distribution/create-install-manifest.cjs');
 const cli = path.resolve(__dirname, '../distribution/create-install-manifest.cjs');
 
-async function fixture(t) {
+async function fixture(t, { version = '3.0.0', repository = 'g1at/Relay' } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'relay-install-manifest-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const content = Buffer.from('MZ\x00Relay installer fixture; never execute this file.');
-  const name = 'Relay-3.0.0-Setup.exe', installerPath = path.join(directory, name);
+  const name = `Relay-${version}-Setup.exe`, installerPath = path.join(directory, name);
   const sha256 = createHash('sha256').update(content).digest('hex');
   const release = {
-    tag_name: 'v3.0.0', draft: false, prerelease: false, published_at: '2026-09-15T04:24:16Z',
-    html_url: 'https://github.com/g1at/relay-updates/releases/tag/v3.0.0',
+    tag_name: `v${version}`, draft: false, prerelease: false, published_at: '2026-09-15T04:24:16Z',
+    html_url: `https://github.com/${repository}/releases/tag/v${version}`,
     assets: [{ name, state: 'uploaded', size: content.length, digest: 'sha256:' + sha256,
-      browser_download_url: 'https://github.com/g1at/relay-updates/releases/download/v3.0.0/' + name }],
+      browser_download_url: `https://github.com/${repository}/releases/download/v${version}/${name}` }],
   };
-  const releaseJson = path.join(directory, 'release.json'), outputPath = path.join(directory, 'releases', 'v3.0.0.json');
+  const releaseJson = path.join(directory, 'release.json'), outputPath = path.join(directory, 'releases', `v${version}.json`);
   await fs.writeFile(installerPath, content);
   await fs.writeFile(releaseJson, JSON.stringify(release));
   return { directory, content, sha256, release, installerPath, releaseJson, outputPath };
@@ -42,6 +42,40 @@ test('verified local bytes produce the complete win32 x64 schema with guard disa
   });
 });
 
+test('the default and explicit official repository accept current releases', async t => {
+  const f = await fixture(t, { version: '3.0.2' });
+  const manifest = await createInstallManifest(f);
+  assert.equal(manifest.installer.url, 'https://github.com/g1at/Relay/releases/download/v3.0.2/Relay-3.0.2-Setup.exe');
+  assert.deepEqual(await createInstallManifest({ ...f, repository: 'g1at/Relay' }), manifest);
+});
+
+test('legacy releases require an explicit repository and stop at version 3.0.1', async t => {
+  for (const version of ['3.0.0', '3.0.1']) {
+    const f = await fixture(t, { version, repository: 'g1at/relay-updates' });
+    await assert.rejects(createInstallManifest(f), /Release URL/);
+    const manifest = await createInstallManifest({ ...f, repository: 'g1at/relay-updates' });
+    assert.equal(manifest.version, version);
+    assert.equal(manifest.schemaVersion, 1);
+    assert.equal(manifest.installer.url, f.release.assets[0].browser_download_url);
+    assert.equal(manifest.installer.sha256, f.sha256);
+  }
+  for (const version of ['3.0.2', '3.1.0', '4.0.0', '9007199254740993.0.0']) {
+    const f = await fixture(t, { version, repository: 'g1at/relay-updates' });
+    await assert.rejects(createInstallManifest({ ...f, repository: 'g1at/relay-updates' }), /through 3\.0\.1/);
+  }
+});
+
+test('both release and asset URLs must match the selected allow-listed repository', async t => {
+  const current = await fixture(t), legacy = await fixture(t, { repository: 'g1at/relay-updates' });
+  for (const [selected, foreign, repository] of [[current, legacy, 'g1at/Relay'], [legacy, current, 'g1at/relay-updates']]) {
+    assert.throws(() => validateReleaseMetadata({ ...selected.release, html_url: foreign.release.html_url }, { repository }), /Release URL/);
+    assert.throws(() => validateReleaseMetadata({ ...selected.release, assets: foreign.release.assets }, { repository }), /download URL/);
+  }
+  for (const repository of ['other/Relay', 'https://github.com/g1at/Relay', 'g1at/Relay/', 'g1at/relay', '', null]) {
+    await assert.rejects(createInstallManifest({ ...current, repository }), /Repository must be/);
+  }
+});
+
 test('rejects draft, prerelease, missing status, and unconfirmed publication', async t => {
   const f = await fixture(t);
   for (const patch of [{ draft: true }, { draft: undefined }, { draft: 'false' }, { prerelease: true },
@@ -60,7 +94,7 @@ test('rejects noncanonical tags and URLs outside the exact official release', as
     assert.throws(() => validateReleaseMetadata({ ...f.release, html_url }), /Release URL/);
   }
   for (const browser_download_url of [f.release.assets[0].browser_download_url.replace('g1at', 'other'),
-    f.release.assets[0].browser_download_url + '?x=1', 'https://github.com.evil.invalid/g1at/relay-updates/installer.exe']) {
+    f.release.assets[0].browser_download_url + '?x=1', 'https://github.com.evil.invalid/g1at/Relay/installer.exe']) {
     assert.throws(() => validateReleaseMetadata({ ...f.release, assets: [{ ...f.release.assets[0], browser_download_url }] }), /download URL/);
   }
 });
@@ -107,6 +141,31 @@ test('CLI writes only the requested manifest and the guard requires its explicit
   assert.equal(result.status, 0, result.stderr);
   manifest = JSON.parse(await fs.readFile(f.outputPath, 'utf8'));
   assert.equal(manifest.installer.closeRunningAppGuard, true);
+});
+
+test('CLI repository selection is explicit, allow-listed, and enforces the legacy ceiling', async t => {
+  const current = await fixture(t, { version: '3.0.2' });
+  let result = runCli(current, ['--repository', 'g1at/Relay']);
+  assert.equal(result.status, 0, result.stderr);
+  for (const version of ['3.0.0', '3.0.1']) {
+    const legacy = await fixture(t, { version, repository: 'g1at/relay-updates' });
+    result = runCli(legacy);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Release URL/);
+    result = runCli(legacy, ['--repository', 'g1at/relay-updates']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(await fs.readFile(legacy.outputPath, 'utf8')).installer.url, legacy.release.assets[0].browser_download_url);
+  }
+  const tooNew = await fixture(t, { version: '3.0.2', repository: 'g1at/relay-updates' });
+  result = runCli(tooNew, ['--repository', 'g1at/relay-updates']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /through 3\.0\.1/);
+  await assert.rejects(fs.stat(tooNew.outputPath), { code: 'ENOENT' });
+  const required = ['--release-json', 'release.json', '--installer', 'installer.exe', '--output', 'manifest.json'];
+  assert.equal(parseArguments(required).repository, 'g1at/Relay');
+  assert.throws(() => parseArguments([...required, '--repository', 'other/Relay']), /Repository must be/);
+  assert.throws(() => parseArguments([...required, '--repository']), /Missing value/);
+  assert.throws(() => parseArguments([...required, '--repository', 'g1at/Relay', '--repository', 'g1at/relay-updates']), /Duplicate option/);
 });
 
 test('CLI verification failure preserves an existing manifest and leaves no temporary output', async t => {
