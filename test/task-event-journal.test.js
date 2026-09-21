@@ -209,6 +209,154 @@ test('replay 在分页前按 runId 过滤，避免其它任务占满页面', (t)
   assert.equal(replay.hasMore, true);
 });
 
+test('replayEpoch 当前实例完全沿用实时 replay，旧实例按 runId 分页且不改日志或元数据', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'old-instance' });
+  old.appendMany(['other', 'wanted', 'other', 'wanted', 'wanted'].map((runId, index) => ({
+    type: 'claude.event', runId, payload: { text: `Synthetic ${index}` },
+  })));
+  old.ack(3);
+  const { journal } = makeJournal(t, { rootDir, epoch: 'current-instance' });
+  journal.append({ type: 'claude.event', runId: 'wanted', payload: { text: 'Current instance' } });
+  assert.deepEqual(journal.replayEpoch({ runId: 'wanted' }), journal.replay({ runId: 'wanted' }));
+  const before = [old.journalPath, old.metaPath].map(file => ({ file, bytes: fs.readFileSync(file), mtime: fs.statSync(file).mtimeMs }));
+  const first = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', limit: 1 });
+  assert.deepEqual(first.events.map(event => event.seq), [2]);
+  assert.equal(first.epoch, old.epoch); assert.equal(first.lastSeq, 5); assert.equal(first.ackSeq, 3);
+  assert.equal(first.compactedThroughSeq, 0); assert.equal(first.resetRequired, false); assert.equal(first.missing, false);
+  assert.equal(first.hasMore, true);
+  const second = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: 2, limit: 2 });
+  assert.deepEqual(second.events.map(event => event.seq), [4, 5]); assert.equal(second.hasMore, false);
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'absent' }).events.length, 0);
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', limit: 0 }).hasMore, true);
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: 6 }).resetRequired, true);
+  first.events[0].payload.text = 'Caller changed its own copy';
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', limit: 1 }).events[0].payload.text, 'Synthetic 1');
+  for (const entry of before) {
+    assert.deepEqual(fs.readFileSync(entry.file), entry.bytes);
+    assert.equal(fs.statSync(entry.file).mtimeMs, entry.mtime);
+  }
+  assert.equal(journal.lastSeq, 1, 'Archived replay must not change the current stream cursor');
+});
+
+test('replayEpoch 拒绝跨目录和无任务范围的归档读取，缺失文件明确返回 missing', t => {
+  const { journal } = makeJournal(t);
+  for (const epoch of ['../outside', '/tmp/outside', 'a/b', 'a\\b', '..']) {
+    assert.throws(() => journal.replayEpoch({ epoch, runId: 'wanted' }), { code: 'INVALID_EPOCH' });
+  }
+  for (const runId of [undefined, '../other', 'bad/id']) {
+    assert.throws(() => journal.replayEpoch({ epoch: 'old', runId }), { code: 'INVALID_RUN_ID' });
+  }
+  assert.throws(() => journal.replayEpoch({ epoch: 'old', runId: 'wanted', sinceSeq: -1 }), { code: 'INVALID_SEQUENCE' });
+  assert.throws(() => journal.replayEpoch([]), { code: 'INVALID_REPLAY_OPTIONS' });
+  assert.deepEqual(journal.replayEpoch({ epoch: 'missing-instance', runId: 'wanted' }), {
+    epoch: 'missing-instance', sinceSeq: 0, lastSeq: 0, ackSeq: 0, compactedThroughSeq: 0,
+    resetRequired: true, missing: true, hasMore: false, events: [],
+  });
+  fs.mkdirSync(path.join(journal.epochsDir, 'directory.jsonl'));
+  assert.throws(() => journal.replayEpoch({ epoch: 'directory', runId: 'wanted' }), { code: 'INVALID_ARCHIVED_JOURNAL' });
+});
+
+test('replayEpoch 保留损坏尾部之前的有效过程，不修写旧文件或相信超前元数据', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'crashed-instance' });
+  old.appendMany([1, 2].map(index => ({ type: 'claude.event', runId: 'wanted', payload: { index } })));
+  fs.appendFileSync(old.journalPath, '{"partial":');
+  fs.writeFileSync(old.metaPath, JSON.stringify({ ...old.metadata(), lastSeq: 999, ackSeq: 999 }));
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  const before = fs.readFileSync(old.journalPath), meta = fs.readFileSync(old.metaPath);
+  const replay = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted' });
+  assert.deepEqual(replay.events.map(event => event.seq), [1, 2]);
+  assert.equal(replay.lastSeq, 2); assert.equal(replay.ackSeq, 2);
+  assert.equal(replay.damagedTail, true); assert.equal(replay.resetRequired, true);
+  assert.deepEqual(fs.readFileSync(old.journalPath), before); assert.deepEqual(fs.readFileSync(old.metaPath), meta);
+});
+
+test('replayEpoch 接受无结尾换行的完整事件，缺失元数据不影响过程恢复', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'no-newline' });
+  old.append({ type: 'claude.event', runId: 'wanted', payload: { text: '完整中文回执' } });
+  fs.writeFileSync(old.journalPath, fs.readFileSync(old.journalPath, 'utf8').trimEnd());
+  fs.rmSync(old.metaPath);
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  const before = fs.readFileSync(old.journalPath);
+  const replay = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted' });
+  assert.equal(replay.events[0].payload.text, '完整中文回执');
+  assert.equal(replay.damagedTail, false); assert.equal(replay.resetRequired, false);
+  assert.equal(replay.lastSeq, 1); assert.equal(replay.ackSeq, 0);
+  assert.deepEqual(fs.readFileSync(old.journalPath), before); assert.equal(fs.existsSync(old.metaPath), false);
+});
+
+test('replayEpoch 遇到序号断层或串入其他 epoch 后停止，不把后续记录拼接成完整过程', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'old-instance' });
+  const first = old.append({ type: 'claude.event', runId: 'wanted', payload: { text: 'Valid prefix' } });
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  for (const damaged of [{ ...first, seq: 3 }, { ...first, seq: 2, epoch: 'foreign' }, { ...first, seq: 2, runId: '../escape' }]) {
+    fs.writeFileSync(old.journalPath, [first, damaged, { ...first, seq: 4 }].map(event => JSON.stringify(event)).join('\n') + '\n');
+    const replay = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted' });
+    assert.deepEqual(replay.events.map(event => event.seq), [1]);
+    assert.equal(replay.lastSeq, 1); assert.equal(replay.damagedTail, true); assert.equal(replay.hasMore, false);
+  }
+});
+
+test('replayEpoch 正确标记被保留窗口裁掉的前缀和已确认的空归档', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'compacted-instance' });
+  old.appendMany([1, 2, 3, 4, 5].map(index => ({ type: 'claude.event', runId: 'wanted', payload: { index } })));
+  old.ack(3); old.compact();
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  const partial = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted' });
+  assert.equal(partial.compactedThroughSeq, 3); assert.equal(partial.lastSeq, 5); assert.equal(partial.resetRequired, true);
+  assert.deepEqual(partial.events.map(event => event.seq), [4, 5]);
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: 3 }).resetRequired, false);
+  old.ack(5); old.compact();
+  const empty = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted' });
+  assert.equal(empty.missing, false); assert.equal(empty.lastSeq, 5); assert.equal(empty.compactedThroughSeq, 5);
+  assert.equal(empty.ackSeq, 5); assert.equal(empty.resetRequired, true); assert.deepEqual(empty.events, []);
+  assert.equal(journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: 5 }).resetRequired, false);
+});
+
+test('replayEpoch 多页复用只读索引，只解析本页且文件变化后刷新缓存', t => {
+  const { journal: old, rootDir } = makeJournal(t, { epoch: 'cached-instance' });
+  old.appendMany(Array.from({ length: 30 }, (_, index) => ({ type: 'claude.event', runId: index % 2 ? 'other' : 'wanted', payload: { index } })));
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  const originalRead = fs.readFileSync, originalParse = JSON.parse;
+  let reads = 0, eventParses = 0;
+  t.mock.method(fs, 'readFileSync', function(file, ...args) {
+    if (file === old.journalPath) reads++;
+    return originalRead.call(this, file, ...args);
+  });
+  t.mock.method(JSON, 'parse', function(text, ...args) {
+    if (typeof text === 'string' && text.includes('"type":"claude.event"') && text.includes('"epoch":"cached-instance"')) eventParses++;
+    return originalParse.call(this, text, ...args);
+  });
+  const first = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', limit: 1 });
+  assert.equal(reads, 1); assert.equal(eventParses, 31);
+  const second = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: first.events[0].seq, limit: 2 });
+  assert.deepEqual(second.events.map(event => event.seq), [3, 5]);
+  assert.equal(reads, 1); assert.equal(eventParses, 33, 'Stable archive pagination only parses returned records');
+  const last = { ...first.events[0], seq: 31, payload: { index: 'later' } };
+  fs.appendFileSync(old.journalPath, JSON.stringify(last) + '\n');
+  const refreshed = journal.replayEpoch({ epoch: old.epoch, runId: 'wanted', sinceSeq: 30 });
+  assert.equal(reads, 2); assert.equal(refreshed.lastSeq, 31); assert.equal(refreshed.events[0].payload.index, 'later');
+});
+
+test('replayEpoch 归档缓存按 epoch 有界淘汰，读取不会清理其他磁盘 epoch', t => {
+  const rootDir = makeRoot(t), epochs = ['archive-a', 'archive-b', 'archive-c'];
+  for (const epoch of epochs) {
+    const { journal } = makeJournal(t, { rootDir, epoch });
+    journal.append({ type: 'claude.event', runId: 'wanted' });
+  }
+  const { journal } = makeJournal(t, { rootDir, epoch: 'new-instance' });
+  const filesBefore = fs.readdirSync(journal.epochsDir).sort();
+  const originalRead = fs.readFileSync; let reads = 0;
+  t.mock.method(fs, 'readFileSync', function(file, ...args) {
+    if (String(file).endsWith('archive-a.jsonl')) reads++;
+    return originalRead.call(this, file, ...args);
+  });
+  for (const epoch of epochs) journal.replayEpoch({ epoch, runId: 'wanted' });
+  assert.equal(reads, 1);
+  journal.replayEpoch({ epoch: 'archive-a', runId: 'wanted' });
+  assert.equal(reads, 2);
+  assert.deepEqual(fs.readdirSync(journal.epochsDir).sort(), filesBefore);
+});
+
 test('maxEpochs 清理最旧 epoch 的日志和元数据', (t) => {
   const rootDir = makeRoot(t);
   for (let index = 1; index <= 4; index += 1) {

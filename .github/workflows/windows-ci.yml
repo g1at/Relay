@@ -58,6 +58,12 @@ jobs:
       - name: Renderer smoke test with isolated fixtures
         run: npm run test:ui
 
+      - name: Recover interrupted task progress in the renderer
+        run: npm run test:crash-progress
+
+      - name: Verify progress persistence from packaged ASAR
+        run: npm run test:progress-asar
+
       - name: Verify native installer skin
         run: npm run verify:installer-skin
 

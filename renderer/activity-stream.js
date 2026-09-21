@@ -185,6 +185,21 @@
         if (item.toolUseId) state._tasks.set(item.toolUseId, item);
       }
     }
+    const cursor = saved.streamCursor;
+    if (cursor && typeof cursor === 'object') {
+      state._currentMessageId = typeof cursor.currentMessageId === 'string' ? cursor.currentMessageId : null;
+      state._messageSequence = Number.isSafeInteger(cursor.messageSequence) ? cursor.messageSequence : 0;
+      state._currentOrder = Number.isFinite(cursor.currentOrder) ? cursor.currentOrder : 0;
+      state._ambientTasks = new Set(Array.isArray(cursor.ambientTasks) ? cursor.ambientTasks : []);
+      const items = new Map(state.items.map(item => [item.id, item]));
+      for (const savedBlock of Array.isArray(cursor.blocks) ? cursor.blocks : []) {
+        if (!savedBlock || typeof savedBlock.key !== 'string' || savedBlock.messageId !== state._currentMessageId) continue;
+        const { itemId, ...block } = savedBlock;
+        const item = items.get(itemId) || null;
+        if (item && block.json) item.inputJson = block.json;
+        state._blocks.set(block.key, { ...block, item });
+      }
+    }
     return state;
   }
 
@@ -217,6 +232,17 @@
       retractedToolIds: [...state.retractedToolIds],
       contextEpoch: state.contextEpoch,
       contextResetUuids: [...state.contextResetUuids],
+      // Crash checkpoints can occur in the middle of a thinking/tool block.
+      // Preserve only the current message's parser cursor, referencing the
+      // public items by ID so hydration continues the same row after replay.
+      ...(state.phase === 'running' ? { streamCursor: {
+        currentMessageId: state._currentMessageId,
+        messageSequence: state._messageSequence,
+        currentOrder: state._currentOrder,
+        ambientTasks: [...state._ambientTasks],
+        blocks: [...state._blocks.values()].filter(block => block.messageId === state._currentMessageId)
+          .map(({ item, ...block }) => ({ ...block, itemId: item?.id || null })),
+      } } : {}),
     };
   }
 

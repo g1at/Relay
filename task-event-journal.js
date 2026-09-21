@@ -14,6 +14,9 @@ const MAX_STRING_LENGTH = 64 * 1024;
 const MAX_ARRAY_ITEMS = 1000;
 const MAX_OBJECT_KEYS = 1000;
 const MAX_VALUE_DEPTH = 16;
+const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const MAX_ARCHIVE_CACHE_BYTES = 96 * 1024 * 1024;
+const MAX_ARCHIVE_CACHE_EPOCHS = 2;
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|password|passwd|passphrase|secret|token|session[-_]?token|access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|x[-_]api[-_]?key|apikey|private[-_]?key|client[-_]?secret|cookie|set[-_]?cookie|credential|credentials)$/i;
 
@@ -173,6 +176,8 @@ class TaskEventJournal {
     this._byteLength = 0;
     this._updatedAt = null;
     this._events = [];
+    this._archiveCache = new Map();
+    this._archiveCacheBytes = 0;
 
     fs.mkdirSync(this.epochsDir, { recursive: true });
     this._load();
@@ -258,10 +263,10 @@ class TaskEventJournal {
     };
   }
 
-  _validateStoredEvent(event) {
+  _validateStoredEvent(event, epoch = this.epoch) {
     if (!isPlainObject(event)) throw new Error('event is not an object');
     if (event.schemaVersion !== RUN_EVENT_SCHEMA_VERSION) throw new Error('unsupported event schema');
-    if (event.epoch !== this.epoch) throw new Error('event epoch mismatch');
+    if (event.epoch !== epoch) throw new Error('event epoch mismatch');
     if (!Number.isSafeInteger(event.seq) || event.seq < 1) throw new Error('invalid event sequence');
     if (typeof event.type !== 'string' || !event.type || event.type.length > MAX_EVENT_TYPE_LENGTH) {
       throw new Error('invalid event type');
@@ -467,6 +472,106 @@ class TaskEventJournal {
       hasMore: available.length > events.length,
       events: JSON.parse(JSON.stringify(events)),
     };
+  }
+
+  // Archived epochs must never be reopened as writable journals: construction
+  // repairs tails, updates metadata and prunes other epochs. Keep a bounded
+  // read-only line index instead. Pagination parses only the selected page.
+  _readArchivedEpoch(epoch) {
+    const file = path.join(this.epochsDir, `${epoch}.jsonl`);
+    let stat;
+    try { stat = fs.lstatSync(file); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new TaskEventJournalError('INVALID_ARCHIVED_JOURNAL', 'Archived event journal must be a regular file');
+    }
+    if (stat.size > MAX_ARCHIVE_BYTES) {
+      throw new TaskEventJournalError('ARCHIVED_JOURNAL_TOO_LARGE', 'Archived event journal exceeds the recovery size limit');
+    }
+    const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const cached = this._archiveCache.get(epoch);
+    if (cached?.signature === signature) {
+      this._archiveCache.delete(epoch); this._archiveCache.set(epoch, cached);
+      return cached;
+    }
+    if (cached) {
+      this._archiveCacheBytes -= cached.bytes;
+      this._archiveCache.delete(epoch);
+    }
+    const content = fs.readFileSync(file);
+    if (content.length > MAX_ARCHIVE_BYTES) {
+      throw new TaskEventJournalError('ARCHIVED_JOURNAL_TOO_LARGE', 'Archived event journal exceeds the recovery size limit');
+    }
+    const byRun = new Map();
+    let firstSeq = null, lastSeq = 0, count = 0, damagedTail = false;
+    for (let start = 0; start < content.length;) {
+      const newline = content.indexOf(10, start);
+      const end = newline < 0 ? content.length : newline;
+      const text = content.toString('utf8', start, end);
+      if (text.trim()) {
+        let event;
+        try {
+          event = JSON.parse(text);
+          this._validateStoredEvent(event, epoch);
+          if (event.runId != null && !isValidRunId(event.runId)) throw new Error('invalid event run id');
+          if (count && event.seq !== lastSeq + 1) throw new Error('non-contiguous event sequence');
+        } catch (_) { damagedTail = true; break; }
+        if (firstSeq == null) firstSeq = event.seq;
+        lastSeq = event.seq; count++;
+        if (event.runId) {
+          if (!byRun.has(event.runId)) byRun.set(event.runId, []);
+          byRun.get(event.runId).push({ seq: event.seq, start, end });
+        }
+      }
+      start = end + 1;
+    }
+    const entry = { signature, content, byRun, firstSeq, lastSeq, damagedTail, bytes: content.length + count * 64 };
+    while (this._archiveCache.size && (this._archiveCache.size >= MAX_ARCHIVE_CACHE_EPOCHS
+        || this._archiveCacheBytes + entry.bytes > MAX_ARCHIVE_CACHE_BYTES)) {
+      const oldest = this._archiveCache.keys().next().value;
+      this._archiveCacheBytes -= this._archiveCache.get(oldest).bytes;
+      this._archiveCache.delete(oldest);
+    }
+    if (entry.bytes <= MAX_ARCHIVE_CACHE_BYTES) {
+      this._archiveCache.set(epoch, entry); this._archiveCacheBytes += entry.bytes;
+    }
+    return entry;
+  }
+
+  replayEpoch(options = {}) {
+    if (!isPlainObject(options)) throw new TaskEventJournalError('INVALID_REPLAY_OPTIONS', 'Replay options must be an object');
+    const epoch = options.epoch == null ? this.epoch : String(options.epoch);
+    if (!isValidEpoch(epoch)) throw new TaskEventJournalError('INVALID_EPOCH', 'Invalid archived event epoch');
+    if (epoch === this.epoch) return this.replay(options);
+    if (!isValidRunId(options.runId)) throw new TaskEventJournalError('INVALID_RUN_ID', 'Archived replay requires a valid run id');
+    const sinceSeq = options.sinceSeq == null ? 0 : options.sinceSeq;
+    if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) throw new TaskEventJournalError('INVALID_SEQUENCE', 'sinceSeq must be a non-negative integer');
+    const limit = Number.isSafeInteger(options.limit) && options.limit >= 0 ? options.limit : DEFAULT_MAX_EVENTS;
+    const archived = this._readArchivedEpoch(epoch);
+    if (!archived) return { epoch, sinceSeq, lastSeq: 0, ackSeq: 0, compactedThroughSeq: 0,
+      resetRequired: true, missing: true, hasMore: false, events: [] };
+    let meta = null;
+    try {
+      const file = path.join(this.epochsDir, `${epoch}.meta.json`);
+      const stat = fs.lstatSync(file);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 64 * 1024) {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (parsed?.schemaVersion === JOURNAL_META_SCHEMA_VERSION && parsed.epoch === epoch) meta = parsed;
+      }
+    } catch (_) {} // Surviving JSONL records, not optional metadata, own their sequence.
+    const lastSeq = archived.firstSeq == null && !archived.damagedTail
+      ? Math.max(0, Number.isSafeInteger(meta?.lastSeq) ? meta.lastSeq : 0) : archived.lastSeq;
+    const ackSeq = Math.min(lastSeq, Math.max(0, Number.isSafeInteger(meta?.ackSeq) ? meta.ackSeq : 0));
+    const compactedThroughSeq = archived.firstSeq == null ? lastSeq : archived.firstSeq - 1;
+    const entries = archived.byRun.get(options.runId) || [];
+    let low = 0, high = entries.length;
+    while (low < high) { const middle = Math.floor((low + high) / 2); if (entries[middle].seq <= sinceSeq) low = middle + 1; else high = middle; }
+    const page = entries.slice(low, low + limit);
+    return { epoch, sinceSeq, lastSeq, ackSeq, compactedThroughSeq,
+      resetRequired: archived.damagedTail || sinceSeq < compactedThroughSeq || sinceSeq > lastSeq,
+      missing: false, damagedTail: archived.damagedTail,
+      hasMore: low + page.length < entries.length,
+      events: page.map(entry => JSON.parse(archived.content.toString('utf8', entry.start, entry.end))) };
   }
 
   ack(input, options = {}) {

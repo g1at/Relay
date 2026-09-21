@@ -2162,6 +2162,13 @@ function taskTurnHasPersistedOutcome(turn) {
     .some(status => terminalStatuses.includes(String(status || '').trim().toLowerCase()));
 }
 
+function taskHasEmptyInterruptedProgress(task, turn) {
+  return task?.state === 'interrupted' && task.result?.error?.code === 'APP_RESTART'
+    && taskTurnHasPersistedOutcome(turn) && !savedAssistantDisplay(turn).text
+    && !turn?.activity?.items?.length && !turn?.output?.messages?.length && !turn?.thinking
+    && !turn?.chat?.length;
+}
+
 function taskTurnLocation(conv, task, { allowLastFallback = false } = {}) {
   if (!conv || !Array.isArray(conv.turns) || !conv.turns.length || !task) return null;
   const source = taskSource(task);
@@ -2194,6 +2201,7 @@ function taskTurnLocation(conv, task, { allowLastFallback = false } = {}) {
 
 function taskErrorText(task, fallback = '任务未完成') {
   const value = task && task.result && task.result.error;
+  if (value?.code === 'APP_RESTART') return 'Relay 在任务完成前关闭，本次任务已中断。';
   if (typeof value === 'string' && value.trim()) return value.trim();
   if (value && typeof value.message === 'string' && value.message.trim()) return value.message.trim();
   return fallback;
@@ -2272,19 +2280,19 @@ async function reconcileRestoredChatTask(task) {
   if (!run || !run.restoredFromLedger || run.finishing) return;
   const state = String(task.state || '').toLowerCase();
   if (state === 'succeeded') {
-    await finishRun(task.runId, { exitCode: 0 });
+    await finishRun(task.runId, { ...run.recoveredTerminalEvent, exitCode: 0 });
     return;
   }
   if (state === 'canceled') {
     run.abortRequested = true;
     run.recoveryRerender = true;
-    await finishRun(task.runId, { exitCode: -1 });
+    await finishRun(task.runId, { ...run.recoveredTerminalEvent, exitCode: -1 });
     return;
   }
   const error = taskErrorText(task, state === 'interrupted' ? '任务意外中断' : '任务执行失败');
   run.error = error;
   run.recoveryRerender = true;
-  await finishRun(task.runId, { exitCode: -1, error });
+  await finishRun(task.runId, { ...run.recoveredTerminalEvent, exitCode: -1, error });
 }
 
 async function handleTaskLifecycleEvent(event, { settleNow = false } = {}) {
@@ -2322,6 +2330,7 @@ async function restoreActiveRunsFromLedger() {
   let snapshot = null;
   const restoredJobIds = new Set();
   const restoredCreationRunIds = new Set();
+  const replayPlans = [];
   try {
     if (!window.api.tasks || typeof window.api.tasks.snapshot !== 'function'
         || typeof window.api.tasks.replayStream !== 'function') return;
@@ -2346,19 +2355,37 @@ async function restoreActiveRunsFromLedger() {
       const conv = await window.api.history.load(convId);
       if (!conv || !Array.isArray(conv.turns) || !conv.turns.length) continue;
       const located = taskTurnLocation(conv, task, { allowLastFallback: !taskIsTerminal(task) });
+      const repairInterrupted = located && taskHasEmptyInterruptedProgress(task, located.turn);
       // 终态历史只修复能精确对应且仍缺回复的占位轮，避免重放旧任务覆盖正常历史。
-      if (!located || (taskIsTerminal(task)
+      if (!located || (taskIsTerminal(task) && !repairInterrupted
           && (taskTurnHasPersistedOutcome(located.turn)
             || savedAssistantDisplay(located.turn).text
             || (!located.turn.output && Array.isArray(located.turn.chat) && located.turn.chat.length)))) continue;
       const savedTurn = located.turn || {};
+      const epoch = task.execution?.appInstanceId || snapshot.epoch;
+      const progressReply = typeof window.api.tasks.progress === 'function'
+        ? await window.api.tasks.progress(runId) : null;
+      const candidate = progressReply?.ok && progressReply.progress;
+      const progress = candidate?.runId === runId && candidate.epoch === epoch
+        && Number.isSafeInteger(candidate.seq) && candidate.seq > 0 ? candidate : null;
+      let firstPage = null;
+      // A previous version may already have saved a blank APP_RESTART error.
+      // Repair only with real process evidence, never resave empty errors on
+      // every startup or turn a known failure into an invented final answer.
+      if (repairInterrupted && !progress?.activity?.items?.length && !progress?.output?.messages?.length) {
+        firstPage = await window.api.tasks.replayStream({ epoch, runId, sinceSeq: 0, limit: 5000 });
+        if (!firstPage?.ok || !firstPage.events?.some(envelope => {
+          const event = envelope.payload?.event;
+          return envelope.runId === runId && ['assistant', 'user', 'stream_event'].includes(event?.type);
+        })) continue;
+      }
       const mode = source.mode || conv.mode || 'plain';
-      const activityState = activityStateForTurn(savedTurn) || newActivityState();
+      const activityState = activityStateForTurn(progress ? { ...savedTurn, activity: progress.activity, output: progress.output } : savedTurn) || newActivityState();
       if (activityState && !taskIsTerminal(task)) { activityState.phase = 'running'; activityState.endedAt = null; }
       const turn = {
-        user: savedTurn.user || '', assistant: '', thinkingList: [],
+        user: savedTurn.user || '', assistant: '', thinkingList: savedTurn.thinking ? [savedTurn.thinking] : [],
         runId, inputKind: savedTurn.inputKind, taskRun: window.RelayTaskContinuity?.normalize(savedTurn.taskRun),
-        output: savedTurn.output || null,
+        output: progress?.output || (repairInterrupted ? null : savedTurn.output) || null,
         files: Array.isArray(savedTurn.files) ? savedTurn.files : [],
         skill: savedTurn.skill || null,
         supplements: Array.isArray(savedTurn.supplements) ? savedTurn.supplements.map(input => ({ ...input })) : [],
@@ -2382,52 +2409,56 @@ async function restoreActiveRunsFromLedger() {
         textDeltaMessageIds: new Set(),
         currentMessageHadTextDelta: false,
         restoredFromLedger: true,
+        progressEpoch: epoch, progressSeq: progress?.deliverySeq || progress?.seq || 0,
+        recoveredTerminalEvent: progress?.terminalEvent || null,
       };
       runs.set(convId, restored);
       jobToConv.set(runId, convId);
       restoredJobIds.add(runId);
+      replayPlans.push({ runId, epoch, sinceSeq: progress?.seq || 0, firstPage });
     }
 
-    let sinceSeq = 0;
-    let finalSeq = 0;
-    for (let page = 0; page < 20; page += 1) {
-      const response = await window.api.tasks.replayStream({
-        epoch: snapshot.epoch, sinceSeq, limit: 5000,
-      });
-      if (!response || response.ok === false) break;
-      const events = Array.isArray(response.events) ? response.events : [];
-      if (response.resetRequired) {
-        for (const runId of restoredJobIds) {
-          const run = runForJob(runId);
+    // Each run owns an epoch and a saved cursor. A new app epoch must not hide
+    // the previous process's log; a snapshot protects long runs from rotation.
+    for (const plan of replayPlans) {
+      let sinceSeq = plan.sinceSeq;
+      for (;;) {
+        const response = plan.firstPage || await window.api.tasks.replayStream({
+          epoch: plan.epoch, runId: plan.runId, sinceSeq, limit: 5000,
+        });
+        plan.firstPage = null;
+        if (!response || response.ok === false) {
+          const run = runForJob(plan.runId);
+          if (run) run.replayIncomplete = true;
+          break;
+        }
+        const events = Array.isArray(response.events) ? response.events : [];
+        if (response.resetRequired || response.damagedTail) {
+          const run = runForJob(plan.runId);
           if (run) run.replayIncomplete = true;
         }
-      }
-      for (const envelope of events) {
-        const event = envelope && envelope.payload && envelope.payload.event;
-        if (!event || !runForJob(event.jobId || envelope.runId)) continue;
-        const fingerprint = claudeEventFingerprint(event);
-        if (fingerprint) replayed.add(fingerprint);
-        handleClaudeEvent(event);
-      }
-      // 只确认实际消费过的全局序号。response.lastSeq 可能在分页之后，
-      // 直接 ACK 会让其他 run 尚未恢复的事件越过确认水位。
-      const consumedSeq = events.length ? Number(events[events.length - 1].seq) : 0;
-      if (consumedSeq > finalSeq) finalSeq = consumedSeq;
-      if (!events.length) {
-        const compactedThrough = Number(response.compactedThroughSeq || 0);
-        if (response.resetRequired && compactedThrough > sinceSeq) {
-          sinceSeq = compactedThrough;
-          continue;
+        for (const envelope of events) {
+          const event = envelope && envelope.payload && envelope.payload.event;
+          if (!event || (envelope.runId || event.jobId) !== plan.runId
+              || (event.jobId && event.jobId !== plan.runId) || !runForJob(plan.runId)) continue;
+          const fingerprint = claudeEventFingerprint(event);
+          if (fingerprint) replayed.add(fingerprint);
+          handleClaudeEvent({ ...event, jobId: plan.runId,
+            relay_stream_epoch: plan.epoch, relay_stream_seq: event.relay_stream_seq || envelope.seq });
         }
-        break;
+        if (!events.length) {
+          const compactedThrough = Number(response.compactedThroughSeq || 0);
+          if (response.resetRequired && compactedThrough > sinceSeq) {
+            sinceSeq = compactedThrough;
+            continue;
+          }
+          break;
+        }
+        const nextSeq = Number(events[events.length - 1].seq) || sinceSeq;
+        if (nextSeq <= sinceSeq) break;
+        sinceSeq = nextSeq;
+        if (!response.hasMore) break;
       }
-      const nextSeq = Number(events[events.length - 1].seq) || sinceSeq;
-      if (nextSeq <= sinceSeq) break;
-      sinceSeq = nextSeq;
-      if (response.hasMore === false || events.length < 5000) break;
-    }
-    if (finalSeq && typeof window.api.tasks.ack === 'function') {
-      window.api.tasks.ack({ epoch: snapshot.epoch, seq: finalSeq, stream: true }).catch(() => {});
     }
     if (currentConv && runs.has(currentConv.id)) {
       if (activeView === 'chat') await loadConversation(currentConv.id, null, { forceReload: true });
@@ -2588,6 +2619,11 @@ function handleClaudeEvent(evt) {
   if (!run) {
     // run 已被清理(已完成/已中止)却仍收到迟到事件 → 丢弃
     return;
+  }
+  if (evt.relay_stream_epoch && Number.isSafeInteger(evt.relay_stream_seq)) {
+    if (run.progressEpoch === evt.relay_stream_epoch && evt.relay_stream_seq <= (run.progressSeq || 0)) return;
+    run.progressEpoch = evt.relay_stream_epoch;
+    run.progressSeq = evt.relay_stream_seq;
   }
   // 页面切换仅隐藏聊天 DOM；其流仍持续更新，返回时不需要重放或重新连 SDK。
   const onView = isMountedChatJob(jobId);

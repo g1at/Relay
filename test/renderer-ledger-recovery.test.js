@@ -1,7 +1,12 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { harness, clone, full, result } = require('./renderer-activity-harness.cjs');
+const { harness, clone, full, result, stream } = require('./renderer-activity-harness.cjs');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { TaskEventJournal } = require('../task-event-journal');
+const { TaskProgressStore } = require('../task-progress-store');
 
 const ledgerTask = (runId, state, turnIndex) => ({
   runId, kind: 'chat', state, source: { conversationId: 'conv', turnIndex },
@@ -37,7 +42,7 @@ function recoveryFixture(turns, tasks, events = []) {
     },
   };
   for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation',
-    'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskTurnLocation', 'taskErrorText',
+    'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskHasEmptyInterruptedProgress', 'taskTurnLocation', 'taskErrorText',
     'finishRun', 'reconcileRestoredChatTask', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
   return {
     ...h, saved, registered,
@@ -165,4 +170,138 @@ test('recovering a WSL placeholder retains its original session environment and 
   assert.equal(h.saved[0].sessionProviderId, 'synthetic-provider');
   assert.equal(h.saved[0].sessionProviderRevision, 3);
   assert.equal(h.saved[0].sessionRouteTier, 'haiku');
+});
+
+const interruptedTask = (runId = 'old-job') => ({
+  ...ledgerTask(runId, 'interrupted', 0), execution: { appInstanceId: 'previous-process' },
+  result: { error: { code: 'APP_RESTART', message: 'Relay restarted before the task reached a terminal state' } },
+});
+const processFrames = (jobId = 'old-job') => [
+  { jobId, type: 'assistant', uuid: 'process-message', message: { id: 'm1', content: [
+    { type: 'thinking', thinking: 'Synthetic already-visible reasoning' },
+    { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'synthetic.txt' } },
+  ] } },
+  { jobId, type: 'user', uuid: 'tool-receipt', message: { content: [
+    { type: 'tool_result', tool_use_id: 'tool-1', content: 'Synthetic file contents' },
+  ] } },
+  { jobId, ...full('partial', 'Synthetic progress, work still pending', { uuid: 'partial-message' }) },
+];
+
+function journalFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-crash-replay-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const options = { rootDir: path.join(root, 'events'), logger: { warn() {} } };
+  return { root, before: new TaskEventJournal({ ...options, epoch: 'previous-process' }),
+    restart: () => new TaskEventJournal({ ...options, epoch: 'new-process' }) };
+}
+
+test('a real previous-process journal restores thinking, tool receipts and partial output after a crash', async t => {
+  const disk = journalFixture(t);
+  disk.before.appendMany(processFrames().map(event => ({ type: 'claude.event', runId: 'old-job', payload: { event } })));
+  const journal = disk.restart();
+  const h = recoveryFixture([{ runId: 'old-job', user: 'synthetic request', assistant: '' }, laterTurn()], [interruptedTask()]);
+  const requests = [];
+  h.context.window.api.tasks.replayStream = async request => {
+    requests.push(request);
+    h.registered.push(...h.context.runs.values());
+    return { ok: true, ...journal.replayEpoch(clone(request)) };
+  };
+  const later = clone(h.conv.turns[1]);
+  await h.restore();
+  assert.equal(requests[0].epoch, 'previous-process');
+  assert.equal(requests[0].runId, 'old-job');
+  const turn = h.conv.turns[0];
+  assert.equal(turn.status, 'error');
+  assert.equal(turn.assistant, '', 'partial narration must never become a final answer');
+  assert.ok(turn.activity.items.some(item => item.type === 'thinking'));
+  assert.equal(turn.activity.items.find(item => item.toolUseId === 'tool-1').result, 'Synthetic file contents');
+  assert.ok(turn.activity.items.some(item => item.result === 'Synthetic progress, work still pending'));
+  assert.deepEqual(h.conv.turns[1], later);
+  await h.restore();
+  assert.equal(h.saved.length, 1, 'completed recovery is idempotent');
+});
+
+test('a durable progress snapshot survives missing old journals and repairs an already-saved empty restart error', async t => {
+  const disk = journalFixture(t);
+  const writer = new TaskProgressStore({ rootDir: path.join(disk.root, 'progress') });
+  writer.observe(disk.before.appendMany(processFrames().map(event => ({ type: 'claude.event', runId: 'old-job', payload: { event } }))));
+  await writer.close();
+  fs.rmSync(disk.before.journalPath);
+  const reader = new TaskProgressStore({ rootDir: path.join(disk.root, 'progress') });
+  t.after(() => reader.close());
+  const h = recoveryFixture([{ runId: 'old-job', user: 'synthetic request', assistant: '', status: 'error',
+    error: 'Relay restarted before the task reached a terminal state', activity: { items: [] },
+    output: { status: 'error', messages: [] } }], [interruptedTask()]);
+  h.context.window.api.tasks.progress = async runId => ({ ok: true, progress: await reader.load(runId) });
+  h.context.window.api.tasks.replayStream = async request => {
+    h.registered.push(...h.context.runs.values());
+    assert.ok(request.sinceSeq > 0);
+    return { ok: true, missing: true, resetRequired: true, events: [], hasMore: false };
+  };
+  await h.restore();
+  assert.equal(h.conv.turns[0].assistant, '');
+  assert.equal(h.conv.turns[0].status, 'error');
+  assert.equal(h.conv.turns[0].activity.items.filter(item => item.type === 'thinking').length, 1);
+  assert.ok(h.conv.turns[0].activity.items.some(item => item.toolUseId === 'tool-1'));
+  assert.match(h.conv.turns[0].outputNotice, /部分执行过程/);
+  await h.restore();
+  assert.equal(h.saved.length, 1);
+});
+
+test('a blank historical restart error without recoverable evidence stays unchanged', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', assistant: '', status: 'error', activity: { items: [] } }], [interruptedTask()]);
+  await h.restore();
+  assert.equal(h.saved.length, 0);
+  assert.equal(h.registered.length, 0);
+});
+
+test('snapshot cursor prevents buffered stream deltas from being appended twice', async () => {
+  const seed = harness();
+  const events = [
+    stream({ type: 'message_start', message: { id: 'streaming' } }),
+    stream({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+    stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'first ' } }),
+  ];
+  events.forEach(event => seed.send(event));
+  const h = recoveryFixture([{ runId: 'live-job', assistant: '' }], [{
+    ...ledgerTask('live-job', 'running', 0), execution: { appInstanceId: 'synthetic-new-instance' },
+  }]);
+  h.context.window.api.tasks.progress = async () => ({ ok: true, progress: {
+    runId: 'live-job', epoch: 'synthetic-new-instance', seq: 3,
+    output: seed.output.serialize(seed.run.outputState), activity: seed.context.window.RelayActivity.serialize(seed.run.activityState),
+  } });
+  h.context.bufferedClaudeEvents.push(
+    { jobId: 'live-job', ...events[2], relay_stream_epoch: 'synthetic-new-instance', relay_stream_seq: 3 },
+    { jobId: 'live-job', ...stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'second' } }),
+      relay_stream_epoch: 'synthetic-new-instance', relay_stream_seq: 4 },
+  );
+  await h.restore();
+  const output = h.context.runForJob('live-job').outputState;
+  assert.equal(h.output.textFor(output.messages[0]), 'first second');
+  assert.equal(h.saved.length, 0);
+});
+
+test('a checkpoint after the only job-done frame retains its authoritative final result', async t => {
+  const disk = journalFixture(t);
+  const store = new TaskProgressStore({ rootDir: path.join(disk.root, 'progress') });
+  const done = { jobId: 'old-job', type: 'job-done', exitCode: 0, finalResult: result('Synthetic confirmed result') };
+  store.observe(disk.before.appendMany([{ type: 'claude.event', runId: 'old-job', payload: { event: done } }]));
+  await store.close();
+  const task = { ...interruptedTask(), state: 'succeeded', result: {} };
+  const h = recoveryFixture([{ runId: 'old-job', assistant: '' }], [task]);
+  h.context.window.api.tasks.progress = async runId => ({ ok: true, progress: await store.load(runId) });
+  await h.restore();
+  assert.equal(h.conv.turns[0].assistant, 'Synthetic confirmed result');
+  assert.equal(h.conv.turns[0].status, 'complete');
+});
+
+test('a journal read failure is disclosed when settling an interrupted run', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', assistant: '' }], [interruptedTask()]);
+  h.context.window.api.tasks.replayStream = async () => {
+    h.registered.push(...h.context.runs.values());
+    return { ok: false, error: 'Synthetic unavailable journal' };
+  };
+  await h.restore();
+  assert.equal(h.conv.turns[0].status, 'error');
+  assert.match(h.conv.turns[0].outputNotice, /部分执行过程/);
 });

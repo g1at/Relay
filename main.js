@@ -67,6 +67,7 @@ const {
 } = require('./provider-connectivity');
 const { TaskLedger } = require('./task-ledger');
 const { TaskEventJournal, isValidEpoch } = require('./task-event-journal');
+const { TaskProgressClient } = require('./task-progress-client');
 const { TaskOrchestrator } = require('./task-orchestrator');
 const {
   InteractionBroker,
@@ -371,6 +372,7 @@ if (HAS_SINGLE_INSTANCE_LOCK) {
 const TASK_EVENT_EPOCH = crypto.randomUUID();
 let taskEventSeq = 0;
 let streamEventSeq = 0;
+let streamDeliverySeq = 0;
 let taskJournalBuffer = [];
 let taskJournalFlushTimer = null;
 let streamJournalBuffer = [];
@@ -383,6 +385,9 @@ let HISTORY_DIR = null;
 
 let taskEventJournal = null;
 let streamEventJournal = null;
+let taskProgressStore = null;
+let progressShutdownPending = false;
+let progressShutdownComplete = false;
 let checkpointManager = null;
 let skillDraftService = null;
 let skillDraftShutdownPending = false;
@@ -492,6 +497,9 @@ if (HAS_SINGLE_INSTANCE_LOCK) {
   streamEventJournal = initialize('流式事件日志', () => new TaskEventJournal({
     rootDir: path.join(runtimeRoot, 'stream-events'), epoch: TASK_EVENT_EPOCH,
     maxEvents: 50000, maxBytes: 64 * 1024 * 1024,
+  }));
+  taskProgressStore = initialize('任务过程快照', () => new TaskProgressClient({
+    rootDir: path.join(runtimeRoot, 'progress'),
   }));
   checkpointManager = initialize('文件检查点', () => new CheckpointManager({
     rootDir: path.join(app.getPath('userData'), 'checkpoints'),
@@ -715,6 +723,10 @@ function flushTaskJournalEvents() {
 
 function journalClaudeEvent(runId, event) {
   if (!runId || !event) return null;
+  // The same cursor travels to the renderer and the durable snapshot. Buffered
+  // live events at renderer startup must not append a saved delta a second time.
+  event.relay_stream_epoch = TASK_EVENT_EPOCH;
+  event.relay_stream_seq = ++streamDeliverySeq;
   streamJournalBuffer.push({ type: 'claude.event', runId, payload: { event } });
   const terminal = event.type === 'result' || event.type === 'job-done';
   if (terminal || streamJournalBuffer.length >= 250) return flushStreamJournalEvents();
@@ -742,6 +754,8 @@ function flushStreamJournalEvents() {
       ? streamEventJournal.appendMany(batch)
       : batch.map((item) => streamEventJournal.append(item));
     if (envelopes.length) streamEventSeq = envelopes[envelopes.length - 1].seq;
+    try { if (taskProgressStore) taskProgressStore.observe(envelopes); }
+    catch (error) { console.warn('[task-progress] 记录执行过程失败: %s', error.message); }
     return envelopes[envelopes.length - 1] || null;
   } catch (e) {
     console.warn('[task-runtime] 流式事件日志批量写入失败 count=%d: %s', batch.length, e.message);
@@ -1322,6 +1336,13 @@ function persistConversationContextUsage(id, raw) {
   }
 }
 function deleteConversation(id) {
+  if (taskProgressStore) {
+    const conversation = loadConversation(id);
+    for (const turn of conversation?.turns || []) {
+      if (turn.runId) void taskProgressStore.remove(turn.runId)
+        .catch(error => console.warn('[task-progress] 清理已删除会话进度失败: %s', error.message));
+    }
+  }
   try { fs.rmSync(convFilePath(id), { force: true }); } catch (e) { console.warn('[history] 删除会话文件失败: %s id=%s', e.message, id); }
   writeHistoryIndex(readHistoryIndex().filter((m) => m.id !== id));
 }
@@ -4647,7 +4668,13 @@ ipcMain.handle('tasks:replayStream', (_e, { epoch, sinceSeq = 0, limit = 5000, r
   try {
     flushStreamJournalEvents();
     if (!streamEventJournal) return { ok: false, resetRequired: true, events: [], error: '流式事件日志不可用' };
-    const replay = streamEventJournal.replay({
+    // Older epochs are only accessible through their owning run. Never accept
+    // an arbitrary renderer-supplied filename or replay a different task's log.
+    if (epoch && epoch !== TASK_EVENT_EPOCH) {
+      const task = runId && taskLedger && taskLedger.get(runId);
+      if (!task || task.execution?.appInstanceId !== epoch) throw new Error('任务日志与运行实例不匹配');
+    }
+    const replay = streamEventJournal.replayEpoch({
       epoch,
       sinceSeq,
       limit: Math.min(Math.max(Number(limit) || 0, 0), 20000),
@@ -4655,6 +4682,16 @@ ipcMain.handle('tasks:replayStream', (_e, { epoch, sinceSeq = 0, limit = 5000, r
     });
     return { ok: true, ...replay };
   } catch (e) { return { ok: false, resetRequired: true, events: [], error: e.message }; }
+});
+
+ipcMain.handle('tasks:progress', async (_e, runId) => {
+  try {
+    const task = runId && taskLedger && taskLedger.get(runId);
+    if (!task) throw new Error('任务不存在');
+    flushStreamJournalEvents();
+    const progress = taskProgressStore ? await taskProgressStore.load(runId) : null;
+    return { ok: true, progress: progress && progress.epoch === task.execution?.appInstanceId ? progress : null };
+  } catch (error) { return { ok: false, progress: null, error: error.message }; }
 });
 
 ipcMain.handle('tasks:ack', (_e, { epoch, seq, stream = false, compact = false } = {}) => {
@@ -8811,6 +8848,18 @@ app.on('before-quit', event => {
       usageShutdownPending = true;
       Promise.resolve(usageStatsService.destroy()).catch(error => console.warn('[usage] 保存退出状态失败:', error.message)).finally(() => {
         usageShutdownComplete = true;
+        app.quit();
+      });
+    }
+    return;
+  }
+  if (taskProgressStore && !progressShutdownComplete) {
+    event.preventDefault();
+    if (!progressShutdownPending) {
+      progressShutdownPending = true;
+      flushStreamJournalEvents();
+      taskProgressStore.close().catch(error => console.warn('[task-progress] 保存退出进度失败:', error.message)).finally(() => {
+        progressShutdownComplete = true;
         app.quit();
       });
     }

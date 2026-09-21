@@ -166,6 +166,7 @@ contextBridge.exposeInMainWorld('api', {
     get: (runId) => ipcRenderer.invoke('tasks:get', runId),
     replay: (options) => ipcRenderer.invoke('tasks:replay', options || {}),
     replayStream: (options) => ipcRenderer.invoke('tasks:replayStream', options || {}),
+    progress: (runId) => ipcRenderer.invoke('tasks:progress', runId),
     ack: (options) => ipcRenderer.invoke('tasks:ack', options || {}),
     onEvent: (handler) => {
       const listener = (_evt, payload) => handler(payload);

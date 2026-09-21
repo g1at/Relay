@@ -145,7 +145,7 @@ function installReplay(h, task, events) {
     replayStream: async () => ({ ok: true, events: events.map((event, index) => ({ seq: index + 1, runId: 'job', payload: { event: { jobId: 'job', ...event } } })), hasMore: false }),
     ack: async (value) => { acknowledgements.push(value); },
   };
-  for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation', 'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskTurnLocation', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
+  for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation', 'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskHasEmptyInterruptedProgress', 'taskTurnLocation', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
   return acknowledgements;
 }
 
@@ -167,7 +167,7 @@ for (const mode of ['agent', 'orchestrate']) {
     assert.equal(run.activityState.items.find((item) => item.toolUseId === 'parent').status, 'success');
     assert.equal(run.activityState.phase, 'running');
     assert.equal(h.context.pendingConversationViewReloads.has('chat:conv'), true);
-    assert.deepEqual(clone(acks), [{ epoch: 'synthetic-epoch', seq: 3, stream: true }]);
+    assert.deepEqual(clone(acks), [], 'per-run recovery must not acknowledge unread global events');
     assert.deepEqual(h.conv, before);
     assert.equal(h.persisted, undefined);
     h.send(full('final', 'recovered final'));

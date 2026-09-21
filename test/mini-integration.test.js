@@ -113,6 +113,7 @@ function harness() {
     isQuitting: false, _memoryUsageFlushTimer: null, flushMemoryUsage() {},
     usageStatsService: null, usageShutdownPending: false, usageShutdownComplete: false,
     skillDraftService: null, skillDraftShutdownPending: false, skillDraftShutdownComplete: false,
+    taskProgressStore: null, progressShutdownPending: false, progressShutdownComplete: false,
     app: { on: (event, callback) => { appEvents[event] = callback; }, quit: () => { calls.push(['quit']); appEvents['before-quit']({ preventDefault: () => calls.push(['preventQuit']) }); } },
     attachmentDialog: { dispose: () => calls.push(['attachmentDispose']) }, browserPanelTools: { dispose() {} }, workspaceTools: { dispose() {} },
     flushStreamJournalEvents() {}, flushTaskJournalEvents() {}, scheduler: { shutdown() {} }, taskOrchestrator: null,
@@ -371,6 +372,21 @@ test('before-quit saves interrupted mini history before flushing usage and only 
   await waitFor(() => h.calls.some(call => call[0] === 'hostDestroy'));
   assert.equal(h.calls.filter(call => call[0] === 'hostDestroy').length, 1);
   assert.equal(h.history.get(sent.conversationId).turns[0].status, 'interrupted');
+  await h.close();
+});
+
+test('before-quit waits for a single durable process checkpoint before disposing the app', async () => {
+  const h = harness();
+  let finish, closes = 0;
+  h.context.taskProgressStore = { close: () => { closes++; return new Promise(resolve => { finish = resolve; }); } };
+  h.appEvents['before-quit']({ preventDefault() {} });
+  await waitFor(() => !!finish);
+  h.appEvents['before-quit']({ preventDefault() {} });
+  assert.equal(closes, 1);
+  assert.equal(h.calls.some(call => call[0] === 'hostDestroy'), false);
+  finish();
+  await waitFor(() => h.calls.some(call => call[0] === 'hostDestroy'));
+  assert.equal(h.context.progressShutdownComplete, true);
   await h.close();
 });
 
