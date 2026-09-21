@@ -7,25 +7,72 @@
   <!-- 代码高亮主题(深色,贴合 Mac 代码框);本地打包,离线可用 -->
   <link rel="stylesheet" href="vendor/github-dark.min.css" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="brand.css" />
+  <link rel="stylesheet" href="interaction-surface.css" />
+  <link rel="stylesheet" href="conversation-stream.css" />
+  <link rel="stylesheet" href="model-controls.css" />
+  <link rel="stylesheet" href="permission-controls.css" />
+  <link rel="stylesheet" href="mcp-permission-controls.css" />
+  <link rel="stylesheet" href="workspace-pages.css" />
+  <link rel="stylesheet" href="library-page.css" />
+  <link rel="stylesheet" href="scheduler-page.css" />
+  <link rel="stylesheet" href="sidebar-update.css" />
+  <link rel="stylesheet" href="window-chrome.css" />
+  <link rel="stylesheet" href="sidebar-history.css" />
+  <link rel="stylesheet" href="sidebar-explore.css" />
+  <link rel="stylesheet" href="keyboard-shortcuts.css" />
+  <link rel="stylesheet" href="plugins-page.css" />
+  <link rel="stylesheet" href="skill-maintenance.css" />
+  <link rel="stylesheet" href="usage-page.css" />
+  <link rel="stylesheet" href="general-preferences-page.css" />
+  <link rel="stylesheet" href="sdk-runtime-controls.css" />
+  <link rel="stylesheet" href="profile-page.css" />
+  <link rel="stylesheet" href="memory-page.css" />
+  <link rel="stylesheet" href="browser-settings-page.css" />
+  <link rel="stylesheet" href="browser-form-manager.css" />
+  <link rel="stylesheet" href="agent-picker.css" />
+  <link rel="stylesheet" href="vendor/xterm.css" />
+  <link rel="stylesheet" href="read-only-markdown.css" />
+  <link rel="stylesheet" href="subagent-history.css" />
+  <link rel="stylesheet" href="session-actions.css" />
+  <link rel="stylesheet" href="workspace-panel.css" />
+  <link rel="stylesheet" href="workspace-review.css" />
+  <link rel="stylesheet" href="workspace-file-layout.css" />
+  <link rel="stylesheet" href="workspace-file-types.css" />
+  <link rel="stylesheet" href="local-file-links.css" />
+  <link rel="stylesheet" href="local-markdown-images.css" />
+  <link rel="stylesheet" href="code-blocks.css" />
+  <link rel="stylesheet" href="workspace-source.css" />
+  <link rel="stylesheet" href="projects-composer.css" />
+  <link rel="stylesheet" href="scrollbars.css" />
   <!-- markdown 渲染 + 代码高亮:本地打包(内网离线可用,不依赖 CDN) -->
   <script src="vendor/marked.umd.js"></script>
   <script src="vendor/highlight.min.js"></script>
   <script src="vendor/agent-avatar.js"></script>
 </head>
 <body>
+  <header id="windowChrome" class="window-chrome" aria-label="窗口标题栏">
+    <button id="btnToggleSidebar" class="btn-icon window-chrome-sidebar-toggle" data-toggle-sidebar type="button" aria-controls="sidebarNavigation" aria-expanded="true" title="收起侧边栏" aria-label="收起侧边栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+              <line x1="9" y1="3" x2="9" y2="21"></line>
+            </svg></button>
+    <div class="window-chrome-drag-space" aria-hidden="true"></div>
+    <button id="btnWorkspacePanel" class="workspace-toggle" type="button" aria-label="展开文件、终端与任务" title="展开文件、终端与任务" aria-controls="workspacePanel" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg></button>
+  </header>
+
   <div class="app">
     <!-- 侧边栏 -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebarNavigation" aria-label="侧边栏">
       <div class="sidebar-header">
         <div class="logo">
-          <img src="logo.png" class="logo-img" id="brandLogo" alt="" />
-          <span id="brandName">Relay</span>
+          <img src="logo.svg" class="logo-img relay-default-logo" id="brandLogo" alt="" />
+          <span class="logo-text" id="brandName">Relay</span>
         </div>
       </div>
 
       <!-- 顶部入口列表 -->
-      <nav class="nav-list">
-        <button class="nav-item" id="btnNewChat" title="直接对话">
+      <nav class="nav-list" aria-label="主导航">
+<button type="button" class="nav-item" id="btnNewChat" title="直接对话" aria-label="新对话">
           <!-- 新对话:气泡 + 加号(撰写新消息) -->
           <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M7.5 18 4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v9a2.5 2.5 0 0 1-2.5 2.5z"></path>
@@ -34,7 +81,46 @@
           </svg>
           <span class="ni-label">新对话</span>
         </button>
-        <button class="nav-item" id="btnNewAnalysis" title="选择一个已安装的 Agent 进行对话">
+<div class="sidebar-pinned-features" id="sidebarPinnedFeatures">
+<button type="button" class="nav-item" id="btnSearch" title="搜索历史对话" aria-label="搜索">
+          <!-- 搜索:放大镜 -->
+          <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"></circle>
+            <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
+          </svg>
+          <span class="ni-label">搜索</span>
+        </button>
+      <div class="sidebar-settings-row" id="sidebarSettingsEntry">
+<button type="button" class="nav-item" id="btnSettings" title="设置" aria-label="设置" data-nav-view="settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          <span class="ni-label">设置</span></button>
+        <button class="sidebar-update-button hidden" id="btnRelayUpdate" type="button" aria-label="查看更新" aria-controls="sidebarUpdatePanel" aria-expanded="false" aria-haspopup="dialog"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16V8m-4 4 4-4 4 4"/></svg><span id="relayUpdateLabel">更新</span></button>
+      </div>
+</div>
+      <div class="sidebar-settings-row" id="sidebarExploreEntry">
+        <button type="button" class="nav-item" id="btnExplore" title="探索所有功能，也可右键打开" aria-label="探索" aria-haspopup="menu" aria-expanded="false">
+          <svg class="ni-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg><span class="ni-label">探索</span>
+        </button>
+      </div>
+        <div id="sidebarFeatureStore" hidden><button type="button" class="nav-item" id="btnPlugins" title="管理技能、Agent 和 MCP" aria-label="插件" data-nav-view="plugins">
+          <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5v8l-9 5-9-5V8l9-5Zm0 10 9-5M3 8l9 5v8"/></svg><span class="ni-label">插件</span>
+        </button><button type="button" class="nav-item" id="btnMyWorkChat" title="库:本地生成的图片与文件" aria-label="资料库" data-nav-view="library">
+            <!-- 库(书架,参考 Lucide library) -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m16 6 4 14"></path><path d="M12 6v14"></path><path d="M8 8v12"></path><path d="M4 4v16"></path>
+            </svg>
+          <span class="ni-label">资料库</span></button>
+<button type="button" class="nav-item" id="btnSchedule" title="定时任务:让任务到点自动运行" aria-label="定时任务" data-nav-view="scheduler">
+            <!-- 定时任务:时钟 -->
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M12 7v5l3 2"></path>
+            </svg>
+          <span class="ni-label">定时任务</span></button>
+<button type="button" class="nav-item" id="btnNewAnalysis" title="选择一个 Agent 对话，选择多个 Agent 协奏" aria-label="Agent">
           <!-- Agent:机器人(收窄侧天线,整体 ~16 视觉宽度,与其它图标一致) -->
           <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="5" y="8" width="14" height="11" rx="3"></rect>
@@ -47,17 +133,7 @@
           </svg>
           <span class="ni-label">Agent</span>
         </button>
-        <button class="nav-item" id="btnTeam" title="协奏:多 Agent 协同——由 PM 拆解任务、派给多个 Agent 接力完成">
-          <!-- 协奏:多人/团队 -->
-          <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="8.5" cy="9" r="2.6"></circle>
-            <circle cx="16" cy="8" r="2.2"></circle>
-            <path d="M3.5 18c0-2.6 2.2-4.2 5-4.2s5 1.6 5 4.2"></path>
-            <path d="M14.5 14c2.4-.2 6 1 6 4"></path>
-          </svg>
-          <span class="ni-label">协奏</span>
-        </button>
-        <button class="nav-item" id="btnCreate" title="AI 创作:文字生成图片">
+<button type="button" class="nav-item" id="btnCreate" title="AI 创作:文字生成图片" aria-label="AI 创作" data-nav-view="create">
           <!-- AI 创作:图片 + 星点(收窄到与其它图标一致的 ~16 视觉宽度,居中) -->
           <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="4" y="5" width="16" height="14" rx="2.5"></rect>
@@ -66,78 +142,34 @@
           </svg>
           <span class="ni-label">AI 创作</span>
         </button>
-        <button class="nav-item" id="btnSearch" title="搜索历史对话 (Ctrl+K)">
-          <!-- 搜索:放大镜 -->
-          <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="7"></circle>
-            <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
-          </svg>
-          <span class="ni-label">搜索</span>
-        </button>
-      </nav>
+</div>
+
+
+
+
+</nav>
 
       <!-- 历史 -->
       <div class="sidebar-section">
-        <div class="section-title">历史对话</div>
-        <div class="history-list" id="historyList"></div>
+        <div class="projects-heading"><span>项目</span><button id="btnAddProject" type="button" aria-label="新增项目" title="新增项目">+</button></div>
+        <div class="history-list" id="historyList" aria-label="历史对话"></div>
       </div>
 
+
     </aside>
+    <div class="sidebar-resize-handle" id="sidebarResizeHandle" role="separator" tabindex="0" aria-label="调整侧边栏宽度" aria-orientation="vertical" aria-controls="sidebarNavigation" aria-valuemin="176" aria-valuemax="440" aria-valuenow="224" aria-keyshortcuts="ArrowLeft ArrowRight Home End Enter" title="左右拖动调整宽度，双击恢复默认；也可使用左右方向键"></div>
 
     <!-- 主区:聊天 -->
     <main class="chat">
       <div class="chat-header">
         <div class="header-left">
-          <button class="btn-icon" id="btnToggleSidebar" title="折叠侧边栏">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
-              <line x1="9" y1="3" x2="9" y2="21"></line>
-            </svg>
-          </button>
-          <button class="btn-icon" id="btnHeaderNewChat" title="新对话">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7.5 18 4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v9a2.5 2.5 0 0 1-2.5 2.5z"></path>
-              <line x1="12" y1="8.5" x2="12" y2="13.5"></line>
-              <line x1="9.5" y1="11" x2="14.5" y2="11"></line>
-            </svg>
-          </button>
-          <button class="btn-icon" id="btnHeaderNewAnalysis" title="Agent">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="4" y="8" width="16" height="11" rx="3"></rect>
-              <line x1="12" y1="4" x2="12" y2="8"></line>
-              <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none"></circle>
-              <circle cx="9" cy="13" r="1.1" fill="currentColor" stroke="none"></circle>
-              <circle cx="15" cy="13" r="1.1" fill="currentColor" stroke="none"></circle>
-              <line x1="2.5" y1="12" x2="2.5" y2="15"></line>
-              <line x1="21.5" y1="12" x2="21.5" y2="15"></line>
-            </svg>
-          </button>
+
         </div>
         <div class="header-center">
           <div class="chat-title" id="chatTitle">新对话</div>
           <div class="chat-subtitle">内容由 AI 生成，请仔细甄别</div>
         </div>
-        <div class="header-actions">
-          <button class="btn-icon" id="btnSchedule" title="定时任务:让任务到点自动运行">
-            <!-- 定时任务:时钟 -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"></circle>
-              <path d="M12 7v5l3 2"></path>
-            </svg>
-          </button>
-          <button class="btn-icon" id="btnMyWorkChat" title="库:本地生成的图片与文件">
-            <!-- 库(书架,参考 Lucide library) -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m16 6 4 14"></path><path d="M12 6v14"></path><path d="M8 8v12"></path><path d="M4 4v16"></path>
-            </svg>
-          </button>
-          <button class="btn-icon" id="btnSettings" title="设置">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-        </div>
+
       </div>
 
       <div class="conversation-stage">
@@ -146,13 +178,15 @@
         </nav>
         <div class="messages" id="messages">
           <div class="welcome">
-            <h2>💬 新对话</h2>
-            <p>有什么可以帮你的，直接开始对话吧。<br/>需要调用某个 Agent 时，点左侧「Agent」选择已安装的 Agent。</p>
+            <h2>新对话</h2>
+            <p>有什么可以帮你的，直接开始对话吧。<br/>需要专门的助手时，可在侧边栏「探索」中选择 Agent。</p>
           </div>
         </div>
       </div>
 
       <div class="input-area">
+        <div class="composer-context-row"><button id="btnProjectContext" type="button" aria-haspopup="menu" aria-expanded="false"></button><button id="btnExecutionMode" type="button" hidden></button></div>
+        <div id="interactionSurfaceMount" hidden></div>
         <div class="input-card" id="inputCard">
           <div class="attachments hidden" id="attachments"></div>
           <div class="composer-skill-chip hidden" id="composerSkillChip">
@@ -171,49 +205,36 @@
           ></textarea>
           <div class="input-bottom">
             <div class="ib-left">
-              <button class="btn-attach" id="btnAttach" title="上传文件(也可拖拽)">
+              <button class="btn-attach" id="btnAttach" type="button" title="添加文件、项目、任务模式或技能" aria-label="添加" aria-haspopup="menu" aria-expanded="false">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19"/>
                   <line x1="5" y1="12" x2="19" y2="12"/>
                 </svg>
               </button>
-              <div class="model-switch" id="modelSwitch">
-                <button class="ms-trigger" id="btnModelSwitch" type="button" title="切换模型">
-                  <span class="ms-ico" id="msIco"></span>
-                  <span class="ms-label" id="msLabel">快速</span>
-                  <span class="ms-effort-label" id="msEffortLabel"></span>
-                  <svg class="ms-caret" width="10" height="10" viewBox="0 0 10 10" fill="none">
-                    <path d="M2 6l3-3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </button>
-              </div>
-              <!-- 工作目录:设了之后 LLM 的文件读写都在该目录下进行(对话级) -->
-              <button class="workdir-btn" id="btnWorkdir" type="button" title="设置工作目录">
-                <svg class="wd-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                </svg>
-                <span class="wd-label" id="wdLabel">工作目录</span>
-              </button>
-              <button class="skill-quick-btn" id="btnSkillQuick" type="button" title="选择本地技能">
-                <svg class="sq-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="m12 3 8 4.5-8 4.5-8-4.5z"></path>
-                  <path d="m4 12 8 4.5 8-4.5"></path>
-                  <path d="m4 16.5 8 4.5 8-4.5"></path>
-                </svg>
-                <span class="sq-label" id="skillQuickLabel">技能</span>
-              </button>
+              <button id="btnPermissionMode" class="rpc-trigger" type="button" disabled aria-label="权限：正在加载" title="正在加载权限设置">加载权限</button>
             </div>
             <div class="ib-right">
               <span class="context-usage hidden" id="contextUsage" aria-live="polite" tabindex="0" aria-describedby="contextUsagePopover">
                 <span class="context-usage-dot"></span>
                 <span id="contextUsageLabel">0%</span>
               </span>
+              <div class="model-switch" id="modelSwitch">
+                <button class="ms-trigger" id="btnModelSwitch" type="button" title="切换模型">
+                  <span class="ms-ico" id="msIco"></span>
+                  <span class="ms-label" id="msLabel">正在加载模型</span>
+                  <span class="ms-effort-label" id="msEffortLabel"></span>
+                  <svg class="ms-caret" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path d="M2 6l3-3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              </div>
               <button id="btnSend" title="发送 (Enter)">
                 <!-- 发送箭头(默认) -->
                 <svg class="ico-send" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="12" y1="19" x2="12" y2="5"></line>
                   <polyline points="5 12 12 5 19 12"></polyline>
                 </svg>
+                <svg class="ico-resume" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
                 <!-- 停止方块(运行中) -->
                 <svg class="ico-stop" width="14" height="14" viewBox="0 0 14 14">
                   <rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/>
@@ -229,63 +250,20 @@
     <main class="create-view hidden" id="createView">
       <div class="chat-header">
         <div class="header-left">
-          <button class="btn-icon" id="btnToggleSidebar2" title="折叠侧边栏">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
-              <line x1="9" y1="3" x2="9" y2="21"></line>
-            </svg>
-          </button>
-          <button class="btn-icon" id="cvHeaderNewChat" title="新对话">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7.5 18 4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v9a2.5 2.5 0 0 1-2.5 2.5z"></path>
-              <line x1="12" y1="8.5" x2="12" y2="13.5"></line>
-              <line x1="9.5" y1="11" x2="14.5" y2="11"></line>
-            </svg>
-          </button>
-          <button class="btn-icon" id="cvHeaderNewAnalysis" title="Agent">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="4" y="8" width="16" height="11" rx="3"></rect>
-              <line x1="12" y1="4" x2="12" y2="8"></line>
-              <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none"></circle>
-              <circle cx="9" cy="13" r="1.1" fill="currentColor" stroke="none"></circle>
-              <circle cx="15" cy="13" r="1.1" fill="currentColor" stroke="none"></circle>
-              <line x1="2.5" y1="12" x2="2.5" y2="15"></line>
-              <line x1="21.5" y1="12" x2="21.5" y2="15"></line>
-            </svg>
-          </button>
+
         </div>
         <div class="header-center">
           <div class="chat-title">AI 创作</div>
           <div class="chat-subtitle">内容由 AI 生成，请仔细甄别</div>
         </div>
-        <div class="header-actions">
-          <button class="btn-icon" id="cvBtnSchedule" title="定时任务:让任务到点自动运行">
-            <!-- 定时任务:时钟 -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9"></circle>
-              <path d="M12 7v5l3 2"></path>
-            </svg>
-          </button>
-          <button class="btn-icon" id="btnMyWork" title="库:本地生成的图片与文件">
-            <!-- 库(书架,参考 Lucide library) -->
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="m16 6 4 14"></path><path d="M12 6v14"></path><path d="M8 8v12"></path><path d="M4 4v16"></path>
-            </svg>
-          </button>
-          <button class="btn-icon" id="cvBtnSettings" title="设置">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"></circle>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-          </button>
-        </div>
+
       </div>
 
       <!-- 结果区(和聊天 messages 同款滚动区):欢迎态 / loading / 图片网格 -->
       <div class="messages" id="cvMessages">
         <div class="welcome">
           <h2>🎨 AI 创作</h2>
-          <p>描述你想要的图片，点「生成」即可。<br/>想看本地生成的图片和文件，点右上角「库」。</p>
+          <p>描述你想要的图片，点「生成」即可。<br/>想看本地生成的图片和文件，点侧边栏「资料库」。</p>
         </div>
       </div>
 
@@ -339,21 +317,25 @@
       </div>
     </main>
 
-    <!-- 定时任务:弹出式管理框（沿用「设置」模态外壳，默认隐藏，点头部时钟图标打开） -->
-    <div class="modal-backdrop hidden" id="scheduleModal">
-      <div class="modal">
-        <div class="modal-header">
-          <button class="btn-icon sv-modal-add" id="svModalAdd" title="新建定时任务" aria-label="新建定时任务">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+<main id="libraryPage" class="workspace-page library-page hidden" data-app-view="library" aria-label="资料库"><div id="libraryPageBody" class="workspace-page-body"></div></main>
+    <!-- 定时任务与运行记录分别展示，切换时保留任务草稿。 -->
+    <main class="workspace-page schedule-page hidden" id="scheduleModal" data-app-view="scheduler" aria-label="定时任务">
+      <header class="workspace-header sv-page-header">
+        <nav class="sv-page-tabs" role="tablist" aria-label="定时任务页面">
+          <button type="button" id="svTasksTab" role="tab" aria-selected="true" aria-controls="svTasksPanel">定时任务</button>
+          <button type="button" id="svRunsTab" role="tab" aria-selected="false" aria-controls="svRunsPanel" tabindex="-1">运行记录</button>
+        </nav>
+        <div class="sv-page-actions">
+          <button class="btn-ghost sv-modal-add" id="svModalAdd" type="button" title="新建定时任务" aria-label="新建定时任务">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>新建任务</span>
           </button>
-          <div class="modal-title" id="svModalTitle">定时任务</div>
-          <button class="btn-icon" id="svModalClose" title="关闭">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
+          <button class="btn-ghost" id="svModalClose" type="button">返回对话</button>
         </div>
-
-      <!-- 列表面板（默认显示） -->
+      </header>
+      <div class="modal workspace-surface">
+      <section class="sv-workspace-layout" id="svTasksPanel" role="tabpanel" aria-labelledby="svTasksTab">
+      <!-- 任务列表 -->
       <div class="modal-body sv-listbody" id="svListPane">
         <label class="sv-search" for="svSearchInput">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -372,7 +354,8 @@
         </div>
 
       </div>
-      <!-- 编辑面板：与任务列表在同一窗口内切换，避免再叠一层弹窗。 -->
+      <div class="sv-detail-column">
+      <!-- 任务详情与编辑：切换主页面时保留草稿。 -->
       <div class="modal-body sv-editorbody hidden" id="svEditorPane"></div>
       <div class="modal-footer sv-editor-footer hidden" id="svEditorFooter">
         <button class="btn-ghost" id="svEditorBack">返回</button>
@@ -381,20 +364,34 @@
           <button class="btn-primary" id="svEditorSave">保存</button>
         </div>
       </div>
-      </div><!-- /.modal -->
-    </div><!-- /.modal-backdrop#scheduleModal -->
+      </div><!-- /.sv-detail-column -->
+      </section><!-- /#svTasksPanel -->
+      <section class="sv-runs-page hidden" id="svRunsPanel" role="tabpanel" aria-labelledby="svRunsTab">
+        <div class="sv-runs-toolbar">
+          <label class="sv-search" for="svRunsSearch">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg>
+            <input id="svRunsSearch" type="search" autocomplete="off" placeholder="搜索运行记录">
+          </label>
+          <div id="svRunsTaskFilter" aria-label="按任务筛选"></div>
+          <button class="btn-icon" id="svRunsRefresh" type="button" title="刷新运行记录" aria-label="刷新运行记录">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.55-2L20 8M4 16l2.35 3A7 7 0 0 0 17.9 17"/></svg>
+          </button>
+        </div>
+        <p class="sv-runs-summary" id="svRunsSummary" aria-live="polite"></p>
+        <div class="sv-runs-list" id="svRunsList" data-sv-runs></div>
+        <button class="btn-ghost sv-runs-more hidden" id="svRunsMore" type="button">显示更多</button>
+      </section><!-- /#svRunsPanel -->
+      </div><!-- /.workspace-surface -->
+    </main><!-- /#scheduleModal -->
 
-    <!-- 设置模态窗(放在 .app 下、两个 main 之外,这样切到任意视图都能弹出,不被 hidden 的 main 连带隐藏) -->
-    <div class="modal-backdrop hidden" id="settingsModal">
-      <div class="modal">
+    <main id="pluginsPage" class="workspace-page plugins-page hidden" data-app-view="plugins" aria-label="插件"></main>
+
+    <!-- 设置主页面：保留各分类、编辑草稿与真实保存接口。 -->
+    <main class="workspace-page settings-page hidden" id="settingsModal" data-app-view="settings" aria-label="设置">
+      <div class="modal workspace-surface">
         <div class="modal-header">
           <div class="modal-title">设置</div>
-          <button class="btn-icon" id="btnCloseSettings" title="关闭">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
+          <button class="btn-ghost" id="btnCloseSettings" type="button">返回对话</button>
         </div>
         <div class="modal-body" id="settingsBody">
           <!-- 渲染端动态填充 -->
@@ -403,27 +400,105 @@
           <button class="btn-ghost" id="btnSettingsBack" style="display:none">返回</button>
           <div class="footer-hint" id="settingsHint"></div>
           <div class="footer-actions">
-            <button class="btn-ghost" id="btnSettingsCancel">取消</button>
+            <button class="btn-ghost" id="btnSettingsCancel">取消修改</button>
             <button class="btn-primary" id="btnSettingsSave">保存</button>
           </div>
         </div>
       </div>
-    </div>
+    </main>
+    <div id="workspaceResizeHandle" class="workspace-resize-handle" role="separator" tabindex="0" aria-label="调整右侧栏宽度" aria-orientation="vertical" aria-controls="workspacePanel" aria-valuemin="300" aria-valuemax="800" aria-valuenow="380" aria-keyshortcuts="ArrowLeft ArrowRight Home End Enter" title="左右拖动调整宽度，双击恢复默认" hidden></div>
+    <aside id="workspacePanel" class="workspace-panel" aria-label="文件、浏览器、终端、审查与任务" aria-hidden="true" inert>
+      <header class="workspace-panel-header">
+        <div id="workspaceTabs" class="workspace-tabs" role="tablist" hidden aria-label="工作区标签页"></div>
+        <button id="workspaceAdd" class="workspace-icon-button" type="button" hidden title="添加标签页" aria-label="添加标签页" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        <div class="workspace-header-actions"><button id="workspaceMaximize" class="workspace-icon-button" type="button" title="放大阅读区域" aria-label="放大阅读区域" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button><button id="workspaceTreeToggle" class="workspace-icon-button" type="button" hidden title="显示文件树" aria-label="显示文件树" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="workspaceClose" class="workspace-icon-button" type="button" title="收起右侧栏" aria-label="收起右侧栏" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
+      </header>
+      <div id="workspaceNotice" class="workspace-notice" role="status"></div>
+      <section id="workspaceFiles" class="workspace-content" hidden data-workspace-content="files" role="tabpanel" aria-label="文件">
+        <div id="workspaceFileNotice" class="workspace-notice" role="status"></div>
+        <div id="workspaceFileBody" class="workspace-file-body is-picker">
+          <div id="workspaceFileEmpty" class="workspace-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg><strong>打开文件</strong><p>从工作区文件树中选择文档或代码。</p></div>
+          <div id="workspacePreview" class="workspace-preview" hidden>
+            <div class="workspace-preview-bar"><button id="workspacePreviewBack" class="workspace-icon-button" type="button" title="返回文件列表" aria-label="返回文件列表" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg></button><span id="workspacePreviewTitle" class="workspace-preview-title"></span><button id="workspacePreviewMode" class="workspace-text-button" type="button" title="查看源代码" aria-pressed="false" hidden>源码</button><button id="workspacePreviewCopy" class="workspace-icon-button" type="button" title="复制文件内容" aria-label="复制文件内容" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button><button id="workspacePreviewOpen" class="workspace-icon-button" type="button" title="在系统应用中打开文件" aria-label="在系统应用中打开文件" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></svg></button></div>
+            <div id="workspacePreviewBody" class="workspace-preview-body" tabindex="0" aria-label="文件预览"></div><div id="workspacePreviewMeta" class="workspace-preview-meta">只读预览</div>
+          </div>
+          <div id="workspaceTreeResizeHandle" class="workspace-tree-resize-handle" role="separator" aria-label="调整文件树宽度" aria-orientation="vertical" aria-controls="workspaceTreePane" tabindex="0" hidden></div>
+          <aside id="workspaceTreePane" class="workspace-tree-pane" aria-label="工作区文件树">
+            <div class="workspace-toolbar"><div class="workspace-root"><strong id="workspaceRootTitle">工作区</strong><small id="workspaceRootPath">RelayProjects</small></div><button id="workspaceRootOpen" class="workspace-icon-button" type="button" title="在文件管理器中打开工作目录" aria-label="在文件管理器中打开工作目录" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/></svg></button><button id="workspaceRefresh" class="workspace-icon-button" type="button" title="刷新文件" aria-label="刷新文件" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.2 6.2A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.8 5.8"/></svg></button></div>
+            <div class="workspace-tree-filter"><input id="workspaceFileFilter" type="search" placeholder="筛选文件" aria-label="筛选已加载的文件" autocomplete="off" spellcheck="false"></div>
+            <div id="workspaceFileTree" class="workspace-file-tree" aria-label="工作区文件"></div>
+          </aside>
+        </div>
+      </section>
+      <section id="workspaceBrowser" class="workspace-content" data-workspace-content="browser" role="tabpanel" aria-label="浏览器" hidden>
+        <form id="workspaceBrowserNav" class="workspace-browser-nav" autocomplete="off">
+          <button id="workspaceBrowserBack" class="workspace-icon-button" type="button" title="后退" aria-label="后退" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg></button><button id="workspaceBrowserForward" class="workspace-icon-button" type="button" title="前进" aria-label="前进" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 5 7 7-7 7"/></svg></button><button id="workspaceBrowserReload" class="workspace-icon-button" type="button" title="刷新页面" aria-label="刷新页面" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.2 6.2A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.8 5.8"/></svg></button><input id="workspaceBrowserAddress" class="workspace-browser-address" type="text" placeholder="输入网址" aria-label="网址" autocomplete="off" spellcheck="false"><button id="workspaceBrowserMore" class="workspace-icon-button" type="button" title="浏览器更多操作" aria-label="浏览器更多操作" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+        </form>
+        <div id="workspaceBrowserFind" class="workspace-browser-find" hidden><input id="workspaceBrowserFindInput" type="search" placeholder="在页面中查找" aria-label="在页面中查找"><span id="workspaceBrowserFindCount" aria-live="polite"></span><button id="workspaceBrowserFindPrevious" class="workspace-icon-button" type="button" title="上一个匹配" aria-label="上一个匹配" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button><button id="workspaceBrowserFindNext" class="workspace-icon-button" type="button" title="下一个匹配" aria-label="下一个匹配" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 10 6 6 6-6"/></svg></button><button id="workspaceBrowserFindClose" class="workspace-icon-button" type="button" title="关闭查找" aria-label="关闭查找" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+        <div id="workspaceBrowserNotice" class="workspace-notice" role="status"></div>
+        <div id="workspaceBrowserViewport" class="workspace-browser-viewport"><div id="workspaceBrowserEmpty" class="workspace-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg><strong>开始浏览</strong><p>在上方输入网址，在这里查看网页。</p></div><div id="workspaceBrowserCover" class="workspace-browser-cover" aria-hidden="true" hidden></div></div>
+      </section>
+      <section id="workspaceTerminal" class="workspace-content" data-workspace-content="terminal" role="tabpanel" aria-label="终端" hidden>
+        <div id="workspaceTerminalError" class="workspace-notice" role="status"></div>
+        <div id="workspaceTerminalSurfaces" class="workspace-terminal-surfaces"><div id="workspaceTerminalEmpty" class="workspace-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 6 6-6 6m8 0h6"/></svg><strong>工作区终端</strong><p>在当前项目或工作区中手工调试。终端独立保留，不占用历史对话。</p><button id="workspaceTerminalStart" class="workspace-text-button" type="button">打开终端</button></div></div>
+        <div id="workspaceTerminalStatus" class="workspace-terminal-status">在当前项目或工作区中手工调试</div>
+      </section>
+      <section id="workspaceReview" class="workspace-content" data-workspace-content="review" role="tabpanel" aria-label="审查" hidden><div id="workspaceReviewMount"></div></section>
+      <div id="workspaceNoTabs" class="workspace-empty workspace-launcher"><div id="workspaceLauncherActions" class="workspace-launcher-actions" role="group" aria-label="打开侧栏工具"></div></div>
+      <div id="workspaceAddMenu" class="workspace-menu" role="menu" aria-label="添加标签页" hidden></div>
+      <div id="workspaceBrowserMenu" class="workspace-menu" role="menu" aria-label="浏览器操作" hidden></div>
+    </aside>
   </div>
+
+  <section id="sidebarUpdatePanel" class="sidebar-update-panel hidden" role="dialog" aria-label="Relay 更新" aria-modal="false"></section>
 
   <div class="context-usage-popover" id="contextUsagePopover" role="tooltip" aria-hidden="true">
-    <div class="context-usage-popover-head">
-      <span>上下文占用</span>
-      <span class="context-usage-popover-percent" id="contextUsagePercent">0%</span>
-    </div>
-    <div class="context-usage-popover-tokens" id="contextUsageTokens">已用 0 / 0 tokens</div>
-    <div class="context-usage-popover-track" aria-hidden="true">
-      <span class="context-usage-popover-fill" id="contextUsageFill"></span>
-    </div>
-    <div class="context-usage-popover-model" id="contextUsageModel"></div>
+    <div class="context-usage-popover-head">上下文窗口</div>
+    <div class="context-usage-popover-percent" id="contextUsagePercent">0% 已用</div>
+    <div class="context-usage-popover-tokens" id="contextUsageTokens">已用 0 Token，共 0</div>
   </div>
 
+  <script src="message-time.js"></script>
+  <script src="task-continuity.js"></script>
+  <script src="assistant-output.js"></script>
+  <script src="conversation-context.js"></script>
+  <script src="conversation-errors.js"></script>
+  <script src="supplement-timeline.js"></script>
   <script src="activity-stream.js"></script>
+  <script src="model-display.js"></script>
+  <script src="sidebar-update.js"></script>
+  <script src="sidebar-layout.js"></script>
+  <script src="window-chrome.js"></script>
+  <script src="sidebar-history.js"></script>
+  <script src="sidebar-explore.js"></script>
+  <script src="plugins-page.js"></script>
+  <script src="keyboard-shortcuts.js"></script>
+  <script src="keyboard-shortcuts-page.js"></script>
+  <script src="agent-picker.js"></script>
+  <script src="projects-composer.js"></script>
+  <script src="usage-page.js"></script>
+  <script src="sdk-runtime-controls.js"></script>
+  <script src="sdk-plugin-manager.js"></script>
+<script src="general-preferences-page.js"></script>
+  <script src="browser-settings-page.js"></script>
+  <script src="browser-internal-pages.js"></script>
+  <script src="browser-form-manager.js"></script>
+  <script src="permission-controls.js"></script>
+  <script src="mcp-permission-controls.js"></script>
+  <script src="stream-markdown.js"></script>
+  <script src="workspace-file-types.js"></script>
+  <script src="local-file-links.js"></script>
+  <script src="local-markdown-images.js"></script>
+  <script src="code-blocks.js"></script>
+  <script src="personalization-guidance.js"></script>
   <script src="app.js"></script>
+  <script src="read-only-markdown.js"></script>
+  <script src="subagent-history.js"></script>
+  <script src="workspace-source.js"></script>
+  <script src="workspace-html.js"></script>
+  <script src="workspace-file-layout.js"></script>
+  <script src="workspace-review.js"></script>
+  <script src="workspace-panel.js"></script>
+  <script src="interaction-surface.js"></script>
 </body>
 </html>

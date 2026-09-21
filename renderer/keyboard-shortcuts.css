@@ -1,0 +1,75 @@
+.keyboard-shortcuts-page { width: 100%; max-width: 1040px; min-width: 0; margin: 0 auto; padding: 3px 0 28px; color: var(--text); container: keyboard-shortcuts / inline-size; }
+.keyboard-shortcuts-page, .keyboard-shortcuts-page * { box-sizing: border-box; }
+.keyboard-shortcuts-page [hidden] { display: none !important; }
+.ksp-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 0 0 24px; }
+.ksp-heading-text { min-width: 0; }
+.ksp-heading h2 { margin: 0 0 8px; font-size: 24px; line-height: 1.3; letter-spacing: -.4px; font-weight: 600; }
+.ksp-heading p { margin: 0; color: var(--text-dim); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.keyboard-shortcuts-page button { font: inherit; font-size: 12px; cursor: pointer; -webkit-app-region: no-drag; }
+.ksp-icon { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; flex: 0 0 17px; }
+.ksp-icon svg { display: block; width: 100%; height: 100%; }
+.ksp-reset { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: 0 0 auto; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text-dim); background: transparent; transition: background 120ms ease, border-color 120ms ease; }
+.ksp-reset:hover { background: var(--bg-hover); border-color: var(--border-strong); color: var(--text); }
+.ksp-reset .ksp-icon { width: 14px; height: 14px; flex-basis: 14px; }
+.ksp-search { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 41px; padding: 4px 7px 4px 13px; border: 1px solid var(--border); border-radius: 12px; background: transparent; transition: border-color 140ms ease, box-shadow 140ms ease; }
+.ksp-search > .ksp-icon { color: var(--text-muted); }
+.ksp-search:focus-within, .ksp-search.is-recording { border-color: var(--border-strong); box-shadow: 0 0 0 2px var(--accent-soft); }
+.keyboard-shortcuts-page .ksp-search-input { flex: 1 1 0; width: 100%; min-width: 0; height: 30px; padding: 0; border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+.ksp-search-input::placeholder { color: var(--text-muted); }
+.ksp-search-input::-webkit-search-cancel-button { cursor: pointer; }
+.ksp-search.is-recording { background: var(--bg-elevated); }
+.ksp-notice { margin: 11px 0 23px; min-height: 18px; font-size: 11px; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; }
+.ksp-notice.is-error, .ksp-record-help.is-error { color: var(--error-text); }
+.ksp-group { min-width: 0; margin: 0 0 24px; }
+.ksp-group:last-child { margin-bottom: 0; }
+.ksp-group-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 14px; margin: 0 2px 9px; }
+.ksp-group-heading h3 { margin: 0; font-size: 12px; line-height: 1.5; font-weight: 500; color: var(--text-dim); }
+.ksp-group-heading > span { color: var(--text-muted); font-size: 11px; }
+.ksp-card { min-width: 0; padding: 0 18px; border: 1px solid var(--border); border-radius: 15px; background: var(--bg-panel); overflow: hidden; }
+.ksp-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px 24px; align-items: center; min-width: 0; min-height: 80px; padding: 17px 0; border-bottom: 1px solid var(--border); }
+.ksp-row:last-child { border-bottom: 0; }
+.ksp-action-info { min-width: 0; }
+.ksp-action-name { font-size: 13px; line-height: 1.5; font-weight: 500; overflow-wrap: anywhere; }
+.ksp-action-description { margin-top: 4px; color: var(--text-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.ksp-global-state { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.ksp-bindings { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
+.ksp-binding { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.ksp-keys { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 3px; min-width: 0; max-width: 100%; }
+.ksp-key { display: inline-flex; align-items: center; justify-content: center; min-width: 23px; min-height: 24px; max-width: 100%; padding: 2px 7px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text-dim); font: inherit; font-size: 11px; line-height: 18px; overflow-wrap: anywhere; box-shadow: 0 1px 0 var(--border); }
+.ksp-key-join { font-size: 10px; color: var(--text-muted); }
+.ksp-icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 6px; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); transition: background 120ms ease, color 120ms ease; }
+.ksp-icon-button:hover, .ksp-icon-button[aria-pressed="true"] { background: var(--bg-hover); color: var(--text); }
+.ksp-icon-button .ksp-icon { width: 16px; height: 16px; flex-basis: 16px; }
+.ksp-remove { margin-left: auto; }
+.ksp-remove:hover { background: var(--error-bg); color: var(--error-text); }
+.ksp-add { display: inline-flex; align-items: center; align-self: flex-start; gap: 5px; min-height: 26px; padding: 3px 5px; margin-left: -5px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); text-align: left; }
+.ksp-add .ksp-icon { width: 14px; height: 14px; flex-basis: 14px; }
+.ksp-add:hover { color: var(--text); background: var(--bg-hover); }
+.ksp-recorder { min-width: 0; width: 100%; animation: ksp-record-in 150ms ease both; }
+.ksp-record-controls { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.keyboard-shortcuts-page .ksp-record-input { flex: 1 1 0; width: 100%; min-width: 0; height: 33px; padding: 6px 9px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-elevated); color: var(--text); font: inherit; font-size: 12px; }
+.ksp-record-input:focus { outline: none; box-shadow: 0 0 0 2px var(--accent-soft); }
+.ksp-record-help { margin-top: 6px; color: var(--text-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.ksp-empty { display: flex; flex-direction: column; align-items: center; padding: 52px 16px; color: var(--text-muted); text-align: center; }
+.ksp-empty > .ksp-icon { width: 26px; height: 26px; flex-basis: 26px; opacity: .65; }
+.ksp-empty p { margin: 15px 0 7px; color: var(--text-dim); font-size: 13px; }
+.ksp-empty > span:last-child { font-size: 12px; line-height: 1.6; }
+.keyboard-shortcuts-page button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes ksp-record-in { from { opacity: .3; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@container keyboard-shortcuts (max-width: 560px) {
+  .ksp-heading { gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .ksp-heading h2 { font-size: 22px; }
+  .ksp-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 15px 0; }
+  .ksp-card { padding-inline: 14px; }
+  .ksp-binding { width: 100%; }
+  .ksp-notice { margin-bottom: 18px; }
+  .ksp-row-readonly { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+  .ksp-row-readonly > .ksp-keys { max-width: 140px; justify-content: flex-end; }
+  .ksp-row-readonly > .ksp-global-state { text-align: right; }
+}
+@container keyboard-shortcuts (max-width: 340px) {
+  .ksp-row-readonly { grid-template-columns: minmax(0, 1fr); }
+  .ksp-row-readonly > .ksp-keys { max-width: 100%; justify-content: flex-start; }
+  .ksp-row-readonly > .ksp-global-state { text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) { .ksp-recorder { animation: none; } .ksp-search, .ksp-icon-button, .ksp-reset { transition: none; } }

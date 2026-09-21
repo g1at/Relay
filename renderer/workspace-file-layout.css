@@ -1,0 +1,32 @@
+/* The directory has an independent divider; the outer workspace sizing stays unchanged. */
+.workspace-file-body.has-file-layout { --file-tree-width: 230px; --file-tree-motion: 240ms cubic-bezier(.22, 1, .36, 1); display: grid; grid-template-columns: minmax(0, 1fr) var(--file-tree-width); transition: grid-template-columns var(--file-tree-motion); }
+.workspace-file-body.has-file-layout > .workspace-preview,
+.workspace-file-body.has-file-layout > .workspace-empty { grid-column: 1; grid-row: 1; overflow: hidden; }
+.workspace-panel .workspace-file-body.has-file-layout > .workspace-tree-pane { position: relative; grid-column: 2; grid-row: 1; inset: auto; width: 100%; max-width: none; min-width: 0; flex: none; height: 100%; box-shadow: none; opacity: 1; visibility: visible; transition: opacity .14s, visibility 0s; }
+.workspace-file-body.has-file-layout.tree-closed > .workspace-tree-pane { border-left-width: 0; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .14s, visibility 0s .24s; }
+.workspace-file-body.has-file-layout.is-file-tree-picker { grid-template-columns: 0 minmax(0, 1fr); }
+.workspace-file-body.has-file-layout.is-file-tree-picker > .workspace-empty { display: none; }
+.workspace-file-body.has-file-layout.is-picker:not(.is-file-tree-picker) > .workspace-empty { display: flex; }
+.workspace-panel .workspace-file-body.has-file-layout.is-file-tree-picker > .workspace-tree-pane { border-left-width: 0; }
+.workspace-file-body.has-file-layout.is-file-tree-overlay { grid-template-columns: minmax(0, 1fr) 0; }
+.workspace-panel .workspace-file-body.has-file-layout.is-file-tree-overlay > .workspace-tree-pane { position: absolute; inset: 0 0 0 auto; z-index: 12; width: var(--file-tree-width); box-shadow: -8px 0 24px #00000012; transition: width var(--file-tree-motion), opacity .14s, visibility 0s; }
+.workspace-panel .workspace-file-body.has-file-layout.is-file-tree-overlay.tree-closed > .workspace-tree-pane { box-shadow: none; opacity: 0; visibility: hidden; transition: width var(--file-tree-motion), opacity .14s, visibility 0s .24s; }
+.workspace-tree-resize-handle { position: absolute; z-index: 14; inset: 0 var(--file-tree-width) 0 auto; width: 8px; transform: translateX(50%); cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; transition: right var(--file-tree-motion); outline: none; }
+.workspace-tree-resize-handle[hidden] { display: none; }
+.workspace-tree-resize-handle::before { content: ''; position: absolute; inset: 0 3px; border-radius: 2px; transition: background .12s; }
+.workspace-tree-resize-handle:hover::before { background: var(--border-strong); }
+.workspace-tree-resize-handle:focus-visible::before,
+.is-file-tree-resizing > .workspace-tree-resize-handle::before { background: var(--text-muted); }
+.workspace-file-body.has-file-layout.is-file-tree-resizing:not(.is-file-tree-snapping),
+.workspace-panel .workspace-file-body.has-file-layout.is-file-tree-resizing:not(.is-file-tree-snapping) > .workspace-tree-pane,
+.workspace-file-body.has-file-layout.is-file-tree-resizing:not(.is-file-tree-snapping) > .workspace-tree-resize-handle { transition: none; }
+.workspace-file-body.is-file-tree-resizing,
+.workspace-file-body.is-file-tree-resizing * { cursor: col-resize !important; user-select: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .workspace-file-body.has-file-layout { --file-tree-motion: 0ms; }
+  .workspace-file-body.has-file-layout,
+  .workspace-panel .workspace-file-body.has-file-layout > .workspace-tree-pane,
+  .workspace-panel .workspace-file-body.has-file-layout.is-file-tree-overlay > .workspace-tree-pane,
+  .workspace-panel .workspace-file-body.has-file-layout.is-file-tree-overlay.tree-closed > .workspace-tree-pane,
+  .workspace-file-body.has-file-layout > .workspace-tree-resize-handle { transition: none; }
+}

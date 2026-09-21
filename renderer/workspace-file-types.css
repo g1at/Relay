@@ -1,0 +1,83 @@
+/* Compact silhouettes stay distinct by shape as well as color. */
+svg.workspace-file-icon {
+  width: var(--workspace-file-icon-size, 16px);
+  height: var(--workspace-file-icon-size, 16px);
+  flex: 0 0 auto;
+  color: var(--workspace-file-color, var(--text-muted));
+  vertical-align: middle;
+}
+.workspace-file-icon .file-icon-sheet { fill: currentColor; fill-opacity: .075; }
+.workspace-file-icon .file-icon-fold { fill: currentColor; fill-opacity: .14; }
+.workspace-file-icon .file-icon-mark { stroke-width: 1.7; }
+.workspace-file-icon .file-icon-solid { fill: currentColor; stroke: none; }
+.workspace-file-icon .file-icon-landscape { fill: currentColor; fill-opacity: .28; stroke-width: 1.3; }
+.workspace-file-icon .file-icon-inverse { fill: #fff; stroke: none; }
+.workspace-file-icon .file-icon-brand-tile { fill: var(--file-icon-brand); stroke: none; }
+.workspace-file-icon .file-icon-brand-label { fill: var(--file-icon-ink, #fff); stroke: none; }
+.workspace-file-icon .file-icon-folder-back { fill: currentColor; stroke: none; }
+.workspace-file-icon .file-icon-folder-front { fill: var(--file-icon-folder-face); stroke: currentColor; stroke-width: .8; }
+.workspace-file-icon .file-icon-python-blue { fill: #367fb5; stroke: none; }
+.workspace-file-icon .file-icon-python-gold { fill: #f3ca53; stroke: #c69d32; stroke-width: .45; }
+.workspace-file-icon .file-icon-python-eye-blue { fill: #fff; stroke: none; }
+.workspace-file-icon .file-icon-python-eye-gold { fill: #725014; stroke: none; }
+svg.workspace-file-icon[data-file-kind="folder"],
+svg.workspace-file-icon[data-file-kind="folder-open"] { --workspace-file-color: #c58b30; --file-icon-folder-face: #edc568; }
+svg.workspace-file-icon[data-file-kind="javascript"] { --workspace-file-color: #957000; --file-icon-brand: #f1d34d; --file-icon-ink: #493b13; }
+svg.workspace-file-icon[data-file-kind="typescript"] { --workspace-file-color: #2871b5; --file-icon-brand: #357bb9; }
+svg.workspace-file-icon[data-file-kind="react"] { --workspace-file-color: #26829b; }
+svg.workspace-file-icon[data-file-kind="python"] { --workspace-file-color: #367fb5; }
+svg.workspace-file-icon[data-file-kind="shell"] { --workspace-file-color: #397d61; }
+svg.workspace-file-icon[data-file-kind="code"] { --workspace-file-color: #7561a9; }
+svg.workspace-file-icon[data-file-kind="markdown"] { --workspace-file-color: #4a6a8b; }
+svg.workspace-file-icon[data-file-kind="config"] { --workspace-file-color: #96713b; }
+svg.workspace-file-icon[data-file-kind="html"] { --workspace-file-color: #c06b41; }
+svg.workspace-file-icon[data-file-kind="css"] { --workspace-file-color: #5579bf; }
+svg.workspace-file-icon[data-file-kind="image"] { --workspace-file-color: #9660ab; }
+svg.workspace-file-icon[data-file-kind="video"] { --workspace-file-color: #8c5ca9; }
+svg.workspace-file-icon[data-file-kind="audio"] { --workspace-file-color: #b55d86; }
+svg.workspace-file-icon[data-file-kind="pdf"] { --workspace-file-color: #bf555a; }
+svg.workspace-file-icon[data-file-kind="document"] { --workspace-file-color: #547da8; }
+svg.workspace-file-icon[data-file-kind="spreadsheet"] { --workspace-file-color: #3c8b67; }
+svg.workspace-file-icon[data-file-kind="archive"] { --workspace-file-color: #9b7c4d; }
+svg.workspace-file-icon[data-file-kind="binary"] { --workspace-file-color: #748196; }
+[data-theme="dark"] .workspace-file-icon .file-icon-sheet { fill-opacity: .10; }
+[data-theme="dark"] .workspace-file-icon .file-icon-fold { fill-opacity: .19; }
+[data-theme="dark"] .workspace-file-icon .file-icon-python-blue { fill: #6badd8; }
+[data-theme="dark"] .workspace-file-icon .file-icon-python-gold { fill: #f5cf66; stroke: none; }
+[data-theme="dark"] .workspace-file-icon .file-icon-python-eye-blue { fill: #153d5a; }
+[data-theme="dark"] .workspace-file-icon .file-icon-inverse { fill: #432028; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="folder"],
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="folder-open"] { --workspace-file-color: #b28a47; --file-icon-folder-face: #d8b66f; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="javascript"] { --file-icon-brand: #e6c65a; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="typescript"] { --file-icon-brand: #3475ac; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="react"] { --workspace-file-color: #75b8cb; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="python"] { --workspace-file-color: #6badd8; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="shell"] { --workspace-file-color: #87b59b; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="code"] { --workspace-file-color: #b2a1d7; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="markdown"] { --workspace-file-color: #99b3ce; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="config"] { --workspace-file-color: #c6aa79; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="html"] { --workspace-file-color: #df9a7a; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="css"] { --workspace-file-color: #92aee2; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="image"] { --workspace-file-color: #c49bd5; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="video"] { --workspace-file-color: #bba0d4; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="audio"] { --workspace-file-color: #d899b6; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="pdf"] { --workspace-file-color: #df8e92; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="document"] { --workspace-file-color: #97b6d6; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="spreadsheet"] { --workspace-file-color: #88bd9f; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="archive"] { --workspace-file-color: #c6af88; }
+[data-theme="dark"] svg.workspace-file-icon[data-file-kind="binary"] { --workspace-file-color: #aab5c7; }
+@media (forced-colors: active) {
+  svg.workspace-file-icon { color: CanvasText !important; forced-color-adjust: none; }
+  .workspace-file-icon .file-icon-sheet,
+  .workspace-file-icon .file-icon-fold { fill: Canvas !important; fill-opacity: 1 !important; stroke: CanvasText !important; }
+  .workspace-file-icon .file-icon-brand-tile,
+  .workspace-file-icon .file-icon-folder-back,
+  .workspace-file-icon .file-icon-python-blue { fill: CanvasText !important; stroke: none !important; }
+  .workspace-file-icon .file-icon-brand-label,
+  .workspace-file-icon .file-icon-inverse,
+  .workspace-file-icon .file-icon-python-eye-blue { fill: Canvas !important; }
+  .workspace-file-icon .file-icon-folder-front,
+  .workspace-file-icon .file-icon-python-gold { fill: Canvas !important; stroke: CanvasText !important; stroke-width: 1.1; }
+  .workspace-file-icon .file-icon-python-eye-gold { fill: CanvasText !important; }
+  .workspace-file-icon .file-icon-landscape { fill: Canvas; fill-opacity: 1; }
+}

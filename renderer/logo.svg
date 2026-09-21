@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Relay Dual Gate</title>
+  <desc id="desc">Two opposing gate modules pass a signal around a compact blue intelligence core.</desc>
+
+  <defs>
+    <path id="gate" d="
+      M 440 156
+      L 220 279
+      C 182 301 160 342 160 387
+      V 637
+      C 160 682 182 723 220 745
+      L 442 864
+      C 456 872 470 862 470 844
+      V 690
+      C 470 667 459 646 440 632
+      L 376 558
+      C 359 545 350 525 350 504
+      V 480
+      C 350 457 360 436 377 421
+      L 454 331
+      C 464 320 470 304 470 287
+      V 182
+      C 470 162 456 150 440 156
+      Z"/>
+  </defs>
+
+  <g fill="#17191D">
+    <use href="#gate"/>
+    <use href="#gate" transform="rotate(180 512 512)"/>
+  </g>
+
+  <rect x="448" y="448" width="128" height="128" rx="29"
+        fill="#1F6FEB"
+        transform="rotate(45 512 512)"/>
+</svg>

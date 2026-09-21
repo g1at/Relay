@@ -1,0 +1,19 @@
+/* Shared code chrome for sanitized process/history readers and the mini chat. */
+pre.relay-code-block { position: relative; box-sizing: border-box; min-width: 0; max-width: 100%; margin: 12px 0; padding: 38px 16px 14px; overflow: hidden; border: 1px solid #2d2d2d; border-radius: 10px; background: #1e1e1e; color: #e8e8e8; font-size: 12.5px; line-height: 1.6; box-shadow: 0 2px 12px #0000001f; }
+pre.relay-code-block::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 28px; background: linear-gradient(180deg, #3a3a3a, #2d2d2d); border-bottom: 1px solid #1a1a1a; pointer-events: none; }
+pre.relay-code-block::after { content: ''; position: absolute; top: 9px; left: 13px; width: 11px; height: 11px; border-radius: 50%; background: #ff5f56; box-shadow: 18px 0 #ffbd2e, 36px 0 #27c93f; pointer-events: none; }
+pre.relay-code-block > code { display: block; min-width: 0; max-width: 100%; margin: 0; padding: 0; overflow-x: auto; white-space: pre; border: 0; border-radius: 0; background: transparent; color: inherit; font-family: 'Cascadia Mono','SF Mono','Consolas',monospace; font-size: inherit; line-height: inherit; }
+pre.relay-code-block.collapsed { max-height: 220px; cursor: zoom-in; }
+pre.relay-code-block.collapsed .code-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 56px; background: linear-gradient(180deg, #1e1e1e00, #1e1e1e 92%); pointer-events: none; z-index: 2; }
+pre.relay-code-block:not(.collapsed) .code-fade { display: none; }
+pre.relay-code-block .code-actions { position: absolute; top: 0; right: 8px; display: flex; align-items: center; gap: 6px; height: 28px; z-index: 3; }
+pre.relay-code-block .code-actions button { display: flex; align-items: center; justify-content: center; gap: 4px; height: 22px; padding: 0 8px; border: 1px solid #ffffff1a; border-radius: 5px; background: #ffffff14; color: #ccc; font: inherit; font-size: 12px; opacity: 0; cursor: pointer; transition: opacity 150ms, background 150ms, color 150ms; }
+pre.relay-code-block .code-actions button:hover { background: #ffffff2e; color: #fff; }
+pre.relay-code-block:is(:hover, :focus-within) .code-actions button, pre.relay-code-block.collapsed .code-toggle, pre.relay-code-block .code-copy.copied { opacity: 1; }
+pre.relay-code-block .code-actions button:focus-visible { outline: 2px solid #b6caff; outline-offset: 1px; }
+pre.relay-code-block .code-copy { width: 28px; padding: 0; }
+pre.relay-code-block .code-run { background: #27c93f2e; border-color: #27c93f4d; color: #6fdc8c; }
+pre.relay-code-block .code-run:hover { background: #27c93f4d; color: #b6f5c6; }
+pre.relay-code-block .code-toggle svg { transition: transform 150ms; }
+pre.relay-code-block:not(.collapsed) .code-toggle svg { transform: rotate(180deg); }
+pre.relay-code-block .code-copy.copied { background: #6fdc8c33; color: #6fdc8c; }

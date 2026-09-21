@@ -1,0 +1,42 @@
+/* Use the conversation's macOS code chrome, with one editor-sized scroll surface. */
+.workspace-panel .workspace-preview-body.is-source {
+  display: flex; overflow: hidden; padding: 8px 12px 12px; min-width: 0; min-height: 0;
+}
+.workspace-source-card {
+  display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0;
+  overflow: hidden; border: 1px solid #333538; border-radius: 10px;
+  background: #1e1e1e; color: #e8e8e8; color-scheme: dark;
+  box-shadow: 0 2px 7px #0000000c;
+}
+.workspace-source-head {
+  display: flex; align-items: center; gap: 12px; flex: 0 0 36px; padding: 0 13px;
+  min-width: 0; background: linear-gradient(180deg, #353638, #2c2d2f);
+  border-bottom: 1px solid #171819; user-select: none;
+}
+.workspace-source-lights { display: flex; flex: 0 0 auto; gap: 7px; }
+.workspace-source-lights i { width: 9px; height: 9px; border-radius: 50%; background: #ff5f56; }
+.workspace-source-lights i:nth-child(2) { background: #ffbd2e; }
+.workspace-source-lights i:nth-child(3) { background: #27c93f; }
+.workspace-source-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #d4d4d6; }
+.workspace-source-language { flex: 0 0 auto; max-width: 34%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a3a4a8; font-size: 10px; }
+.workspace-panel .workspace-preview-body pre.workspace-source {
+  display: grid; grid-template-columns: max-content minmax(max-content, 1fr); align-content: start;
+  flex: 1; min-width: 0; min-height: 0; margin: 0; padding: 0; overflow: auto;
+  border: 0; border-radius: 0; background: transparent; color: inherit;
+  font: 12.5px/22px 'Cascadia Mono', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+  white-space: pre; tab-size: 2; overflow-wrap: normal; overscroll-behavior: contain;
+}
+.workspace-source .workspace-source-code, .workspace-source .workspace-source-code.hljs {
+  grid-area: 1 / 2; display: block; overflow: visible; width: max-content; min-width: 100%;
+  padding: 14px 18px 20px 14px; border: 0; border-radius: 0; margin: 0;
+  background: transparent; color: #e8e8e8; font: inherit; white-space: pre;
+}
+.workspace-source .workspace-source-lines {
+  grid-area: 1 / 1; position: sticky; left: 0; z-index: 1; display: block;
+  min-width: 42px; padding: 14px 11px 20px 12px; text-align: right;
+  background: #1e1e1e; color: #777b83; border-right: 1px solid #ffffff0a;
+  font: inherit; user-select: none; pointer-events: none;
+}
+.workspace-source ::selection { background: #3c526f; }
+.workspace-source:focus-visible { outline-offset: -2px !important; }
+@media (max-width: 760px) { .workspace-panel .workspace-preview-body.is-source { padding: 8px; } }

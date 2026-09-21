@@ -1,0 +1,7 @@
+.rmp-permission-picker { position: relative; width: 132px; min-width: 0; flex: 0 1 132px; }
+.rmp-permission-picker .cs-trigger { width: 100%; min-width: 0; border-radius: 8px; font: inherit; font-size: 12px; box-shadow: none; }
+.rmp-permission-picker .cs-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rmp-permission-picker .cs-popup { min-width: 170px; max-width: min(220px, calc(100vw - 24px)); }
+.rmp-permission-picker .cs-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.rmp-permission-picker .cs-trigger:disabled { opacity: .6; cursor: wait; }
+@media (max-width: 800px) { .rmp-permission-picker { width: 120px; flex-basis: 120px; } }

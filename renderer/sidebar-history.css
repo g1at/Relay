@@ -1,0 +1,65 @@
+/* The window titlebar stays reachable when the navigation is fully collapsed. */
+.app { height: calc(100dvh - var(--relay-window-chrome-height, 36px)); }
+.app > .sidebar, .app > .chat, .app > .create-view, .app > .workspace-page { height: 100%; }
+.app > .create-view { grid-column: 2; grid-row: 1; }
+.app > .chat .header-left:empty { display: none; }
+.sidebar .sidebar-header { flex: 0 0 56px; margin-bottom: 4px; }
+.sidebar .nav-list { flex: 0 1 auto; min-height: 72px; overflow-y: auto; overflow-x: hidden; max-height: 46%; margin-bottom: 8px; gap: 1px; }
+.sidebar .sidebar-pinned-features { gap: 1px; }
+.sidebar .nav-item { min-height: 34px; padding-block: 7px; font-size: 14.5px; font-weight: 500; line-height: 20px; color: var(--text-dim); transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease; }
+.sidebar .nav-item:is(:hover, .active) { color: var(--text); }
+.sidebar .nav-item.active { background: var(--surface-selected); }
+.sidebar .nav-item .ni-label { min-width: 0; }
+.sidebar .nav-item:focus-visible { outline-offset: -2px; }
+.sidebar .nav-list::-webkit-scrollbar { width: 5px; height: 5px; }
+.sidebar .nav-list::-webkit-scrollbar-track, .sidebar .nav-list::-webkit-scrollbar-corner { background: transparent; }
+.sidebar .nav-list::-webkit-scrollbar-thumb { background: transparent; border-radius: 5px; }
+.sidebar .nav-list:hover::-webkit-scrollbar-thumb, .sidebar .nav-list:focus-within::-webkit-scrollbar-thumb { background: var(--border-strong); }
+.sidebar .nav-list::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.sidebar .sidebar-section { padding: 0 8px 4px; }
+.sidebar .history-group { margin: 0 0 7px; }
+.sidebar .history-group-heading { margin: 0 0 2px; padding: 0 12px; color: var(--text-muted); font-size: 12px; font-weight: 500; line-height: 22px; }
+.sidebar .history-group-items { display: flex; flex-direction: column; gap: 0; }
+.sidebar .history-item { gap: 0; min-height: 31px; padding: 4px 12px; margin: 0; border-radius: 9px; font-size: 13.5px; line-height: 23px; color: var(--text-dim); font-weight: 400; }
+.sidebar .history-item:hover { background: var(--surface-hover); }
+.sidebar .history-item.active { font-weight: 550; background: var(--surface-selected); color: var(--text); }
+.sidebar .history-item > .hi-icon { display: block; flex: 0 0 16px; width: 16px; height: 16px; margin-right: 8px; color: var(--text-muted); stroke-width: 1.7; }
+.sidebar .history-item:is(:hover, .active) > .hi-icon { color: var(--text-dim); }
+.sidebar .history-item .hi-title { display: block; flex: 1 1 0%; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: clip; mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent); }
+.sidebar .history-item .hi-title:focus-visible { outline: 1px solid var(--text-muted); outline-offset: 2px; border-radius: 2px; }
+.sidebar .history-item .hi-rename, .sidebar .history-item .hi-pin, .sidebar .history-item .hi-tail { margin: 0; }
+.sidebar .history-item .hi-rename, .sidebar .history-item .hi-pin, .sidebar .history-item .hi-del { width: 23px; height: 23px; padding: 4px; justify-content: center; align-items: center; }
+.sidebar .history-item .hi-pin.on { display: none; color: var(--text-muted); }
+.sidebar .history-item .hi-pin.on svg { fill: none; stroke: currentColor; }
+.sidebar .history-item:hover .hi-rename, .sidebar .history-item:hover .hi-pin,
+.sidebar .history-item:focus-within .hi-rename, .sidebar .history-item:focus-within .hi-pin { display: inline-flex; }
+.sidebar .history-item:focus-within .hi-del { display: inline-flex; }
+.sidebar .history-item .hi-tail[data-state="spin"] { min-width: 20px; }
+.sidebar .history-empty { padding: 10px 12px; border: 0; background: transparent; text-align: left; font-size: 12px; }
+.sidebar .history-zone { min-width: 0; margin: 0 0 8px; }
+.sidebar .history-zone:last-child { margin-bottom: 0; }
+.sidebar .history-zone > .history-group:last-child { margin-bottom: 0; }
+.sidebar .history-project-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sidebar .history-project-list > .history-project { margin: 0; }
+.sidebar .history-show-more { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; min-height: 31px; margin: 2px 0 0; padding: 4px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); font: inherit; font-size: 12.5px; line-height: 23px; text-align: left; cursor: pointer; transition: color .16s ease, background-color .16s ease; }
+.sidebar .history-project-list > .history-show-more { padding-left: 22px; }
+.sidebar .history-more-icon { flex: 0 0 16px; width: 16px; height: 16px; margin-right: 2px; }
+.sidebar .history-more-label { flex: 1 0 auto; min-width: 0; white-space: nowrap; }
+.sidebar .history-more-count { flex: 0 1 auto; max-width: 32px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-variant-numeric: tabular-nums; opacity: .8; }
+.sidebar .history-more-count[hidden] { display: none; }
+.sidebar .history-more-chevron { flex: 0 0 12px; width: 12px; height: 12px; opacity: .65; transition: transform .2s cubic-bezier(.2,.8,.2,1), opacity .16s ease; }
+.sidebar .history-show-more[aria-expanded="true"] .history-more-chevron { transform: rotate(180deg); }
+.sidebar .history-show-more:hover { color: var(--text-dim); background: var(--bg-hover); }
+.sidebar .history-show-more:hover .history-more-chevron { opacity: 1; }
+.sidebar .history-show-more:focus-visible { color: var(--text); background: var(--bg-hover); outline: 1px solid var(--border-strong); outline-offset: -1px; }
+.sidebar .history-zone[hidden], .sidebar .history-group[hidden], .sidebar .history-project[hidden],
+.sidebar .history-project-list[hidden], .sidebar .history-group-items[hidden], .sidebar .history-item[hidden], .sidebar .history-show-more[hidden],
+.sidebar .history-project.is-collapsed .history-show-more { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar .history-item, .sidebar .history-show-more, .sidebar .history-more-chevron { transition: none; }
+}
+
+/* Quiet local hover feedback; no colored halos or raised action buttons. */
+.sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del) { background: transparent; border: 0; border-radius: 5px; box-shadow: none; filter: none; color: var(--text-muted); transition: color .15s, background-color .15s; }
+.sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del):hover { background: var(--bg-hover); color: var(--text); box-shadow: none; }
+.sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del):focus-visible { background: var(--bg-hover); outline: 1px solid var(--text-muted); outline-offset: -1px; box-shadow: none; }

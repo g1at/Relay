@@ -1,5 +1,11 @@
 node_modules/
 dist/
+.codex-tmp/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local investigation notes, evidence and independent website checkout.
+/docs/
+/website/
+/design/

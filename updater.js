@@ -34,7 +34,7 @@ const CHECK_INITIAL_DELAY_MS = Number(process.env.RELAY_UPDATE_CHECK_DELAY_MS) |
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 之后每 6 小时一次
 
 let deps = null;
-let autoUpdater = null;   // 打包版才 require（dev 下模块可用但行为无意义，干脆不加载）
+let autoUpdater = null;   // 打包版首次检查时才加载，首屏不承担依赖加载成本
 let notified = false;     // 下载就绪通知只发一次（每次检查周期内）
 
 // 用户点过「稍后」的版本号。只存内存：这一轮不再打扰，下次启动重新提醒一次 ——
@@ -70,12 +70,22 @@ function init(d) {
     return;
   }
 
+  // 定时检查:首查延迟 + 周期重查。依赖也等到首次检查才加载，
+  // 用户提前点检查会立即初始化，不必等待这个 timer。
+  setTimeout(() => { check(); setInterval(check, CHECK_INTERVAL_MS); }, CHECK_INITIAL_DELAY_MS);
+  console.log('[updater] 已启动,%d 分钟后首次检查', Math.round(CHECK_INITIAL_DELAY_MS / 60000));
+}
+
+function ensureAutoUpdater() {
+  if (autoUpdater) return true;
+  if (!deps || !deps.isPackaged || status.state === 'disabled') return false;
+
   try {
     ({ autoUpdater } = require('electron-updater'));
   } catch (e) {
-    status.state = 'disabled';
+    setState({ state: 'disabled' });
     console.error('[updater] electron-updater 加载失败: %s', e.message);
-    return;
+    return false;
   }
 
   autoUpdater.logger = console;                 // 镜像进 userData/logs/main.log
@@ -120,15 +130,13 @@ function init(d) {
     }
   });
 
-  // 定时检查:首查延迟 + 周期重查。timer 常驻(与 app 同生命周期,无需清理)。
-  setTimeout(() => { check(); setInterval(check, CHECK_INTERVAL_MS); }, CHECK_INITIAL_DELAY_MS);
-  console.log('[updater] 已启动,%d 分钟后首次检查', Math.round(CHECK_INITIAL_DELAY_MS / 60000));
+  return true;
 }
 
 // 触发一次检查(定时 + 设置页手动共用)。已发现新版/下载中/已就绪都不重查。
 function check() {
-  if (!autoUpdater) return;
   if (status.state === 'checking' || status.state === 'downloading' || status.state === 'ready') return;
+  if (!ensureAutoUpdater()) return;
   autoUpdater.checkForUpdates().catch((e) => {
     console.warn('[updater] 检查失败: %s', e && e.message);
   });
@@ -136,7 +144,8 @@ function check() {
 
 // 用户确认更新后才下载。available(含上次下载失败退回来的)才有意义。
 function download() {
-  if (!autoUpdater) return { ok: false, error: '开发模式不支持更新' };
+  if (!deps || !deps.isPackaged || status.state === 'disabled') return { ok: false, error: '开发模式不支持更新' };
+  if (!autoUpdater) return { ok: false, error: '当前没有可下载的新版本' };
   if (status.state === 'ready') return { ok: true };            // 已经下好了,直接当成功
   if (status.state === 'downloading') return { ok: true };      // 正在下,别重复触发
   if (status.state !== 'available') return { ok: false, error: '当前没有可下载的新版本' };

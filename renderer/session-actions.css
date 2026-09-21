@@ -1,0 +1,7 @@
+.session-subagents { border: 0; background: transparent; color: var(--text-muted); font: inherit; font-size: 11px; margin: 5px 0 0 27px; padding: 3px 7px; border-radius: 6px; cursor: pointer; box-shadow: none; }
+.session-subagents:hover { color: var(--text); background: var(--bg-hover, #8881); }
+.session-subagents:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.process-stream:not(.has-subagents) > .session-subagents { display: none; }
+.assistant-fork { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.assistant-fork:hover, .assistant-fork:focus-visible { background: var(--bg-hover); color: var(--text); }
+.assistant-fork:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

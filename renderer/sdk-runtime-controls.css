@@ -1,0 +1,37 @@
+.sdk-settings-section { min-width: 0; }
+.sdk-settings-section[hidden] { display: none !important; }
+.sdk-settings-note { margin: -2px 0 10px; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.sdk-settings-panel { background: var(--surface-card); border-color: var(--line-subtle); border-radius: 14px; box-shadow: var(--shadow-control); }
+.sdk-settings-row { min-width: 0; }
+.sdk-settings-row .set-icon { align-self: center; background: transparent; box-shadow: none; color: var(--text-dim); }
+.sdk-settings-row .set-icon svg { width: 19px; height: 19px; color: inherit; }
+.sdk-settings-control { flex-shrink: 0; }
+.sdk-settings-control .rgp-dropdown { min-width: 132px; }
+.sdk-settings-row--multiline { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 9px 12px; }
+.sdk-settings-row--multiline > .set-icon { align-self: start; }
+.sdk-settings-row--multiline > .sdk-settings-control { grid-column: 2; display: flex; flex-direction: column; align-items: stretch; width: 100%; max-width: none; margin-left: 0; gap: 12px; }
+/* Reuse the same field skin as provider settings; only multiline sizing differs. */
+.sdk-settings-input { width: 100%; min-width: 0; height: auto; padding: 9px 10px; border-color: var(--line-subtle); border-radius: 9px; background: var(--surface-inset); font-family: inherit; font-size: 12.5px; line-height: 1.6; resize: none; }
+textarea.sdk-settings-input { min-height: 82px; max-height: 260px; }
+.sdk-settings-input::placeholder { color: var(--text-muted); }
+.sdk-settings-empty { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+@container (max-width: 620px) {
+  .sdk-settings-row:not(.sdk-settings-row--multiline) > .sdk-settings-control { flex-shrink: 1; }
+  .sdk-settings-row--multiline > .rgp-label { flex-basis: auto; }
+  .sdk-settings-row--multiline > .sdk-settings-control { width: 100%; max-width: none; margin-left: 0; }
+}
+
+/* Shared fields used by the separate standard-plugin configuration page. */
+.sdk-plugin-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 14px; }
+.sdk-plugin-config { grid-column: 1 / -1; font-size: 12px; }
+.sdk-plugin-config > p { overflow-wrap: anywhere; opacity: .6; }
+.sdk-plugin-config summary { cursor: pointer; }
+.sdk-runtime-field { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--line-subtle); }
+.sdk-runtime-field:last-child { border-bottom: 0; }
+.sdk-runtime-label { min-width: 0; flex: 1; font-size: 13px; }
+.sdk-runtime-label small { display: block; font-size: 11px; line-height: 1.5; color: var(--text-muted); margin-top: 4px; }
+.sdk-plugin-config .sdk-runtime-input { box-sizing: border-box; width: min(50%, 320px); min-width: 0; border: 1px solid var(--line-subtle); border-radius: 9px; padding: 7px 9px; background: var(--surface-inset); color: inherit; font: inherit; font-size: 12px; resize: vertical; }
+.sdk-plugin-secret { opacity: .6; font-size: 11px; }
+.sdk-history-removal { margin-top: 14px; font-size: 12px; }
+.sdk-history-removal label { display: block; margin: 10px 0; line-height: 1.6; }
+@media (max-width: 800px) { .sdk-runtime-field { flex-wrap: wrap; } .sdk-plugin-config .sdk-runtime-input { width: 100%; } }

@@ -1,0 +1,3 @@
+# Keep source extraction, vendored text, and native build-manifest hashes stable
+# across Windows and Unix checkouts, including extensionless LICENSE files.
+* text=auto eol=lf

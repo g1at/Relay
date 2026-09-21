@@ -1,0 +1,140 @@
+'use strict';
+// Real renderer + native pointer/keyboard input. All provider/runtime endpoints
+// are isolated in-memory fixtures; no Relay main, SDK or user history is loaded.
+const { app, BrowserWindow, session } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const root = path.resolve(__dirname, '..');
+const out = path.join(root, '.codex-tmp/model-controls-smoke');
+fs.mkdirSync(out, { recursive: true });
+app.setPath('userData', path.join(out, 'profile'));
+app.commandLine.appendSwitch('disable-gpu');
+let win, step = 'starting';
+const checks = {}, errors = [];
+const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, checks, errors }, null, 2));
+const deadline = setTimeout(() => { errors.push('timeout: ' + step); save(); app.exit(1); }, 60000);
+const evaluate = code => win.webContents.executeJavaScript(code);
+const act = code => evaluate(`(() => { ${code}\n })()`);
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function settle() { await delay(260); await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))'); }
+async function waitFor(code) { await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+5000;const tick=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(tick,20);};tick();})`); }
+async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
+async function capture(name) { await settle(); fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
+async function pointer(type, fraction) {
+  const p = await evaluate(`(() => { const r=modelPopup.querySelector('.model-effort-range').getBoundingClientRect(); return {x:Math.round(r.left+13+(r.width-26)*${fraction}),y:Math.round(r.top+r.height/2)}; })()`);
+  win.webContents.sendInputEvent({ type, ...p, button: 'left', clickCount: 1 }); await delay(25);
+}
+async function key(keyCode) {
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode }); await delay(25);
+}
+app.whenReady().then(async () => {
+  session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
+  const seed = `(() => { localStorage.clear(); const base=window.api; window.modelReview={runtime:[],failNext:false}; window.api=new Proxy(base,{get(target,key){if(key==='setClaudeRuntime')return async(id,model,effort)=>{modelReview.runtime.push({id,model,effort});if(modelReview.failNext){modelReview.failNext=false;return{ok:false,message:'合成切换失败'};}return{ok:true,model,effort};};return target[key];}}); })();`;
+  const fixture = path.join(out, 'fixture.html');
+  fs.writeFileSync(fixture, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8') + seed + '</script>'));
+  win = new BrowserWindow({ width: 1100, height: 760, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  await win.loadFile(fixture); win.show(); win.focus(); win.webContents.focus();
+  await waitFor('providerRoutingLoaded&&!restoringActiveRuns');
+  const triggerPoint = await evaluate('(()=>{const r=btnModelSwitch.getBoundingClientRect();return{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})()');
+  win.webContents.sendInputEvent({type:'mouseMove',...triggerPoint}); await settle();
+  await check('ModelHoverScalesWithoutHalo', '(()=>{const s=getComputedStyle(btnModelSwitch);return btnModelSwitch.matches(":hover")&&s.boxShadow==="none"&&s.filter==="none"&&s.outlineStyle==="none"&&new DOMMatrix(s.transform).a>1.04&&new DOMMatrix(s.transform).a<1.07})()');
+  win.webContents.sendInputEvent({type:'mouseMove',x:500,y:100}); await settle();
+  await check('ModelHoverReturnsToRest', 'Math.abs(new DOMMatrix(getComputedStyle(btnModelSwitch).transform).a-1)<.001');
+  await act('const row=buildHistoryRow({id:"hover-history",title:"项目交付说明",kind:"chat"});row.id="hoverHistory";document.querySelector(".sidebar .nav-list").after(row);');
+  const rowPoint=await evaluate('(()=>{const r=document.getElementById("hoverHistory").getBoundingClientRect();return{x:Math.round(r.left+40),y:Math.round(r.top+r.height/2)}})()');
+  win.webContents.sendInputEvent({type:'mouseMove',...rowPoint}); await settle();
+  for (const selector of ['.hi-rename','.hi-pin','.hi-del']) {
+    const point=await evaluate(`(()=>{const r=document.querySelector('#hoverHistory ${selector}').getBoundingClientRect();return{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})()`);
+    win.webContents.sendInputEvent({type:'mouseMove',...point}); await settle();
+    await check('HistoryActionIsFlatAndNeutral'+selector, `(()=>{const el=document.querySelector('#hoverHistory ${selector}'),s=getComputedStyle(el),probe=document.createElement('span');probe.style.color='var(--text)';el.append(probe);const color=getComputedStyle(probe).color;probe.remove();return el.matches(':hover')&&s.boxShadow==='none'&&s.filter==='none'&&s.color===color&&s.backgroundColor!=='rgba(0, 0, 0, 0)'})()`);
+  }
+  await capture('history-action-hover');
+  await act('document.getElementById("hoverHistory").remove()');
+  await check('WorkspaceTopBarHasNoFrame', 'getComputedStyle(document.querySelector(".workspace-panel-header")).borderBottomWidth==="0px"');
+  await act("currentConv={id:'synthetic-model-controls',title:'模型与推理选择预览',model:'opus',effort:'medium',turns:[]};currentModel='opus';currentEffort='medium';supportedClaudeProviderId='fixture';supportedClaudeModels=uiFixture.routes.chatRoutes.map(route=>({value:route.modelId,supportsEffort:true,supportedEffortLevels:['low','medium','high','xhigh','max']}));updateModelSwitchUI();modelPopupHomePage='advanced';showModelPopup({focus:true});");
+  await settle();
+  await check('CompactCardFitsDefaultWindow', 'modelPopup.offsetWidth===232&&modelPopup.offsetHeight<=115&&modelPopup.offsetHeight>=85&&modelPopup.getBoundingClientRect().right<=innerWidth');
+  await check('CompactLabelsStillUseConfiguredModels', 'msLabel.textContent==="专家"&&modelPopup.querySelector(".model-current-name").textContent==="mimo-x-pro-preview"&&btnModelSwitch.title==="mimo-x-pro-preview"');
+  await check('RangeKeepsNativeAccessibleSupportedLevels', 'document.activeElement.matches("input[type=range]")&&document.activeElement.max==="4"&&document.activeElement.step==="1"&&document.activeElement.getAttribute("aria-valuetext")==="中"');
+  await check('StrengthHeaderHasNoDecorativeStatusCircle', '!modelPopup.querySelector(".model-strength-orbit")');
+  await check('WhiteThumbHasOnlyANeutralContourAndFillReachesItsCenter', '(()=>{const t=modelPopup.querySelector(".model-effort-thumb"),s=getComputedStyle(t),r=t.getBoundingClientRect(),fill=modelPopup.querySelector(".model-effort-fill").getBoundingClientRect();return s.backgroundColor==="rgb(255, 255, 255)"&&s.boxShadow==="rgba(0, 0, 0, 0.12) 0px 1px 3px 0px"&&["rgb(133, 133, 136)","rgb(222, 222, 225)"].includes(s.borderColor)&&Math.abs(fill.right-r.left-r.width/2)<1;})()');
+  await pointer('mouseMove', .85);await settle();
+  await check('HoveringTheTrackAwayFromThumbDoesNotEnlargeIt', 'Math.abs(new DOMMatrix(getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).transform).a-1)<.001');
+  await capture('compact-reasoning-light');
+  await pointer('mouseMove', .25);await settle();
+  await check('HoveringNearTheThumbEnlargesOnlyTheThumb', '(()=>{const t=modelPopup.querySelector(".model-effort-thumb"),s=getComputedStyle(t),r=t.getBoundingClientRect();return new DOMMatrix(s.transform).a>1.07&&new DOMMatrix(s.transform).a<=1.081&&s.backgroundColor==="rgb(255, 255, 255)"&&Math.abs(modelPopup.querySelector(".model-effort-fill").getBoundingClientRect().right-r.left-r.width/2)<1})()');
+  await capture('compact-reasoning-light-hover');
+  win.webContents.sendInputEvent({type:'mouseMove',x:500,y:100});await settle();
+  await check('LeavingTheThumbRestoresItsSize', 'Math.abs(new DOMMatrix(getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).transform).a-1)<.001');
+  await pointer('mouseDown', 0);
+  await pointer('mouseMove', .41);
+  await check('DraggingPreviewsContinuouslyWithoutRuntimeCalls', 'modelReview.runtime.length===0&&currentEffort==="medium"&&modelPopup.querySelector(".model-effort-slider-shell").dataset.dragging==="true"&&(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect();const fraction=(t.left+t.width/2-r.left-13)/(r.width-26);return Math.abs(fraction-.41)<.012&&Math.abs(fraction-.5)>.04;})()');
+  await check('StrengthTextHasSelectionMotion', 'modelPopup.querySelector(".model-strength-title").getAnimations().some(animation=>animation.playState==="running")');
+  await check('DragTracksPointerDirectlyButKeepsScaleTransition', '(()=>{const t=getComputedStyle(modelPopup.querySelector(".model-effort-thumb"));return t.transitionDuration.startsWith("0s,")&&t.transitionDuration.includes("0.2s")})()');
+  await capture('compact-reasoning-drag');
+  await pointer('mouseUp', .41);
+  await waitFor('modelReview.runtime.length===1&&!pendingClaudeRuntimeSelection');
+  await settle();
+  await check('PointerReleaseCommitsOneSupportedLevelAndSnaps', 'currentEffort==="high"&&modelReview.runtime[0].model==="opus"&&modelReview.runtime[0].effort==="high"&&modelPopup.querySelector(".model-effort-range").value==="2"&&!modelPopup.querySelector(".model-effort-slider-shell").dataset.dragging&&(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect();return Math.abs(t.left+t.width/2-(r.left+r.width/2))<1;})()');
+  await key('Right'); await waitFor('currentEffort==="xhigh"&&!pendingClaudeRuntimeSelection');
+  await check('ArrowKeyStillChangesOneLevel', 'modelReview.runtime.length===2&&modelPopup.querySelector(".model-effort-range").getAttribute("aria-valuetext")==="极高"');
+  await key('Home'); await waitFor('currentEffort==="low"&&!pendingClaudeRuntimeSelection');
+  await pointer('mouseMove',0);await settle();
+  await check('MinimumThumbAndFillStayInsideSliderWhenHovered', '(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect(),f=modelPopup.querySelector(".model-effort-fill").getBoundingClientRect();return t.left>=r.left-.1&&t.top>=r.top-.1&&t.bottom<=r.bottom+.1&&Math.abs(f.right-t.left-t.width/2)<1})()');
+  await key('End'); await waitFor('currentEffort==="max"&&!pendingClaudeRuntimeSelection'); await settle();
+  await pointer('mouseMove',1);await settle();
+  await check('MaximumThumbAndFillStayInsideSliderWhenHovered', '(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect(),f=modelPopup.querySelector(".model-effort-fill").getBoundingClientRect();return t.right<=r.right+.1&&t.top>=r.top-.1&&t.bottom<=r.bottom+.1&&Math.abs(f.right-t.left-t.width/2)<1})()');
+  await check('HomeEndRetainNativeRangeBehavior', 'modelReview.runtime.length===4&&modelPopup.querySelector(".model-effort-range").value==="4"');
+  await waitFor('getComputedStyle(modelPopup.querySelector(".model-effort-fill"),"::before").opacity==="1"');
+  await check('MaxGradientAndShimmerRemainAnimated', 'getComputedStyle(modelPopup.querySelector(".model-effort-fill"),"::before").opacity==="1"&&getComputedStyle(modelPopup.querySelector(".model-effort-shimmer")).animationName==="relay-model-shimmer"');
+  await pointer('mouseDown', .2);
+  await act('modelPopup.querySelector(".model-effort-range").dispatchEvent(new PointerEvent("pointercancel"));');
+  await pointer('mouseUp', .2); await settle();
+  await check('CanceledDragRestoresSelectionWithoutSubmission', 'currentEffort==="max"&&modelReview.runtime.length===4&&modelPopup.querySelector(".model-effort-range").value==="4"');
+  await pointer('mouseDown', .2); await key('Escape');
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: 1, y: 1, button: 'left', clickCount: 1 });
+  await check('EscapeCancelsDragAndRestoresAnchorFocus', '!modelPopup.classList.contains("show")&&document.activeElement===btnModelSwitch&&currentEffort==="max"&&modelReview.runtime.length===4&&btnModelSwitch.getAttribute("aria-expanded")==="false"');
+  await key('Down'); await settle();
+  await check('KeyboardReopensOnCurrentSelection', 'modelPopup.classList.contains("show")&&document.activeElement.matches("input[type=range]")&&document.activeElement.value==="4"');
+  await act('modelPopup.querySelector(".model-advanced-back").click();');
+  await check('MenuNavigationAnimatesHeightAndIncomingPage', 'modelPopupMorph&&modelPopupMorph.playState==="running"&&modelPopup.querySelector(".model-menu-page").getAnimations().length>0');
+  await settle();
+  await act('modelPopup.querySelector(".model-menu-row").click();'); await settle();
+  await check('AllConfiguredRoutesRemainAvailableInCompactRows', 'modelPopup.querySelectorAll(".mp-row:not(:disabled)").length===3&&[...modelPopup.querySelectorAll(".mp-desc")].map(x=>x.textContent).join("|")==="mimo-v2.5-pro[1m]|mimo-x-flash-preview|mimo-x-pro-preview"&&[...modelPopup.querySelectorAll(".mp-row")].every(row=>row.getBoundingClientRect().height<=50)');
+  await capture('compact-model-list-light');
+  await act('modelPopup.querySelector(".mp-row").click();');
+  await waitFor('currentModel==="haiku"&&!pendingClaudeRuntimeSelection');
+  await check('TierSelectionPreservesRuntimeRouteAndSimpleLabel', 'modelReview.runtime.at(-1).model==="haiku"&&currentConv.model==="haiku"&&msLabel.textContent==="快速"&&!modelPopup.classList.contains("show")');
+  await act('showModelPopup({focus:true});modelReview.failNext=true;'); await settle();
+  await act('modelReview.beforeFailure=currentEffort;');
+  await key('Home'); await waitFor('!pendingClaudeRuntimeSelection'); await settle();
+  await check('FailedSelectionRestoresCommittedEffortAndSlider', 'currentEffort===modelReview.beforeFailure&&modelPopup.querySelector(".model-effort-range").getAttribute("aria-valuetext")===EFFORT_LABELS[currentEffort]');
+  await act('modelReview.savedRoutes=providerRouting.chatRoutes;providerRouting.chatRoutes=providerRouting.chatRoutes.filter(route=>route.tier!=="sonnet");modelPopupPage="model";renderModelPopup();'); await settle();
+  await check('UnconfiguredRouteRemainsDisabled', 'modelPopup.querySelectorAll(".mp-row:disabled").length===1&&modelPopup.querySelectorAll(".mp-row")[1].getAttribute("aria-pressed")==="false"');
+  await act('providerRouting.chatRoutes=modelReview.savedRoutes;modelPopupPage="advanced";modelCapability(currentModel).supportedEffortLevels=["high"];renderModelPopup();'); await settle();
+  await check('SingleSupportedLevelCannotBeDragged', 'modelPopup.querySelector(".model-effort-range").disabled&&modelPopup.querySelector(".model-effort-range").getAttribute("aria-valuetext")==="高"');
+  await act('modelCapability(currentModel).supportsEffort=false;renderModelPopup();');
+  await check('UnsupportedReasoningKeepsModelNavigation', '!modelPopup.querySelector("input[type=range]")&&!!modelPopup.querySelector(".model-current-name")&&!!modelPopup.querySelector(".model-effort-unavailable")');
+  await act('modelCapability(currentModel).supportsEffort=true;modelCapability(currentModel).supportedEffortLevels=["low","high","max"];currentEffort="high";renderModelPopup();');
+  win.webContents.debugger.attach('1.3');
+  await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+  await check('ReducedMotionDisablesDecorativeAndSlideAnimations', 'getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).transitionDuration==="0s"&&getComputedStyle(modelPopup.querySelector(".model-effort-shimmer")).animationName==="none"');
+  await act('modelPopup.querySelector(".model-advanced-back").click();');
+  await check('ReducedMotionDoesNotMorphMenuHeight', '!modelPopupMorph&&modelPopup.querySelector(".model-menu-page").getAnimations().length===0');
+  await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {features:[]});win.webContents.debugger.detach();
+  win.setSize(520, 590); await settle();
+  await act('if(relaySidebarLayout.getState().expanded)relaySidebarLayout.toggle();document.documentElement.dataset.theme="dark";modelPopupHomePage="advanced";hideModelPopup();showModelPopup({focus:true});'); await settle();
+  await check('CompactDarkCardStaysInsideSmallWindow', '(()=>{const r=modelPopup.getBoundingClientRect();return r.width===232&&r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&modelPopup.scrollWidth<=modelPopup.clientWidth;})()');
+  await check('DarkThemeAlsoUsesAPureWhiteThumbWithoutBlueHalo', 'getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).backgroundColor==="rgb(255, 255, 255)"&&getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).boxShadow==="rgba(0, 0, 0, 0.12) 0px 1px 3px 0px"');
+  await capture('compact-reasoning-dark-small');
+  await pointer('mouseMove', .5);await capture('compact-reasoning-dark-hover');
+  win.setSize(300,450);await settle();
+  await check('ReasoningCardFits300PixelWindow', '(()=>{const r=modelPopup.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight&&modelPopup.scrollWidth<=modelPopup.clientWidth})()');
+  await capture('compact-reasoning-300');
+  await key('Tab');
+  await check('TabFromLastControlClosesWithoutTrappingFocus', '!modelPopup.classList.contains("show")&&btnModelSwitch.getAttribute("aria-expanded")==="false"');
+  await check('NoModelTasksOrRendererErrors', 'uiFixture.errors.length===0&&!uiFixture.calls.includes("runClaude")&&typeof window.require==="undefined"');
+  step='completed';save();clearTimeout(deadline);win.destroy();app.exit(0);
+}).catch(async error=>{errors.push(String(error.stack||error));save();console.error(error);if(win&&!win.isDestroyed()){try{console.error(await evaluate('JSON.stringify({errors:uiFixture.errors,model:currentModel,effort:currentEffort,range:modelPopup&&modelPopup.innerText})'));await capture('failure');}catch(_){}}clearTimeout(deadline);app.exit(1);});

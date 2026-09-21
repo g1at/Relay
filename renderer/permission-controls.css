@@ -1,0 +1,32 @@
+.rpc-trigger, .input-card button.rpc-trigger { width: auto; height: 30px; min-width: 0; max-width: 160px; flex: 0 1 auto; display: inline-flex; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 5px; margin: 0 0 0 3px; border: 0; border-radius: 8px; color: var(--text-dim, #56585e); background: transparent; font: inherit; font-size: 13px; font-weight: 450; line-height: 19px; white-space: nowrap; cursor: pointer; box-shadow: none; -webkit-app-region: no-drag; transition: color .15s, background-color .15s; }
+.rpc-trigger:hover:not(:disabled), .input-card button.rpc-trigger:hover:not(:disabled), .rpc-trigger[aria-expanded="true"], .input-card button.rpc-trigger[aria-expanded="true"] { color: var(--text, #202124); background: var(--surface-hover, var(--bg-hover, #ededee)); }
+.rpc-trigger:active:not(:disabled), .input-card button.rpc-trigger:active:not(:disabled) { transform: none; }
+.rpc-trigger:disabled, .input-card button.rpc-trigger:disabled { opacity: .68; cursor: default; background: transparent; }
+.rpc-trigger-icon { display: inline-flex; align-items: center; flex: 0 0 15px; width: 15px; height: 15px; }
+.rpc-trigger-label { overflow: hidden; text-overflow: ellipsis; }
+.rpc-trigger svg, .rpc-popover svg { display: block; width: 100%; height: 100%; }
+.rpc-trigger:focus-visible, .rpc-option:focus-visible { outline: 2px solid var(--text-dim, #56585e); outline-offset: 2px; }
+.rpc-popover { position: fixed; z-index: 3200; box-sizing: border-box; --rpc-popover-width: 280px; width: var(--rpc-popover-width); padding: 6px; border: 1px solid var(--line-subtle, var(--border, #dedee1)); border-radius: 14px; background: var(--surface-card, var(--bg-panel, #fff)); color: var(--text, #202124); box-shadow: var(--shadow-popover, 0 12px 36px #10182818, 0 2px 6px #10182808); overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border-strong, #d4d4d6) transparent; opacity: 0; transform: translateY(4px) scale(.985); transform-origin: bottom left; transition: opacity .14s ease, transform .17s cubic-bezier(.2,.8,.2,1); -webkit-app-region: no-drag; }
+.rpc-popover[data-placement="below"] { transform: translateY(-4px) scale(.985); transform-origin: top left; }
+.rpc-popover.is-open { opacity: 1; transform: translateY(0) scale(1); }
+.rpc-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) 14px; align-items: center; gap: 7px; width: 100%; box-sizing: border-box; border: 0; border-radius: 9px; margin: 0; padding: 7px 8px; color: inherit; background: transparent; box-shadow: none; text-align: left; font: inherit; cursor: pointer; -webkit-app-region: no-drag; transition: background-color .13s; }
+.rpc-option:hover:not(:disabled), .rpc-option:focus-visible { background: var(--surface-hover, var(--bg-hover, #f1f1f2)); }
+.rpc-option:focus-visible { outline-offset: -2px; }
+.rpc-option[aria-checked="true"] { background: var(--surface-selected, var(--bg-hover, #f1f1f2)); }
+.rpc-option:disabled { opacity: .6; cursor: default; }
+.rpc-option-icon { display: block; width: 18px; height: 20px; color: var(--text-dim, #5f6064); }
+.rpc-option-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rpc-option-label { display: block; font-size: 13px; line-height: 1.4; font-weight: 550; letter-spacing: -.01em; }
+.rpc-option-description { display: block; color: var(--text-muted, #898a90); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.rpc-option-check { display: block; width: 14px; height: 16px; color: var(--text-dim, #5f6064); visibility: hidden; }
+.rpc-option[aria-checked="true"] .rpc-option-check { visibility: visible; }
+.rpc-option[data-permission-option="bypassPermissions"] .rpc-option-icon, .rpc-option[data-permission-option="bypassPermissions"] .rpc-option-label { color: #d9651d; }
+.rpc-option[data-permission-option="bypassPermissions"] .rpc-option-description { color: #ba622a; }
+[data-theme="dark"] .rpc-popover { box-shadow: var(--shadow-popover, 0 12px 36px #00000055, 0 2px 6px #00000030); }
+[data-theme="dark"] .rpc-option[data-permission-option="bypassPermissions"] .rpc-option-icon, [data-theme="dark"] .rpc-option[data-permission-option="bypassPermissions"] .rpc-option-label { color: #f39857; }
+[data-theme="dark"] .rpc-option[data-permission-option="bypassPermissions"] .rpc-option-description { color: #d8905e; }
+.rpc-popover::-webkit-scrollbar { width: 8px; height: 8px; }
+.rpc-popover::-webkit-scrollbar-track { background: transparent; }
+.rpc-popover::-webkit-scrollbar-thumb { background: var(--border-strong, #d4d4d6); border: 2px solid transparent; border-radius: 999px; background-clip: padding-box; }
+.rpc-popover::-webkit-scrollbar-button { display: none; }
+@media (prefers-reduced-motion: reduce) { .rpc-trigger, .rpc-popover, .rpc-option { transition: none; } }

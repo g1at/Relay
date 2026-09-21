@@ -1,0 +1,29 @@
+.relay-readonly-markdown { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.relay-readonly-markdown.is-plain-text { white-space: pre-wrap; }
+.relay-readonly-markdown > :first-child { margin-top: 0; }
+.relay-readonly-markdown > :last-child { margin-bottom: 0; }
+.relay-readonly-markdown p { margin: .6em 0; }
+.relay-readonly-markdown :is(h1, h2, h3, h4, h5, h6) { margin: 1em 0 .45em; line-height: 1.45; font-weight: 600; color: var(--text); }
+.relay-readonly-markdown h1 { font-size: 1.35em; }
+.relay-readonly-markdown h2 { font-size: 1.25em; }
+.relay-readonly-markdown :is(h3, h4, h5, h6) { font-size: 1.1em; }
+.relay-readonly-markdown :is(ul, ol) { margin: .5em 0; padding-left: 1.6em; }
+.relay-readonly-markdown li { margin: .2em 0; }
+.relay-readonly-markdown li > p { margin: .25em 0; }
+.relay-readonly-markdown blockquote { margin: .7em 0; padding: .2em .9em; border-left: 3px solid var(--border-strong); color: var(--text-muted); }
+.relay-readonly-markdown code { padding: .12em .32em; border-radius: 4px; background: var(--bg-hover); font-size: .95em; font-family: Consolas, 'SFMono-Regular', monospace; }
+.relay-readonly-markdown pre { box-sizing: border-box; max-width: 100%; margin: .7em 0; padding: 10px 12px; overflow: auto; border: 1px solid #30363d; border-radius: 7px; background: #0d1117; color: #c9d1d9; white-space: pre; overscroll-behavior: contain; }
+.relay-readonly-markdown pre code { display: block; padding: 0; border: 0; background: transparent; white-space: pre; line-height: 1.65; }
+.relay-readonly-markdown table { width: 100%; max-width: 100%; margin: .7em 0; table-layout: fixed; border-collapse: collapse; }
+.relay-readonly-markdown :is(th, td) { padding: 6px 8px; border: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.relay-readonly-markdown th { font-weight: 600; background: var(--bg-hover); }
+.relay-readonly-markdown hr { margin: 1em 0; border: 0; border-top: 1px solid var(--border); }
+.relay-readonly-markdown a[href] { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.relay-readonly-markdown a[href]:hover { color: var(--accent); }
+.relay-readonly-markdown a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.relay-readonly-markdown input[type=checkbox] { margin: 0 .4em 0 0; vertical-align: middle; accent-color: var(--accent); }
+.relay-readonly-markdown .readonly-image-label { color: var(--text-muted); font-style: italic; }
+.relay-readonly-markdown pre::-webkit-scrollbar { width: 6px; height: 6px; }
+.relay-readonly-markdown pre::-webkit-scrollbar-track { background: transparent; }
+.relay-readonly-markdown pre::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--border-strong); }
+.relay-readonly-markdown pre::-webkit-scrollbar-button { display: none; width: 0; height: 0; }

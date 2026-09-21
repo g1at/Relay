@@ -1,0 +1,33 @@
+.relay-local-file-link,
+:is(.message.assistant .bubble .body, .relay-readonly-markdown) a.relay-local-file-link { text-decoration: none; border-bottom: 1px solid transparent; }
+.relay-local-file-link:hover { border-bottom-color: currentColor; }
+.relay-local-file-link:focus-visible { outline: 2px solid var(--accent, #7757d8); outline-offset: 3px; border-radius: 3px; }
+.relay-local-file-link .relay-local-file-icon { display: inline-block; width: 16px; height: 16px; margin-right: 5px; vertical-align: -.16em; flex-shrink: 0; }
+a.relay-file-card,
+:is(.message.assistant .bubble .body, .relay-readonly-markdown) a.relay-file-card {
+  display: inline-grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  width: 100%; max-width: 100%; box-sizing: border-box; padding: 13px 15px;
+  border: 1px solid var(--border, #dedede); border-radius: 12px;
+  background: var(--bg-panel, #fff); color: var(--text, #252525);
+  font-family: inherit; font-size: 14px; font-weight: 400; line-height: 1.5; letter-spacing: normal;
+  text-align: left; text-decoration: none; vertical-align: middle; cursor: pointer;
+  box-shadow: 0 1px 2px #00000004; transition: border-color .15s, background .15s, box-shadow .15s;
+}
+a.relay-file-card:hover,
+:is(.message.assistant .bubble .body, .relay-readonly-markdown) a.relay-file-card:hover {
+  color: var(--text, #252525); border-color: color-mix(in srgb, var(--accent, #1f6feb) 40%, var(--border, #dedede));
+  background: color-mix(in srgb, var(--accent, #1f6feb) 3%, var(--bg-panel, #fff)); box-shadow: 0 3px 12px #00000007;
+}
+a.relay-file-card:focus-visible { border-radius: 12px; outline-offset: 3px; }
+.relay-file-card-icon { display: grid; place-items: center; width: 40px; height: 44px; border: 1px solid color-mix(in srgb, var(--accent, #1f6feb) 13%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--accent, #1f6feb) 7%, var(--bg-panel, #fff)); color: var(--accent-text, #0a4ec2); }
+.relay-file-card .relay-local-file-icon { display: block; width: 25px; height: 25px; margin: 0; color: var(--workspace-file-color, inherit); }
+.relay-file-card-content { display: block; min-width: 0; }
+.relay-file-card-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; line-height: 1.5; }
+.relay-file-card-meta { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 400; color: var(--text-muted, #777); line-height: 1.5; }
+.relay-file-card-action { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; white-space: nowrap; color: var(--text-dim, #666); }
+.relay-file-card-action svg { width: 15px; height: 15px; }
+.relay-file-card:hover .relay-file-card-action { color: var(--accent-text, #0a4ec2); }
+@media (prefers-reduced-motion: reduce) { a.relay-file-card { transition: none; } }
+.relay-local-file-menu { position: fixed; z-index: 12000; min-width: 196px; padding: 5px; border: 1px solid var(--border, #dedede); border-radius: 10px; background: var(--bg-panel, var(--bg, #fff)); color: var(--text, #252525); box-shadow: 0 8px 28px #0002; }
+.relay-local-file-menu button { display: block; width: 100%; padding: 9px 11px; border: 0; border-radius: 6px; text-align: left; font: inherit; font-size: 13px; color: inherit; background: transparent; cursor: pointer; }
+.relay-local-file-menu button:hover, .relay-local-file-menu button:focus-visible { background: var(--hover, #8882); outline: none; }

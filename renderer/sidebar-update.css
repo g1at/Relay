@@ -1,0 +1,75 @@
+.sidebar .sidebar-update-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  min-width: 34px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #2563eb;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sidebar .sidebar-update-button:hover,
+.sidebar .sidebar-update-button[aria-expanded="true"] { background: var(--accent-soft); }
+.sidebar-update-button svg { width: 17px; height: 17px; flex: 0 0 auto; }
+#btnRelayUpdate[hidden], #btnRelayUpdate.hidden,
+#sidebarUpdatePanel[hidden], #sidebarUpdatePanel.hidden,
+#sidebarUpdatePanel [hidden] { display: none !important; }
+.sidebar-update-button:focus-visible,
+.sidebar-update-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.app.sidebar-collapsed #relayUpdateLabel { display: none; }
+.app.sidebar-collapsed .sidebar-update-button { padding-inline: 7px; }
+@media (max-width: 620px) {
+  #relayUpdateLabel { display: none; }
+  .sidebar .sidebar-update-button { padding-inline: 7px; }
+}
+.sidebar-update-panel {
+  position: fixed;
+  z-index: 1500;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  width: 350px;
+  max-width: calc(100vw - 24px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--bg-panel);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .13);
+  font-size: 12px;
+}
+.sidebar-update-heading { display: flex; align-items: flex-start; gap: 12px; flex-shrink: 0; padding: 16px 16px 8px; }
+.sidebar-update-heading h2 { margin: 0; flex: 1; font-size: 14px; line-height: 1.6; font-weight: 600; overflow-wrap: anywhere; }
+.sidebar-update-close { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex-shrink: 0; margin: -3px -4px 0 0; padding: 4px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim); cursor: pointer; }
+.sidebar-update-close:hover { background: var(--bg-hover); }
+.sidebar-update-body { padding: 0 16px 12px; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.sidebar-update-body p { margin: 0; line-height: 1.75; overflow-wrap: anywhere; }
+.sidebar-update-versions { color: var(--text-dim); font-size: 11px; margin-bottom: 10px !important; }
+.sidebar-update-description { color: var(--text-dim); }
+.sidebar-update-progress { margin-top: 14px; }
+.sidebar-update-progress-track { height: 5px; border-radius: 4px; overflow: hidden; background: var(--bg-hover); }
+.sidebar-update-progress-fill { height: 100%; background: #2563eb; }
+.sidebar-update-progress-label { margin-top: 7px !important; font-size: 11px; color: var(--text-dim); }
+.sidebar-update-notes { margin-top: 15px; }
+.sidebar-update-notes h3 { font-size: 12px; margin: 0 0 7px; font-weight: 600; }
+.sidebar-update-notes p { white-space: pre-wrap; color: var(--text-dim); }
+.sidebar-update-error { padding: 9px 10px; margin-top: 12px !important; border-radius: 7px; background: var(--error-bg); color: var(--error-text); }
+.sidebar-update-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.sidebar-update-actions button { border: 0; border-radius: 7px; min-height: 32px; padding: 7px 11px; font: inherit; font-size: 12px; cursor: pointer; }
+.sidebar-update-panel .sidebar-update-later { background: transparent; color: var(--text-dim); }
+.sidebar-update-panel .sidebar-update-later:hover { background: var(--bg-hover); }
+.sidebar-update-panel .sidebar-update-primary { background: #2563eb; color: #fff; }
+.sidebar-update-panel .sidebar-update-primary:hover:not(:disabled) { background: #1d4ed8; }
+.sidebar-update-panel .sidebar-update-primary:disabled { opacity: .55; cursor: default; }
+[data-theme="dark"] .sidebar .sidebar-update-button { color: #8bb8ff; }
+[data-theme="dark"] .sidebar-update-panel { box-shadow: 0 8px 32px rgba(0, 0, 0, .4); }
+@media (forced-colors: active) {
+  .sidebar .sidebar-update-button { color: LinkText; }
+  .sidebar-update-panel .sidebar-update-primary { color: HighlightText; background: Highlight; }
+}

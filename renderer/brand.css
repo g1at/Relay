@@ -1,0 +1,57 @@
+/* Approved Dual Gate artwork: preserve its geometry and select the source
+   artwork for each theme. User-selected logos do not receive this class. */
+img.relay-default-logo {
+  object-fit: contain;
+  border-radius: 0;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  box-shadow: none;
+  filter: none;
+  -webkit-user-drag: none;
+}
+
+:root[data-theme="dark"] img.relay-default-logo,
+:root:not([data-theme])[data-window-chrome-theme="dark"] img.relay-default-logo {
+  content: url("logo-dark.svg");
+}
+
+.brand-logo-preview.relay-default-logo { background: transparent; }
+
+/* Custom identity artwork has one crop in every window: the centered square
+   of the source image, clipped to a circle. Keep this shared rule separate
+   from the default mark, whose built-in clear space must remain intact. */
+img:is(#brandLogo, #profileLogo, #set-brandLogoPreview, #miniLogo, #orbLogo):not(.relay-default-logo) {
+  object-fit: cover;
+  object-position: 50% 50%;
+  border-radius: 50%;
+  padding: 0;
+  border: 0;
+}
+#orbLogo:not(.relay-default-logo) { width: 100%; height: 100%; }
+
+/* The same modest enlargement applies to the default mark and custom avatars. */
+.sidebar-header img.logo-img { width: 34px; height: 34px; }
+
+#settingsModal .set-nav-item .sn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+#settingsModal .set-nav-item .sn-ico svg { width: 17px; height: 17px; }
+#settingsModal .set-cat > .set-panel .set-icon {
+  color: var(--text-dim);
+  background: transparent;
+  box-shadow: none;
+}
+#settingsModal .set-cat > .set-panel .set-icon svg { display: block; width: 19px; height: 19px; }
+#settingsModal .set-cat > .set-panel .set-icon img { display: block; width: 28px; height: 28px; }
+
+/* Memory lives inside its own mount rather than a direct settings panel. */
+#memorySection .set-icon {
+  color: var(--text-dim);
+  background: transparent;
+  box-shadow: none;
+}
+#memorySection .set-icon svg { display: block; width: 19px; height: 19px; color: inherit; }

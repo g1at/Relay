@@ -138,11 +138,11 @@ function textBlocks(content) {
     .map((block) => block.text).join('\n');
 }
 
-function scanJsonlText(text, skillStats, memoryStats, context) {
+function scanJsonlText(text, skillStats, memoryStats, context, integrity) {
   for (const line of String(text || '').split('\n')) {
     if (!line.trim()) continue;
     let data;
-    try { data = JSON.parse(line); } catch (_) { continue; }
+    try { data = JSON.parse(line); } catch (_) { integrity.parseErrors++; continue; }
     const message = data && data.message;
     const blocks = message && Array.isArray(message.content) ? message.content : null;
     if (!blocks) continue;
@@ -180,15 +180,16 @@ function scanJsonlText(text, skillStats, memoryStats, context) {
   }
 }
 
-async function collectJsonlFiles(root) {
+async function collectJsonlFiles(root, integrity) {
   const files = [];
   const walk = async (dir) => {
     let entries;
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (_) { return; }
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (_) { integrity.directoryErrors++; return; }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(full);
+      else if (entry.isSymbolicLink()) integrity.directoryErrors++;
     }
   };
   await walk(root);
@@ -214,12 +215,12 @@ async function readRange(file, start, end) {
   }
 }
 
-function parseCompleteBuffer(buffer, skillStats, memoryStats, context) {
+function parseCompleteBuffer(buffer, skillStats, memoryStats, context, integrity) {
   if (!buffer.length) return 0;
   const lastNewline = buffer.lastIndexOf(0x0a);
   let consumed = lastNewline >= 0 ? lastNewline + 1 : 0;
 
-  if (consumed > 0) scanJsonlText(buffer.subarray(0, consumed).toString('utf8'), skillStats, memoryStats, context);
+  if (consumed > 0) scanJsonlText(buffer.subarray(0, consumed).toString('utf8'), skillStats, memoryStats, context, integrity);
 
   // Claude 的 JSONL 通常以换行结束。若最后一行已经是完整 JSON，也立即纳入；
   // 若仍在写入则保留 offset，下一次从这行开头继续读取。
@@ -227,7 +228,7 @@ function parseCompleteBuffer(buffer, skillStats, memoryStats, context) {
     const tail = buffer.subarray(consumed).toString('utf8');
     try {
       JSON.parse(tail);
-      scanJsonlText(tail, skillStats, memoryStats, context);
+      scanJsonlText(tail, skillStats, memoryStats, context, integrity);
       consumed = buffer.length;
     } catch (_) {}
   }
@@ -241,7 +242,8 @@ async function scan() {
     : { version: INDEX_VERSION, files: {} };
   const previousFiles = previous.files && typeof previous.files === 'object' ? previous.files : {};
   const nextFiles = Object.create(null);
-  const targets = await collectJsonlFiles(projectsRoot);
+  const integrity = { directoryErrors: 0, fileErrors: 0, parseErrors: 0, incompleteFiles: 0 };
+  const targets = await collectJsonlFiles(projectsRoot, integrity);
   let changed = previous.version !== INDEX_VERSION;
   let scannedFiles = 0;
   let scannedBytes = 0;
@@ -249,9 +251,10 @@ async function scan() {
   for (const file of targets) {
     const relative = path.relative(projectsRoot, file);
     let stat;
-    try { stat = await fs.promises.stat(file); } catch (_) { continue; }
+    try { stat = await fs.promises.stat(file); } catch (_) { integrity.fileErrors++; continue; }
     const old = previousFiles[relative];
     const same = old
+      && old.complete === true
       && Number(old.size) === stat.size
       && Math.round(Number(old.mtimeMs) || 0) === Math.round(stat.mtimeMs);
     if (same) {
@@ -262,6 +265,7 @@ async function scan() {
     changed = true;
     scannedFiles += 1;
     const canAppend = old
+      && old.complete === true
       && stat.size > Number(old.size)
       && Number(old.offset) >= 0
       && Number(old.offset) <= Number(old.size);
@@ -275,10 +279,20 @@ async function scan() {
         }
       : { lastUserText: '', activeSkills: [] };
     let buffer;
-    try { buffer = await readRange(file, start, stat.size); } catch (_) { continue; }
+    try { buffer = await readRange(file, start, stat.size); } catch (_) { integrity.fileErrors++; continue; }
     scannedBytes += buffer.length;
-    const consumed = parseCompleteBuffer(buffer, skillStats, memoryStats, context);
+    const errorsBefore = integrity.parseErrors;
+    const consumed = parseCompleteBuffer(buffer, skillStats, memoryStats, context, integrity);
+    let stable = buffer.length === stat.size - start;
+    try {
+      const after = await fs.promises.stat(file);
+      stable = stable && after.size === stat.size && after.mtimeMs === stat.mtimeMs;
+    } catch (_) { stable = false; }
+    if (!stable) integrity.fileErrors++;
+    const complete = stable && consumed === buffer.length && integrity.parseErrors === errorsBefore;
+    if (!complete) integrity.incompleteFiles++;
     nextFiles[relative] = {
+      complete,
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       offset: start + consumed,
@@ -333,9 +347,11 @@ async function scan() {
     totalFiles: targets.length,
     scannedFiles,
     scannedBytes,
+    complete: Object.values(integrity).every(count => count === 0),
+    integrity,
   };
 }
 
 scan()
   .then((result) => parentPort.postMessage({ ok: true, ...result }))
-  .catch((error) => parentPort.postMessage({ ok: false, message: error && error.message ? error.message : String(error) }));
+  .catch(() => parentPort.postMessage({ ok: false, complete: false, message: '技能用量扫描失败', integrity: { scanErrors: 1 } }));

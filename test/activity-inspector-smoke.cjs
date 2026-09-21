@@ -1,0 +1,62 @@
+'use strict';
+// Isolated renderer only: synthetic tool data, no user profile or network.
+const { app, BrowserWindow, session } = require('electron');
+const fs = require('node:fs'), path = require('node:path');
+const root = path.resolve(__dirname, '..'), output = path.join(root, '.codex-tmp/activity-inspector-smoke');
+fs.mkdirSync(output, { recursive: true });
+app.setPath('userData', path.join(output, 'profile')); app.commandLine.appendSwitch('disable-gpu');
+let win, step = 'start'; const checks = {}, errors = [];
+const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ step, checks, errors }, null, 2));
+const deadline = setTimeout(() => { errors.push('timeout at ' + step); save(); app.exit(1); }, 60000);
+const evaluate = code => win.webContents.executeJavaScript(code);
+const act = code => evaluate(`(()=>{${code}\n})()`);
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
+async function capture(name) { await delay(250); fs.writeFileSync(path.join(output, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
+app.whenReady().then(async () => {
+  session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
+  win = new BrowserWindow({ width: 1000, height: 780, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body><main id="host"></main></body></html>'));
+  for (const file of ['styles.css', 'conversation-stream.css', 'read-only-markdown.css', 'scrollbars.css']) await win.webContents.insertCSS(fs.readFileSync(path.join(root, 'renderer', file), 'utf8'));
+  await win.webContents.insertCSS('body{display:block;height:100vh;overflow:auto;background:var(--bg)}#host{width:min(740px,calc(100vw - 48px));margin:32px auto;min-width:0}');
+  for (const file of ['vendor/marked.umd.js', 'vendor/highlight.min.js', 'stream-markdown.js']) await evaluate(fs.readFileSync(path.join(root, 'renderer', file), 'utf8') + '\nvoid 0;');
+  const source = fs.readFileSync(path.join(root, 'renderer/app.js'), 'utf8');
+  await evaluate(source.slice(0, source.indexOf('const messagesEl =')) + '\nvoid 0;');
+  for (const file of ['read-only-markdown.js', 'activity-stream.js']) await evaluate(fs.readFileSync(path.join(root, 'renderer', file), 'utf8') + '\nvoid 0;');
+  await act(`window.review={errors:[]};window.addEventListener('error',e=>review.errors.push(e.message));
+    window.item={id:'fixture-tool',type:'tool',toolName:'mcp__documents__update',title:'调用 documents 服务',status:'running',input:{document_id:'Relay-Demo',markdown:'# 项目进度\\n\\n'+Array.from({length:30},(_,i)=>'- 第 '+(i+1)+' 项工作：保留清晰的排版与完整的参数内容。').join('\\n'),api_key:'input-private'},result:JSON.stringify({success:true,mode:'replace',token:'result-private',blocks_updated:32,preview:Array.from({length:35},(_,i)=>'结果条目 '+i)})};
+    window.state=RelayActivity.createState({items:[item]});window.stream=RelayActivity.createElement(state);document.getElementById('host').append(stream);window.row=stream.querySelector('[data-process-id="fixture-tool"]');window.update=()=>RelayActivity.updateElement(stream,state,{collapseOnComplete:false});
+  `); win.showInactive();
+  await check('CollapsedInspectorIsInert', 'row.querySelector(".process-inspector").inert');
+  await act('row.click();'); await delay(260);
+  await check('SingleCompactSurfaceReplacesStackedShadowCards', 'row.querySelectorAll(".process-inspect-panel").length===1&&getComputedStyle(row.querySelector(".process-inspect-code")).boxShadow==="none"&&row.querySelector(".process-inspect-panel").getBoundingClientRect().height<510');
+  await check('InputHasReadableMultilineArgumentsAndRedactsBothSides', 'row.querySelector(".process-inspect-fields").textContent.includes("# 项目进度\\n\\n- 第 1")&&!row.textContent.includes("input-private")&&!row.textContent.includes("result-private")');
+  await check('WideArgumentsPlaceEachNameAboveFullWidthContent', 'Array.from(row.querySelectorAll(".process-inspect-field")).every(field=>{const key=field.querySelector("dt").getBoundingClientRect(),value=field.querySelector("dd").getBoundingClientRect();return value.top>=key.bottom&&Math.abs(value.left-key.left)<1&&value.width>=field.clientWidth-1})');
+  await check('InputAndResultAreIndependentlyBounded', 'row.querySelector(".process-inspect-fields").scrollHeight>row.querySelector(".process-inspect-fields").clientHeight&&row.querySelector(".process-inspect-code").scrollHeight>row.querySelector(".process-inspect-code").clientHeight');
+  await act('review.fields=row.querySelector(".process-inspect-fields");review.result=row.querySelector(".process-inspect-code");review.fields.scrollTop=70;review.result.scrollTop=110;review.fields.focus();review.fieldsScroll=review.fields.scrollTop;review.resultScroll=review.result.scrollTop;item.result=JSON.stringify({success:true,mode:"replace",token:"next-private",blocks_updated:33,preview:Array.from({length:40},(_,i)=>"结果条目 "+i)});state.items[0].result=item.result;update();');
+  await check('LiveUpdatesPreserveFocusAndBothScrollPositions', 'document.activeElement===review.fields&&row.querySelector(".process-inspect-fields")===review.fields&&row.querySelector(".process-inspect-code")===review.result&&review.fields.scrollTop===review.fieldsScroll&&review.result.scrollTop===review.resultScroll&&!row.textContent.includes("next-private")');
+  await act('review.result.click();');
+  await check('InspectingContentDoesNotCollapseTheTool', 'row.classList.contains("is-expanded")&&!row.querySelector(".process-inspector").inert');
+  await check('RelayScrollbarIsSixPixelsAndRounded', 'getComputedStyle(review.result,"::-webkit-scrollbar").width==="6px"&&getComputedStyle(review.result,"::-webkit-scrollbar-thumb").borderRadius==="999px"');
+  await act('review.fields.scrollTop=0;review.result.scrollTop=0;document.activeElement.blur();');
+  await act(`window.failure=document.createElement('div');failure.className='message error';failure.innerHTML=RelayActivity.renderError('❌ 工具权限被拒绝（1 次）：mcp__documents__update');document.getElementById('host').append(failure);`);
+  await check('ErrorsUseQuietSurfaceAndLinearIcon', 'failure.querySelector("[role=alert]")&&failure.querySelector("svg")&&!failure.textContent.includes("❌")&&getComputedStyle(failure.querySelector(".bubble")).color===getComputedStyle(row.querySelector(".process-inspect-code")).color&&getComputedStyle(failure.querySelector(".bubble")).boxShadow==="none"');
+  await check('ShortErrorKeepsCompactHeight', 'failure.getBoundingClientRect().height<60&&failure.querySelector(".conversation-error-copy").textContent.includes("工具权限被拒绝")');
+  await capture('tool-details-light');
+  await act('document.documentElement.dataset.theme="dark";');
+  await capture('tool-details-dark');
+  win.setSize(420, 740); await delay(280);
+  await check('NarrowWindowHasNoPageOverflow', 'document.documentElement.scrollWidth<=innerWidth&&stream.scrollWidth<=stream.clientWidth+1');
+  await check('NarrowArgumentsStackWithinTheirPanel', 'getComputedStyle(row.querySelector(".process-inspect-field")).gridTemplateColumns.split(" ").length===1');
+  await check('NarrowErrorWrapsWithinTheReadingColumn', 'failure.scrollWidth<=failure.clientWidth+1&&failure.querySelector(".bubble").getBoundingClientRect().right<=document.getElementById("host").getBoundingClientRect().right+1');
+  await capture('tool-details-narrow-dark');
+  await act(`failure.innerHTML=RelayActivity.renderError('[stderr] <script>untrusted</script>\\n'+Array.from({length:80},(_,i)=>'diagnostic line '+i+' — retained in full').join('\\n'));`);
+  await check('LongErrorRetainsEveryLineAndUsesBoundedRelayScrollbar', 'failure.querySelector(".conversation-error-copy").textContent.includes("diagnostic line 79")&&failure.querySelector(".conversation-error-copy").scrollHeight>failure.querySelector(".conversation-error-copy").clientHeight&&failure.querySelector(".conversation-error-copy").clientHeight<=180&&getComputedStyle(failure.querySelector(".conversation-error-copy"),"::-webkit-scrollbar").width==="6px"&&!failure.querySelector("script")');
+  await act('failure.querySelector(".conversation-error-copy").focus();failure.querySelector(".conversation-error-copy").scrollTop=120;');
+  await check('LongErrorCanBeFocusedScrolledAndSelected', 'document.activeElement===failure.querySelector(".conversation-error-copy")&&document.activeElement.scrollTop===120&&getComputedStyle(document.activeElement).userSelect==="text"');
+
+  await act('row.focus();row.click();'); await delay(240);
+  await check('CollapseHidesInnerKeyboardTargets', 'row.querySelector(".process-inspector").inert&&row.querySelector(".process-inspector").getBoundingClientRect().height<1');
+  await check('NoRendererErrorsOrNodeExposure', 'review.errors.length===0&&typeof require==="undefined"&&typeof process==="undefined"');
+  step = 'completed'; save(); clearTimeout(deadline); win.destroy(); app.exit(0);
+}).catch(async error => { errors.push(String(error.stack || error)); console.error(error); save(); if (win && !win.isDestroyed()) try { await capture('failure'); } catch (_) {} clearTimeout(deadline); app.exit(1); });

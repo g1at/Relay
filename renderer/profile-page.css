@@ -1,0 +1,44 @@
+.relay-profile-page { width: 100%; max-width: 1080px; min-width: 0; margin: 0 auto; padding: 2px 0 18px; color: var(--text); container-type: inline-size; }
+.rpp-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+.rpp-heading h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.02em; line-height: 1.5; }
+.rpp-edit { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-dim); font: inherit; font-size: 12px; cursor: pointer; transition: color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
+.rpp-edit svg { width: 15px; height: 15px; }
+.rpp-edit:hover, .rpp-edit[aria-expanded="true"] { color: var(--text); background: var(--bg-hover); }
+.rpp-edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rpp-identity { display: flex; align-items: center; flex-direction: column; padding: 25px 12px 32px; text-align: center; min-width: 0; }
+.rpp-logo { display: block; width: 88px; height: 88px; margin: 0 0 17px; }
+.rpp-identity h1 { margin: 0; max-width: 100%; font-size: 28px; line-height: 1.4; font-weight: 600; letter-spacing: -.025em; overflow-wrap: anywhere; }
+.rpp-identity p { margin: 7px 0 0; color: var(--text-muted); font-size: 12px; }
+.rpp-editor { width: min(410px, calc(100vw - 36px)); max-width: none; max-height: calc(100dvh - 40px); box-sizing: border-box; margin: auto; padding: 0; overflow: auto; border: 1px solid var(--line-subtle); border-radius: 20px; color: var(--text); background: var(--surface-card); box-shadow: var(--shadow-dialog); }
+.rpp-editor:not([open]) { display: none; }
+.rpp-editor[open] { animation: rpp-reveal var(--motion-normal) var(--ease-out); }
+.rpp-editor::backdrop { background: #0005; }
+.rpp-editor-card { display: flex; flex-direction: column; padding: 26px 28px 22px; margin: 0; min-width: 0; }
+.rpp-editor-card h2 { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.4; }
+.rpp-avatar-editor { position: relative; align-self: center; margin: 26px 0 8px; width: 104px; height: 104px; }
+.rpp-avatar-preview { width: 100%; height: 100%; background: var(--bg-hover); }
+.rpp-avatar-preview.relay-default-logo { object-fit: contain; padding: 10px; box-sizing: border-box; }
+.rpp-avatar-pick { position: absolute; right: -3px; bottom: -3px; display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 50%; color: var(--text); background: var(--bg-panel); cursor: pointer; box-shadow: var(--shadow-control); }
+.rpp-avatar-pick svg { width: 16px; height: 16px; }
+.rpp-avatar-reset { align-self: center; margin: 4px 0 22px; padding: 4px 6px; border: 0; border-radius: 6px; color: var(--text-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.rpp-name-label { margin-bottom: 8px; font-size: 12px; font-weight: 500; }
+.rpp-name-field { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 12px; border: 1px solid var(--line-subtle); border-radius: 10px; background: var(--surface-inset); transition: border-color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out); }
+.rpp-name-field:focus-within { border-color: var(--line-emphasis); background: var(--surface-card); }
+.rpp-name-field input { min-width: 0; width: 100%; padding: 11px 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 13px; }
+.rpp-name-field > span { color: var(--text-muted); white-space: nowrap; font-size: 10px; }
+.rpp-editor-message { display: flex; align-items: center; gap: 8px; margin: 9px 0 15px; min-height: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.rpp-editor-message [data-error="true"] { color: var(--error-text); }
+.rpp-editor-message button { flex-shrink: 0; border: 0; padding: 2px; color: var(--text); background: none; font: inherit; cursor: pointer; text-decoration: underline; }
+.rpp-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.rpp-editor-actions button { min-width: 70px; padding: 8px 19px; border: 1px solid var(--line-subtle); border-radius: 999px; color: var(--text); background: var(--surface-card); box-shadow: var(--shadow-control); font: inherit; font-size: 12px; cursor: pointer; transition: background-color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out); }
+.rpp-editor-actions button:hover { background: var(--surface-hover); border-color: var(--line-emphasis); }
+.rpp-editor-actions #profileSave { border-color: var(--text); background: var(--text); color: var(--bg-panel); }
+.rpp-editor button:disabled { cursor: default; opacity: .5; }
+.rpp-editor button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes rpp-reveal { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@container (max-width: 540px) {
+  .rpp-identity { padding: 20px 8px 26px; }
+  .rpp-logo { width: 76px; height: 76px; margin-bottom: 13px; }
+  .rpp-identity h1 { font-size: 23px; }
+}
+@media (prefers-reduced-motion: reduce) { .rpp-editor[open] { animation: none; } .rpp-edit, .rpp-name-field, .rpp-editor-actions button { transition: none; } }

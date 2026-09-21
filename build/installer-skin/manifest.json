@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "architecture": "i386",
+  "callingConvention": "stdcall",
+  "exports": {
+    "RelaySkinAttach": "int(HWND, int dpi)",
+    "RelaySkinRefresh": "void(HWND)",
+    "RelaySkinDestroy": "void(HWND)"
+  },
+  "imports": [
+    "comctl32.dll",
+    "dwmapi.dll",
+    "gdi32.dll",
+    "gdiplus.dll",
+    "kernel32.dll",
+    "user32.dll"
+  ],
+  "compiler": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",
+  "files": {
+    "relay-installer-skin.c": "4f580a7321d8b6a964dfb821b0b2c4985f4b1c62e60473fa05871cb6ebe0a3f4",
+    "../build-installer-skin.cjs": "282006b82366c93d848b135b79cc700c732d57528e438a63ac8c666b8db9c3ae",
+    "relay-installer-skin.dll": "44ddcfa423a905e5f2bf9e538fba06cd7e9d20454a95cb6f481995c7ae965850"
+  }
+}

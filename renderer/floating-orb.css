@@ -1,0 +1,25 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; user-select: none; }
+body { display: grid; place-items: center; }
+.relay-orb { --light-x: 36%; --light-y: 24%; position: relative; isolation: isolate; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; padding: 0; overflow: hidden; border: 1px solid #dfe2e7; border-radius: 50%; color: #202124; background: linear-gradient(155deg, #fff 22%, #f3f4f6 100%); box-shadow: 0 3px 8px #17191d1b, 0 1px 2px #17191d0c, inset 0 1px 1px #fff; cursor: pointer; outline: none; touch-action: none; transition: border-color 280ms ease, box-shadow 280ms ease, transform 280ms cubic-bezier(.22,1,.36,1); -webkit-app-region: no-drag; }
+.relay-orb::before, .relay-orb::after { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; content: ''; }
+.relay-orb::before { z-index: -1; background: radial-gradient(circle at var(--light-x) var(--light-y), #fff 0%, #ffffff80 30%, #ffffff00 72%); opacity: .28; transition: opacity 300ms ease; }
+.relay-orb::after { border: 1px solid #ffffff80; opacity: .6; transition: opacity 280ms ease; }
+.relay-orb:hover { border-color: #d2d6dd; box-shadow: 0 4px 9px #17191d25, 0 1px 3px #17191d10, inset 0 1px 1px #fff; transform: translateY(-1px) scale(1.015); }
+.relay-orb:hover::before { opacity: .9; }
+.relay-orb:hover::after { opacity: 1; }
+.relay-orb:focus-visible { outline: 2px solid #2377ec; outline-offset: 3px; }
+.relay-orb:active, .relay-orb.is-dragging { transform: scale(.97); cursor: grabbing; }
+.relay-orb img { flex: 0 0 auto; display: block; width: 44px; height: 44px; pointer-events: none; -webkit-user-drag: none; }
+/* The approved SVG includes its own clear space; enlarge its box so the mark
+   fills the smaller orb without changing the shared logo artwork. */
+.relay-orb img.relay-default-logo { width: 56px; height: 56px; }
+.orb-status { position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; background: #2377ec; opacity: 0; transition: opacity 160ms; }
+.relay-orb.is-running .orb-status { opacity: 1; animation: orb-working 1.5s ease-in-out infinite; }
+[data-theme="dark"] .relay-orb { background: linear-gradient(155deg, #35383f, #24262b 80%); border-color: #4b505a; box-shadow: 0 3px 8px #00000050, 0 1px 2px #00000030, inset 0 1px 1px #ffffff12; }
+[data-theme="dark"] .relay-orb::before { background: radial-gradient(circle at var(--light-x) var(--light-y), #ffffff22, #ffffff0a 38%, #ffffff00 72%); }
+[data-theme="dark"] .relay-orb::after { border-color: #ffffff0c; }
+[data-theme="dark"] .relay-orb:hover { border-color: #646b78; box-shadow: 0 4px 9px #00000060, 0 1px 3px #00000038, inset 0 1px 1px #ffffff20; }
+[data-theme="dark"] .orb-status { background: #7babf1; border-color: #24262b; }
+@keyframes orb-working { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { *, *::after, *::before { animation: none !important; transition: none !important; } .relay-orb:hover, .relay-orb:active, .relay-orb.is-dragging { transform: none; } }

@@ -1,0 +1,129 @@
+.relay-usage-page { --rup-blue: #4386eb; --rup-purple: #9470db; --rup-green: #30a888; --rup-amber: #dba13e; width: 100%; max-width: 1080px; min-width: 0; margin: 0 auto; padding: 2px 0 20px; color: var(--text); container-type: inline-size; }
+[data-theme="dark"] .relay-usage-page { --rup-blue: #78a7f3; --rup-purple: #b498eb; --rup-green: #68c2a7; --rup-amber: #daba7b; }
+.rup-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+.rup-heading h2 { margin: 0; font-size: 24px; font-weight: 600; line-height: 1.3; letter-spacing: -.035em; }
+.rup-heading p { margin: 8px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.rup-ranges, .rup-trend-modes { display: flex; flex: 0 0 auto; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); }
+.rup-ranges button, .rup-trend-modes button { appearance: none; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); padding: 5px 11px; font: inherit; font-size: 11px; line-height: 1.4; cursor: pointer; transition: background-color .16s, color .16s; }
+.rup-ranges button:hover, .rup-trend-modes button:hover { color: var(--text); background: var(--bg-hover); }
+.rup-ranges button[aria-pressed="true"], .rup-trend-modes button[aria-pressed="true"] { background: color-mix(in srgb, var(--rup-blue) 12%, transparent); color: var(--rup-blue); }
+.rup-ranges button:focus-visible, .rup-refresh:focus-visible, .rup-model-list:focus-visible, .rup-trend-modes button:focus-visible, .rup-flow-plot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rup-meta { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 7px 16px; color: var(--text-muted); font-size: 11px; min-height: 28px; margin-bottom: 9px; }
+.rup-refresh-state { display: flex; gap: 9px; align-items: center; min-width: 0; }
+.rup-refresh { border: 0; background: transparent; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; padding: 4px; font: inherit; font-size: 11px; cursor: pointer; border-radius: 5px; flex: 0 0 auto; }
+.rup-refresh:hover { background: var(--bg-hover); color: var(--text); }
+.rup-refresh svg { width: 13px; height: 13px; }
+.rup-overview { margin-bottom: 16px; padding-bottom: 14px; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(120deg, color-mix(in srgb, var(--rup-blue) 4%, var(--bg-panel)), var(--bg-panel) 58%); overflow: hidden; }
+.rup-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-width: 0; }
+.rup-metric { padding: 18px; min-width: 0; container-type: inline-size; }
+.rup-metric h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 9px; color: var(--text-dim); font-size: 11px; font-weight: 400; line-height: 1.5; }
+.rup-metric strong { display: block; min-width: 0; font-size: clamp(18px, calc(150cqw / var(--rup-value-length, 10)), 28px); line-height: 1.2; letter-spacing: -.035em; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.rup-metric p { margin: 7px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.rup-token-symbol { display: grid; place-items: center; flex: 0 0 17px; width: 17px; height: 17px; border-radius: 5px; color: var(--rup-blue); background: color-mix(in srgb, var(--rup-blue) 12%, transparent); }
+.rup-token-symbol svg { width: 12px; height: 12px; }
+.rup-token-breakdown { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; padding: 0 16px; }
+.rup-token-part { padding: 10px 11px; min-width: 0; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-panel); text-align: center; }
+.rup-token-part h4 { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0 0 7px; color: var(--text-muted); font-size: 10px; line-height: 1.5; font-weight: 400; }
+.rup-token-part strong { display: block; color: var(--text); font-size: 14px; line-height: 1.3; font-weight: 500; font-variant-numeric: tabular-nums; }
+.rup-dot { display: inline-block; flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.rup-dot.is-blue, .rup-component.is-blue { color: var(--rup-blue); background: var(--rup-blue); }
+.rup-dot.is-purple, .rup-component.is-purple { color: var(--rup-purple); background: var(--rup-purple); }
+.rup-dot.is-green, .rup-component.is-green { color: var(--rup-green); background: var(--rup-green); }
+.rup-dot.is-amber, .rup-component.is-amber { color: var(--rup-amber); background: var(--rup-amber); }
+.rup-token-composition { display: flex; height: 4px; margin: 12px 16px 0; border-radius: 4px; overflow: hidden; background: var(--bg-hover); }
+.rup-component { display: block; height: 100%; flex: 0 0 auto; }
+.rup-section { padding: 17px 18px; min-width: 0; border: 1px solid var(--border); border-radius: 13px; background: var(--bg-panel); }
+.rup-section > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+.rup-section h3 { margin: 0; font-weight: 550; font-size: 12px; line-height: 1.5; }
+.rup-section > header > span { color: var(--text-muted); font-size: 10px; }
+.rup-flow { margin-bottom: 16px; }
+.rup-flow > header { margin-bottom: 19px; }
+.rup-flow-caption { display: block; margin-top: 3px; color: var(--text-muted); font-size: 10px; }
+.rup-trend-modes { border: 0; background: var(--bg-hover); gap: 2px; padding: 2px; }
+.rup-trend-modes button { padding: 4px 9px; font-size: 10px; }
+.rup-flow-body { display: flex; gap: 10px; min-width: 0; }
+.rup-flow-scale { flex: 0 0 33px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; height: 144px; color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.rup-flow-plot { --rup-plot-color: var(--rup-blue); position: relative; flex: 1; min-width: 0; display: flex; align-items: center; height: 144px; border-radius: 3px; }
+.rup-flow-plot[data-mode="messages"] { --rup-plot-color: var(--rup-purple); }
+.rup-flow-plot > svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.rup-flow-grid { stroke: var(--border); stroke-dasharray: 3 5; vector-effect: non-scaling-stroke; }
+.rup-flow-area { fill: color-mix(in srgb, var(--rup-plot-color) 10%, transparent); }
+.rup-flow-line { fill: none; stroke: var(--rup-plot-color); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.rup-flow-point { fill: var(--rup-plot-color); }
+.rup-flow-cursor { stroke: var(--rup-plot-color); stroke-dasharray: 3 4; opacity: 0; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.rup-flow-dot { fill: var(--bg-panel); stroke: var(--rup-plot-color); stroke-width: 2; opacity: 0; vector-effect: non-scaling-stroke; }
+.rup-flow-axis { margin-left: 43px; }
+.rup-flow-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-height: 18px; margin-top: 10px; color: var(--text-muted); font-size: 10px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.rup-flow-detail strong { color: var(--text-dim); font-weight: 500; }
+.rup-flow-value { display: inline-flex; align-items: center; gap: 4px; }
+.rup-flow-unknown { margin-left: auto; }
+.rup-trend { margin-bottom: 16px; }
+.rup-chart { height: 144px; display: flex; align-items: stretch; gap: clamp(2px, .75cqw, 7px); border-bottom: 1px solid var(--border); background: repeating-linear-gradient(to top, transparent 0, transparent calc(50% - 1px), var(--border) 50%); }
+.rup-bar-column { flex: 1; min-width: 0; height: 100%; display: flex; align-items: flex-end; justify-content: center; }
+.rup-bar { display: block; max-width: 22px; width: 100%; background: var(--rup-blue); opacity: .85; border-radius: 3px 3px 0 0; min-height: 0; transition: opacity .15s; }
+.rup-bar-column:hover .rup-bar { opacity: 1; }
+.rup-chart-empty { margin: auto; color: var(--text-muted); font-size: 12px; line-height: 1.6; padding: 8px 12px; background: var(--bg-panel); text-align: center; }
+.rup-axis { display: flex; justify-content: space-between; gap: 10px; padding-top: 8px; color: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.rup-models > header { margin-bottom: 6px; }
+.rup-model-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 10px 0; }
+.rup-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 1.5; }
+.rup-model-total { display: inline-flex; align-items: baseline; gap: 8px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.rup-model-share { min-width: 33px; text-align: right; color: var(--text-muted); font-size: 9px; }
+.rup-model-track { grid-column: 1 / -1; height: 5px; border-radius: 4px; overflow: hidden; background: var(--bg-hover); }
+.rup-model-fill { display: flex; height: 100%; border-radius: inherit; background: var(--rup-blue); overflow: hidden; }
+.rup-empty { padding: 17px 0 15px; margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.rup-token-detail { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 12px 0 0; padding-top: 11px; border-top: 1px solid var(--border); font-size: 9px; line-height: 1.7; color: var(--text-muted); }
+.rup-model-legend { display: inline-flex; align-items: center; gap: 4px; }
+.relay-usage-page [hidden] { display: none !important; }
+.relay-usage-page.is-profile { padding: 0 0 8px; }
+.is-profile .rup-heading { align-items: center; gap: 14px; margin: 0 0 12px; }
+.is-profile .rup-meta { flex: 1; min-width: 0; margin: 0; gap: 5px 12px; }
+.rup-profile-panels { --rup-card-height: 300px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: stretch; }
+.rup-profile-panels > .rup-section { height: var(--rup-card-height); box-sizing: border-box; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.rup-profile-panels > .rup-section > header { flex: 0 0 auto; }
+.rup-model-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 6px; margin-right: -6px; }
+.rup-models .rup-token-detail { flex: 0 0 auto; }
+.is-profile .rup-trend { --rup-heatmap-color: var(--rup-blue); margin: 0; container-type: inline-size; }
+.is-profile .rup-trend[data-usage-heatmap-mode="messages"] { --rup-heatmap-color: var(--rup-purple); }
+.rup-calendar { --rup-heatmap-cell: clamp(12px, 6cqw, 18px); --rup-heatmap-gap: 4px; display: flex; align-items: flex-start; justify-content: center; gap: 8px; min-width: 0; margin-block: auto; }
+.is-profile[data-usage-displayed-days="90"] .rup-calendar { --rup-heatmap-cell: clamp(8px, calc((100cqw - 72px) / 14), 18px); }
+.rup-calendar-weekdays { display: grid; grid-template-rows: repeat(7, var(--rup-heatmap-cell)); gap: var(--rup-heatmap-gap); width: 12px; flex: 0 0 12px; color: var(--text-muted); font-size: 9px; text-align: center; }
+.rup-calendar-weekdays span { display: flex; align-items: center; justify-content: center; }
+.rup-calendar-body { min-width: 0; }
+.rup-chart.rup-heatmap { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, var(--rup-heatmap-cell)); grid-template-columns: repeat(var(--rup-heatmap-weeks, 1), var(--rup-heatmap-cell)); gap: var(--rup-heatmap-gap); height: auto; border: 0; background: none; }
+.rup-heatmap-cell { display: block; width: 100%; height: 100%; border: 1px solid color-mix(in srgb, var(--rup-heatmap-color, var(--rup-blue)) 13%, transparent); border-radius: 3px; background: var(--bg-hover); }
+.rup-heatmap-cell[data-level="1"] { background: color-mix(in srgb, var(--rup-heatmap-color, var(--rup-blue)) 19%, var(--bg-panel)); }
+.rup-heatmap-cell[data-level="2"] { background: color-mix(in srgb, var(--rup-heatmap-color, var(--rup-blue)) 39%, var(--bg-panel)); }
+.rup-heatmap-cell[data-level="3"] { background: color-mix(in srgb, var(--rup-heatmap-color, var(--rup-blue)) 66%, var(--bg-panel)); }
+.rup-heatmap-cell[data-level="4"] { background: var(--rup-heatmap-color, var(--rup-blue)); }
+.rup-heatmap-cell[data-level="unknown"] { border: 1px dashed var(--border-strong); background: transparent; }
+.rup-heatmap [data-usage-date]:hover { outline: 1px solid var(--rup-heatmap-color, var(--rup-blue)); outline-offset: 2px; }
+.rup-calendar .rup-axis { padding-top: 8px; font-size: 9px; }
+.rup-calendar.is-empty { min-height: 122px; }
+.rup-calendar.is-empty .rup-calendar-weekdays { display: none; }
+.rup-calendar.is-empty .rup-calendar-body { flex: 1; align-self: center; }
+.rup-calendar.is-empty .rup-heatmap { display: block; }
+.rup-calendar.is-empty .rup-axis { display: none; }
+.rup-heatmap-legend { display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-top: 12px; flex-shrink: 0; color: var(--text-muted); font-size: 9px; }
+.rup-heatmap-legend .rup-heatmap-cell { width: 9px; height: 9px; border-radius: 2px; }
+.rup-heatmap-legend > span:first-child { margin-right: 3px; }
+.rup-heatmap-legend > span:last-child { margin-left: 3px; }
+.rup-heatmap-note { flex-shrink: 0; margin: 8px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.6; }
+@container (min-width: 700px) { .rup-profile-panels { grid-template-columns: minmax(0, 1fr) minmax(0, 1.13fr); } }
+@container (max-width: 800px) { .rup-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 500px) {
+  .rup-heading { align-items: flex-start; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+  .rup-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rup-metric { padding: 13px 16px; }
+  .rup-token-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .rup-token-part { padding: 9px; }
+  .rup-token-part strong { font-size: 12px; }
+  .rup-section { padding: 15px 13px; }
+  .rup-meta { align-items: flex-start; }
+  .is-profile .rup-heading { flex-direction: row; flex-wrap: wrap; }
+  .is-profile .rup-ranges { margin-left: auto; }
+  .rup-flow-detail { min-height: 31px; gap: 4px 8px; }
+  .rup-flow-unknown { margin-left: 0; }
+}
+@container (max-width: 340px) { .rup-refresh-state { flex-wrap: wrap; } .is-profile .rup-meta { flex-basis: 100%; } .rup-token-breakdown { padding-inline: 12px; } .rup-token-part { flex-wrap: wrap; } .rup-model-share { display: none; } }
+@media (prefers-reduced-motion: reduce) { .rup-ranges button, .rup-bar, .rup-trend-modes button { transition: none; } }

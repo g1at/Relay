@@ -2,131 +2,54 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>首次设置 - Relay</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'" />
+  <title>欢迎使用 Relay</title>
   <link rel="stylesheet" href="../renderer/fonts/misans.css" />
   <link rel="stylesheet" href="wizard.css" />
+  <link rel="stylesheet" href="../renderer/brand.css" />
 </head>
 <body>
-  <div class="wizard">
-    <header class="wiz-header">
-      <div class="brand">
-        <img src="../renderer/logo.png" class="brand-logo" alt="" />
-        <span class="brand-name">Relay</span>
-      </div>
-      <div class="steps">
-        <div class="step active" data-step="1"><i></i><span>欢迎</span></div>
-        <div class="step" data-step="2"><i></i><span>API Key</span></div>
-        <div class="step" data-step="3"><i></i><span>正在安装</span></div>
-        <div class="step" data-step="4"><i></i><span>完成</span></div>
-      </div>
+  <main class="welcome-shell" aria-labelledby="welcomeTitle">
+    <header class="welcome-header">
+      <img src="../renderer/logo.svg" class="brand-logo relay-default-logo" alt="Relay" draggable="false" />
+      <span class="welcome-eyebrow">首次使用</span>
     </header>
 
-    <main class="wiz-body">
-      <!-- ── 页 1:欢迎 ── -->
-      <section class="page active" data-page="1">
-        <div class="hero">
-          <div class="hero-emoji">👋</div>
-          <h1>欢迎使用 Relay</h1>
-          <p>第一次使用，我们花 3-5 分钟把环境装好，接下来会自动准备：</p>
-        </div>
-        <ul class="checklist" id="probeList">
-          <li data-key="git">
-            <span class="ck-badge">📦</span>
-            <span class="ck-text"><b>Git for Windows</b><i>版本管理与 Bash 运行时</i></span>
-          </li>
-          <li data-key="node">
-            <span class="ck-badge">⬢</span>
-            <span class="ck-text"><b>Node.js 20+</b><i>运行飞书 MCP 所需</i></span>
-          </li>
-          <li data-key="mcp">
-            <span class="ck-badge">🔗</span>
-            <span class="ck-text"><b>飞书 MCP</b><i>读写飞书文档的能力</i></span>
-          </li>
-        </ul>
-        <p class="hint">已装好的会自动跳过。装完直接进聊天界面，不再看到这个向导。<br/>需要 Agent 时，进入后在「设置 → Agent 目录」导入即可。</p>
-      </section>
+    <section class="welcome-content" tabindex="0" aria-label="开始使用说明">
+      <div class="welcome-intro">
+        <h1 id="welcomeTitle">欢迎使用 Relay</h1>
+        <p class="lead">连接你常用的模型，开始对话、创作和处理项目。</p>
+      </div>
 
-      <!-- ── 页 2:API Key ── -->
-      <section class="page" data-page="2">
-        <div class="hero">
-          <div class="hero-emoji">🔑</div>
-          <h1>填一个 mify API Key</h1>
-          <p>用来调用大模型。已有 Key 直接粘贴，没有就按下面三步申请。</p>
-        </div>
+      <ol class="welcome-steps" aria-label="接下来">
+        <li class="welcome-step">
+          <span class="step-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-12 0V8Zm6 9v4" /></svg>
+          </span>
+          <div><h2>连接模型</h2><p>进入后，在“设置 → 服务商”中添加你的模型服务。</p></div>
+        </li>
+        <li class="welcome-step">
+          <span class="step-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4h3a3 3 0 0 1 0 6H3v4a2 2 0 0 0 2 2h4v-3a3 3 0 0 1 6 0v3h4a2 2 0 0 0 2-2v-4h-3a3 3 0 0 1 0-6h3V5a2 2 0 0 0-2-2h-4v3a3 3 0 0 1-6 0V3Z" /></svg>
+          </span>
+          <div><h2>按需拓展</h2><p>在插件中添加技能和工具，让 Relay 适应你的工作。</p></div>
+        </li>
+      </ol>
+    </section>
 
-        <div class="key-field">
-          <span class="key-ico">🔑</span>
-          <input type="password" id="apiKey" placeholder="sk-mify-..." />
-          <button class="key-eye" id="btnShowKey">显示</button>
-        </div>
-        <a class="link" id="lnkGetKey">➜ 没有 Key？点这里打开 mify 申请页</a>
-
-        <div class="key-steps">
-          <div class="ks-title">如何获取</div>
-          <ol>
-            <li>打开 mify 平台，用<b>小米 SSO</b> 登录</li>
-            <li>创建一个 <b>API Key</b></li>
-            <li>复制粘贴到上方输入框</li>
-          </ol>
-        </div>
-      </section>
-
-      <!-- ── 页 3:安装进度 ── -->
-      <section class="page" data-page="3">
-        <h1>正在安装(预计 3-5 分钟)</h1>
-        <p class="sub">请勿关闭窗口，装好后会自动进入聊天界面。</p>
-
-        <!-- 步骤清单(主视觉):每步 待办 → 进行中(转圈)→ ✓ 完成 -->
-        <ul class="install-steps" id="installSteps">
-          <li data-step="1">
-            <span class="is-icon"></span>
-            <span class="is-text"><b>基础环境</b><i>Git 与 Node.js 运行时</i></span>
-          </li>
-          <li data-step="3">
-            <span class="is-icon"></span>
-            <span class="is-text"><b>飞书 MCP</b><i>读写飞书文档的能力</i></span>
-          </li>
-          <li data-step="5">
-            <span class="is-icon"></span>
-            <span class="is-text"><b>收尾检查</b><i>校验并写入配置</i></span>
-          </li>
-        </ul>
-
-        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-        <div class="progress-text" id="progressText">准备中…</div>
-
-        <!-- 精简日志(次要):去掉时间戳/[INFO]/ASCII 边框,只留干净的进展 -->
-        <div class="log-feed" id="logBox"></div>
-      </section>
-
-      <!-- ── 页 4:完成 ── -->
-      <section class="page" data-page="4">
-        <div class="hero">
-          <div class="hero-emoji success">🎉</div>
-          <h1>装好了！</h1>
-          <p class="sub" id="doneSummary">环境已就绪，点下方按钮直接进入聊天界面。</p>
-        </div>
-
-        <div class="done-cards">
-          <div class="done-card">
-            <div class="dc-title">✏ 新对话</div>
-            <div class="dc-desc">直接对话，翻译 / 写代码 / 查资料都行</div>
-          </div>
-          <div class="done-card">
-            <div class="dc-title">⊞ Agent</div>
-            <div class="dc-desc">在设置里导入 Agent 后，选择它进行专项对话</div>
-          </div>
-        </div>
-      </section>
-    </main>
-
-    <footer class="wiz-footer">
-      <button class="btn-ghost" id="btnPrev">上一步</button>
-      <div class="footer-spacer"></div>
-      <button class="btn-primary" id="btnNext">下一步</button>
+    <footer class="welcome-footer">
+      <div class="welcome-status">
+        <p id="statusText" role="status" aria-live="polite" aria-atomic="true">无需登录 Relay 账号</p>
+        <p id="errorText" class="error-message" role="alert" aria-atomic="true" hidden></p>
+      </div>
+      <button class="btn-primary" id="btnEnter" type="button">
+        <span id="enterLabel">进入 Relay</span>
+        <svg class="enter-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
+        <span class="enter-spinner" aria-hidden="true"></span>
+      </button>
     </footer>
-  </div>
-
+  </main>
   <script src="wizard.js"></script>
 </body>
 </html>

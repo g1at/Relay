@@ -1,0 +1,4 @@
+.relay-local-image { display: inline-block; max-width: 100%; min-width: 0; vertical-align: middle; color: var(--text-secondary, #777); font-size: .9em; line-height: 1.6; overflow-wrap: anywhere; }
+.relay-local-image[aria-busy], .relay-local-image.is-unavailable { padding: 9px 12px; border-radius: 9px; background: var(--hover, #8881); }
+.relay-local-image.is-loaded { display: block; }
+.relay-local-image.is-loaded img { display: block; max-width: 100%; height: auto; border-radius: 8px; }
