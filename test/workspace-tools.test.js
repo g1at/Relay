@@ -9,7 +9,8 @@ const { pathToFileURL } = require('node:url');
 const { registerWorkspaceTools, TEXT_LIMIT, IMAGE_LIMIT, TERMINAL_LIMIT, relativePath, dimensions } = require('../workspace-tools');
 
 function fixture(t, extra = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-workspace-test-'));
+  // Match the native realpath used by workspace IPC, including Windows 8.3 TEMP aliases.
+  const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-workspace-test-')));
   const root = path.join(temp, 'workspace'); fs.mkdirSync(root);
   const outside = path.join(temp, 'outside'); fs.mkdirSync(outside);
   fs.writeFileSync(path.join(root, 'readme.md'), '# Local fixture\nNo real conversation.');

@@ -23,7 +23,8 @@ function declaration(name) {
   return next ? tail.slice(0, next.index) : tail;
 }
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-draft-terminal-'));
+  // Match the native realpath used by workspace IPC, including Windows 8.3 TEMP aliases.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-draft-terminal-')));
   const records = new Map(), writes = [], handlers = new Map(), ptys = [];
   const convFilePath = id => path.join(root, 'history', id + '.json');
   const persist = conv => {
