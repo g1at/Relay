@@ -4,6 +4,18 @@
   "description": "Relay - 个人 AI 助手",
   "main": "main.js",
   "author": "g0at",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/g1at/Relay.git"
+  },
+  "homepage": "https://github.com/g1at/Relay#readme",
+  "bugs": {
+    "url": "https://github.com/g1at/Relay/issues"
+  },
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -100,6 +112,10 @@
     "removePackageScripts": true,
     "beforePack": "./build/verify-sdk-packaging.cjs",
     "files": [
+      "LICENSE",
+      "NOTICE",
+      "THIRD_PARTY_NOTICES.md",
+      "licenses/**/*",
       "main.js",
       "app-settings-cache.js",
       "preload.js",
@@ -206,6 +222,17 @@
       "skill-maintenance-policy.js"
     ],
     "extraResources": [
+      {
+        "from": ".",
+        "to": "legal",
+        "filter": [
+          "LICENSE",
+          "NOTICE",
+          "THIRD_PARTY_NOTICES.md",
+          "licenses/**/*",
+          "renderer/vendor/*LICENSE"
+        ]
+      },
       {
         "from": "build/icon.ico",
         "to": "icon.ico"

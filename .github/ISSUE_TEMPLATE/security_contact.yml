@@ -1,0 +1,17 @@
+name: 请求私密安全联系渠道
+description: 仅请求联系方式；禁止公开漏洞内容
+title: "[安全联系] 请提供私密报告渠道"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请优先检查 [Security 页面](https://github.com/g1at/Relay/security) 是否已有 **Report a vulnerability** 入口。
+        只有入口不可用时才使用本模板。这个 Issue 是公开的，只用于请求私密联系方式。
+        不要补充受影响位置、攻击方式、复现、日志、截图或 PoC；等维护者确认私密渠道后再发送详情。
+  - type: checkboxes
+    id: private_contact
+    attributes:
+      label: 联系请求
+      options:
+        - label: 我需要一个私密安全报告渠道。本公开 Issue 不包含漏洞内容或敏感材料。
+          required: true

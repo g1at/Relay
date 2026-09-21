@@ -1,0 +1,63 @@
+name: 问题报告
+description: 报告可复现的功能或界面问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全漏洞请先阅读 [安全报告说明](https://github.com/g1at/Relay/security/policy)，不要在此公开复现或敏感材料。
+        日志和截图请删去 API Key、令牌、私人路径、业务数据及完整会话。
+  - type: input
+    id: version
+    attributes:
+      label: Relay 版本或源码提交
+      placeholder: 例如 3.0.1，或 Git commit
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: 运行方式
+      options:
+        - Windows 安装版
+        - Windows 源码运行
+        - 其他（在环境说明中补充）
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows 版本、是否使用 WSL；必要时补充 Node.js 和相关 MCP 版本。不要填写凭据或私人服务地址。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 可附脱敏后的错误信息或局部截图；说明是否稳定复现。
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，并确认附件不包含凭据、私人会话或漏洞细节。
+          required: true

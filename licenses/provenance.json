@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-09-21",
+  "scope": "Preserved license documents, not a certification of redistribution rights or a complete final-installer SBOM.",
+  "documents": [
+    {
+      "file": "licenses/MiSans-LICENSE.pdf",
+      "url": "https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf",
+      "component": "MiSans / MiSans Latin",
+      "bytes": 79535,
+      "sha256": "4a93a27cd2bd81b3b5ecfd0a853144a876fa26938a93a68443c67d74172fcb86"
+    },
+    {
+      "file": "renderer/vendor/highlight-LICENSE",
+      "url": "https://raw.githubusercontent.com/highlightjs/highlight.js/11.11.1/LICENSE",
+      "component": "highlight.js",
+      "version": "11.11.1",
+      "bytes": 1514,
+      "sha256": "6c081431591d9df696c82dc598fe1423765b8a299b200ed00b281afd0f64c490"
+    },
+    {
+      "file": "renderer/vendor/marked-LICENSE",
+      "url": "https://raw.githubusercontent.com/markedjs/marked/v18.0.4/LICENSE",
+      "component": "marked",
+      "version": "18.0.4",
+      "bytes": 2942,
+      "sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c"
+    },
+    {
+      "file": "renderer/vendor/xterm-LICENSE",
+      "packageFile": "node_modules/@xterm/xterm/LICENSE",
+      "component": "@xterm/xterm",
+      "version": "6.0.0",
+      "bytes": 1261,
+      "sha256": "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd"
+    },
+    {
+      "file": "renderer/vendor/xterm-addon-fit-LICENSE",
+      "packageFile": "node_modules/@xterm/addon-fit/LICENSE",
+      "component": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "bytes": 1103,
+      "sha256": "e256f01188af527e4d06d21d06fbf785ae9c50d4b328bf03cbe0ba7f0aa4228f"
+    },
+    {
+      "file": "licenses/anthropic/claude-agent-sdk-LICENSE.md",
+      "packageFile": "node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md",
+      "component": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.266",
+      "legalUrl": "https://code.claude.com/docs/en/legal-and-compliance",
+      "bytes": 147,
+      "sha256": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a"
+    },
+    {
+      "file": "licenses/anthropic/claude-agent-sdk-win32-x64-LICENSE.md",
+      "packageFile": "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/LICENSE.md",
+      "component": "@anthropic-ai/claude-agent-sdk-win32-x64",
+      "version": "0.3.266",
+      "legalUrl": "https://code.claude.com/docs/en/legal-and-compliance",
+      "bytes": 147,
+      "sha256": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a"
+    },
+    {
+      "file": "licenses/anthropic/claude-agent-sdk-linux-x64-LICENSE.md",
+      "packageFile": "node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/LICENSE.md",
+      "component": "@anthropic-ai/claude-agent-sdk-linux-x64",
+      "version": "0.3.266",
+      "legalUrl": "https://code.claude.com/docs/en/legal-and-compliance",
+      "bytes": 147,
+      "sha256": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a"
+    },
+    {
+      "file": "licenses/anthropic/claude-agent-sdk-README.md",
+      "packageFile": "node_modules/@anthropic-ai/claude-agent-sdk/README.md",
+      "component": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.266",
+      "bytes": 3173,
+      "sha256": "a923405f92c474ca40c62d0b5ffb2897aba56f779a7ea36807555b1553d0cdab"
+    },
+    {
+      "file": "licenses/native/MinGW-w64-runtime.txt",
+      "component": "MinGW-w64 runtime",
+      "sourceDistributionFile": "licenses/mingw-w64/COPYING.MinGW-w64-runtime.txt",
+      "url": "https://www.mingw-w64.org/",
+      "method": "verbatim copy from installed build tool distribution",
+      "bytes": 11158,
+      "sha256": "e7a33fd8d164abd188ee629bbe3b07912419b29192a6bbfdce29de0ad4f0e7fb"
+    },
+    {
+      "file": "licenses/native/winpthreads-COPYING.txt",
+      "component": "winpthreads",
+      "sourceDistributionFile": "licenses/winpthreads/COPYING",
+      "url": "https://www.mingw-w64.org/",
+      "method": "verbatim copy from installed build tool distribution",
+      "bytes": 2940,
+      "sha256": "1c8d23063c3772b9435831410b31b51fef3d9cf2138a442dc367ef5d72239f67"
+    },
+    {
+      "file": "licenses/native/GCC-GPL-3.0.txt",
+      "component": "GCC runtime",
+      "sourceDistributionFile": "licenses/gcc/COPYING3",
+      "url": "https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html",
+      "method": "verbatim copy from installed build tool distribution",
+      "bytes": 35821,
+      "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b"
+    },
+    {
+      "file": "licenses/native/GCC-Runtime-Library-Exception-3.1.txt",
+      "component": "GCC runtime exception",
+      "sourceDistributionFile": "licenses/gcc/COPYING.RUNTIME",
+      "url": "https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html",
+      "method": "verbatim copy from installed build tool distribution",
+      "bytes": 3397,
+      "sha256": "90077ba306ee9d8ed966cab1b4abd69b6e728acf08777283cc50283cd9503fa6"
+    },
+    {
+      "file": "licenses/native/NSIS-COPYING.txt",
+      "component": "NSIS 3.0.4.1",
+      "sourceDistributionFile": "nsis-3.0.4.1/COPYING",
+      "url": "https://nsis.sourceforge.io/License",
+      "method": "verbatim copy from installed build tool distribution",
+      "bytes": 15488,
+      "sha256": "3c8de989f6504d52f5f8dfafedb6668cd47201f5d01f1319570727c091425dd6"
+    },
+    {
+      "file": "licenses/native/StdUtils-LGPL.txt",
+      "component": "StdUtils",
+      "url": "https://raw.githubusercontent.com/lordmulder/stdutils/master/LGPL.txt",
+      "note": "Upstream notice snapshot; exact cached DLL/source revision remains to be verified before binary release.",
+      "bytes": 26530,
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+    },
+    {
+      "file": "licenses/native/StdUtils-LGPL_CLARIFICATION.txt",
+      "component": "StdUtils",
+      "url": "https://raw.githubusercontent.com/lordmulder/stdutils/master/LGPL_CLARIFICATION.txt",
+      "note": "Upstream notice snapshot; exact cached DLL/source revision remains to be verified before binary release.",
+      "bytes": 2703,
+      "sha256": "49287ffa37d51910a8cb595d7ab64ebd2d42525384b16d4322783a0e57a77194"
+    },
+    {
+      "file": "licenses/native/StdUtils-ReadMe.txt",
+      "component": "StdUtils",
+      "url": "https://raw.githubusercontent.com/lordmulder/stdutils/master/ReadMe.txt",
+      "note": "Upstream notice snapshot; exact cached DLL/source revision remains to be verified before binary release.",
+      "bytes": 1350,
+      "sha256": "e5d5846550df6b621bb241a6dda0b08b9766fd30a45d0ca12dcc04d12094b2e6"
+    }
+  ]
+}

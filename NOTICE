@@ -1,0 +1,59 @@
+Relay
+Copyright 2026 g0at
+
+Relay's original source is licensed under Apache License 2.0; see LICENSE.
+Third-party software, fonts, and runtime binaries retain their own licenses.
+This notice does not relicense those components or grant trademark rights.
+See THIRD_PARTY_NOTICES.md and the accompanying license texts for details.
+
+Bundled browser libraries
+-------------------------
+highlight.js 11.11.1 and the GitHub Dark theme
+  Copyright (c) 2006, Ivan Sagalaev.
+  The bundled build also credits (c) 2006-2024 Josh Goebel and contributors.
+  BSD-3-Clause; renderer/vendor/highlight-LICENSE.
+
+Marked 18.0.4
+  Copyright (c) 2018+, MarkedJS.
+  Copyright (c) 2011-2018, Christopher Jeffrey.
+  MIT, with the upstream Markdown attribution and BSD notice retained in
+  renderer/vendor/marked-LICENSE.
+
+xterm.js 6.0.0
+  Copyright (c) 2017-2019, The xterm.js authors.
+  Copyright (c) 2014-2016, SourceLair Private Company.
+  Copyright (c) 2012-2013, Christopher Jeffrey.
+  MIT; renderer/vendor/xterm-LICENSE.
+
+xterm addon-fit 0.11.0
+  Copyright (c) 2019, The xterm.js authors.
+  MIT; renderer/vendor/xterm-addon-fit-LICENSE.
+
+MiSans and MiSans Latin fonts
+----------------------------
+Relay uses MiSans and MiSans Latin.
+Copyright (c) 2020-2023 Beijing Xiaomi Mobile Software Co., Ltd.
+All Rights Reserved. The font metadata also identifies Hanyi Fonts.
+The fonts are governed by Xiaomi's MiSans Font Intellectual Property License
+Agreement, reproduced in licenses/MiSans-LICENSE.pdf, not Apache License 2.0.
+The third-party web subsets come from misans 4.1.0 by DSRKafuU; the upstream
+package's Apache license for scripts is not a license for the font data.
+
+Anthropic runtime
+-----------------
+@anthropic-ai/claude-agent-sdk and the win32-x64/linux-x64 runtime packages,
+version 0.3.266: (c) Anthropic PBC. All rights reserved.
+Use is subject to Anthropic's applicable agreements. Original package notices
+are retained in licenses/anthropic/. The MIT-licensed @anthropic-ai/sdk is a
+different package and does not relicense the Agent SDK or native runtime.
+
+Other packaged components
+-------------------------
+Electron, Chromium, Node.js, npm runtime dependencies, NSIS and its plugins,
+and native compiler runtime components retain their own copyright notices.
+Keep Electron's LICENSE and LICENSES.chromium.html, dependency license files,
+and the notices under licenses/native/ with binary distributions. In
+particular, StdUtils uses LGPL-2.1-or-later with its author's clarification,
+and applicable GCC runtime code uses the GCC Runtime Library Exception.
+The component list and remaining provenance limitations are recorded in
+THIRD_PARTY_NOTICES.md; inclusion here is not a blanket redistribution grant.

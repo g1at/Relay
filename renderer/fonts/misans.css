@@ -1,4 +1,6 @@
-/* MiSans 本地字体(离线打包,来自官方 misans@4.1.0 web 子集)
+/* MiSans 本地字体(离线打包,来源记录为第三方 dsrkafuu/misans 的 misans@4.1.0 web 子集)
+   字体适用小米 MiSans 协议,不适用该上游脚本的 Apache 许可。
+   许可与子集来源的核对范围见根目录 THIRD_PARTY_NOTICES.md。
    - Normal = 简体中文 + 符号(CJK,按 unicode-range 分片懒加载)
    - Latin  = 拉丁字母 / 数字 / 标点
    仅打包 Regular / Semibold 两个字重:

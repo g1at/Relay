@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题与私密报告流程
+    url: https://github.com/g1at/Relay/security/policy
+    about: 先确认私密报告方式；不要通过公开 Issue 提交漏洞细节。
+  - name: 安装与使用说明
+    url: https://github.com/g1at/Relay#readme
+    about: 查看当前安装入口、配置说明和开发方法。

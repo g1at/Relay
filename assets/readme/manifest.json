@@ -1,0 +1,35 @@
+{
+  "capturedAt": "2026-09-21T07:28:05.843Z",
+  "appVersion": "3.0.1",
+  "generator": "build/capture-readme.cjs",
+  "data": "Synthetic demonstration data; no model execution",
+  "networkRequests": 0,
+  "rendererErrors": [],
+  "screenshots": [
+    {
+      "file": "workspace-light.png",
+      "sha256": "150e4fbb54da45bd61fdaa7df43eaab507e41a6c39de558931ca6f9b71f7d220",
+      "bytes": 173517
+    },
+    {
+      "file": "workspace-dark.png",
+      "sha256": "b27bb431826df9b4c97546b559ee0d1021323f02df0a364200375754017f8892",
+      "bytes": 173009
+    },
+    {
+      "file": "memory.png",
+      "sha256": "d82e713c4f5f3b75e83d35cae38a39c5152f19ad6bd7279f0e8be3c0956437c7",
+      "bytes": 125546
+    },
+    {
+      "file": "skills.png",
+      "sha256": "6f1ac1fe244a3b2c7e94861d6eeded097f05384b423284717c84e7e117d6f1b5",
+      "bytes": 105017
+    },
+    {
+      "file": "quick-chat.png",
+      "sha256": "481377cf885447d74f2519ace0fecada2d6193da2d02ac7f8526cd368b5fd1bd",
+      "bytes": 72768
+    }
+  ]
+}

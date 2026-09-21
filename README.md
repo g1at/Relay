@@ -1,135 +1,153 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="renderer/logo-dark.svg">
-    <img src="renderer/logo.svg" alt="Relay Dual Gate 标志" width="92">
+    <img src="renderer/logo.svg" alt="Relay 标志" width="88">
   </picture>
 </p>
 
 <h1 align="center">Relay</h1>
-
 <p align="center"><strong>把对话，变成桌面上的交付。</strong></p>
-<p align="center">一个面向 Windows 的本地 AI 工作区。连接你的模型与工具，在对话旁边处理文件、预览网页、运行终端，让任务从想法走到结果。</p>
+<p align="center">面向 Windows 的 AI 工作区。连接模型与工具，在一个窗口里处理项目、文档、网页和代码。</p>
 
 <p align="center">
-  <a href="https://github.com/g1at/Relay/releases/latest">下载 Windows 版</a> ·
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#不止是一段对话">功能介绍</a> ·
-  <a href="#参与开发">参与开发</a>
+  <a href="LICENSE">Apache-2.0</a> · Windows x64 · Electron · Claude Agent SDK
+</p>
+<p align="center">
+  <a href="#开始使用">下载安装</a> ·
+  <a href="#一个窗口完成一项工作">功能一览</a> ·
+  <a href="#本地开发">本地开发</a> ·
+  <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
-<p align="center"><strong>Relay 3.0.1 · 迁移版准备中</strong> · Windows x64 · Claude Agent SDK</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/workspace-dark.png">
+  <img src="assets/readme/workspace-light.png" alt="Relay：左侧项目导航，中间任务对话，右侧项目计划文档预览" width="100%">
+</picture>
 
-> **开源准备中**：当前仓库正在整理源码与构建流程，许可证尚未确定。正式授权以之后加入的 `LICENSE` 为准；本 README 不代表已经完成开源发布。
+<p align="center"><sub>当前代码的真实界面，使用合成演示数据；不代表真实模型执行结果。<a href="assets/readme/README.md">截图来源与复现</a></sub></p>
 
-## 不止是一段对话
+| 从需求到文件 | 工作过程可见 | 按你的方式工作 |
+| --- | --- | --- |
+| 选择项目，整理资料、编写脚本、生成文档，再直接打开交付物。 | 查看工具调用与进度，补充要求、处理审批、暂停任务。 | 配置服务商与模型，通过技能、Agent、MCP 和记忆扩展能力。 |
 
-有些任务需要一段回答，有些任务需要一份真正能打开、能修改、能运行的文件。Relay 把这些工作放在同一个桌面窗口里：选好项目，提出需求，看清过程，再直接检查交付物。
+## 开始使用
 
-| 你要做的事 | Relay 如何配合 |
-| --- | --- |
-| 整理资料、生成文档、编写脚本或制作网页 | 围绕项目文件夹工作，生成的本地文件可以从回复中直接打开 |
-| 长任务执行到一半想补充要求 | 在执行过程中追加消息，也可以暂停后继续；过程与耗时归属同一任务 |
-| 使用不同服务商、模型和工具 | 配置模型档位路由，通过技能、Agent 与 MCP 扩展能力 |
-| 让助手记住长期偏好与项目背景 | 使用 Relay 说明、全局 / 项目记忆，以及可维护的技能 |
-| 不想为了一个小问题切回主窗口 | 用桌面悬浮球或 `Alt+Space` 打开可常驻、可拖动的快捷对话 |
+### 1. 安装 Relay
 
-### 项目在左，交付在右
+当前提供 **Windows x64** 安装包。
 
-将本地文件夹添加为项目，对话就在对应目录开展工作。未选择项目时，Relay 使用默认的 `RelayProjects` 工作区；过程文件按会话收纳，减少文件散落。
+**现在可下载：[Relay 3.0.0](https://github.com/g1at/relay-updates/releases/tag/v3.0.0)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
 
-右侧工作区把检查结果所需的工具放到手边：
+> **3.0.1 更新源迁移准备中。** 下一版将在本仓库和 `relay-updates` 同时发布，作为旧仓库最后一个版本；升级后，后续更新将转到本仓库。当前源码包含尚未随 3.0.0 发布的改进。
 
-- **文件**：目录树、源码、Markdown、图片和 HTML 预览。回复中的本地文件链接可以直接在这里打开。
-- **终端**：多个独立标签页，沿用工作目录，方便手工调试交付物。
-- **浏览器**：网页与本地 HTML 预览，提供多标签、历史、书签、下载和开发者工具。
-- **审查**：在 Git 项目中查看未暂存、已暂存和新文件的变更。
+<details>
+<summary>3.0.1 发布后的下载与命令行安装入口</summary>
 
-左右侧栏可以连续调节宽度。需要专注时收起导航，需要检查交付时展开工作区。
-
-### 长任务，也能随时交流
-
-Relay 将思考、工具调用、阶段性输出和最终回答组织到同一个任务中。连续的同类工具调用可以折叠，长内容按需展开；执行过程中仍可补充需求，调整方向。
-
-- **跟进与暂停**：补充消息按设置尽快跟进或排队处理；手动暂停期间不累计执行时间。
-- **计划与目标**：从输入框 `+` 菜单进入计划或目标模式；目标能力以当前 SDK 运行时支持情况为准。
-- **权限在手边**：输入框提供「请求批准 / 帮我批准 / 完全访问权限」，审批与提问按会话展示。
-- **多任务**：支持并行对话、后台完成提醒，以及由运行中的 Relay 执行的定时任务。
-
-### 技能、Agent、MCP，各司其职
-
-技能保存可复用的做事方法，Agent 提供不同的工作角色，MCP 连接外部工具。它们集中在插件页面管理，减少分散配置。
-
-单选 Agent 执行任务，多选 Agent 进行协作。技能支持导入、维护候选、版本回滚与可选的闲置归档；工具能否使用，取决于对应 MCP 服务及运行环境是否可用。
-
-### 记住有用的事，而不只是保存聊天
-
-在「个性化」中设置 **Relay 说明**，为聊天提供共同的工作偏好。记忆区分全局与项目范围，支持查看、维护、历史版本及归档；技能则承载更完整的操作方法。
-
-Relay 维护自己的记忆流程，默认关闭 SDK 的自动记忆，减少两套机制重复整理。个人资料中还可查看本地汇总的 Token、模型分布、使用趋势与每日活动热力图。
-
-### 桌面上的一个轻入口
-
-点击悬浮球，或按 `Alt+Space`。快捷小窗可以直接对话、切换模型档位、处理审批，支持拖动与常驻；主窗口负责完整工作区，小窗负责随手开始。
-
-除此之外，Relay 还提供图像创作、资料库、可自定义导航和键盘快捷键，以及浅色 / 深色外观。图像创作使用独立的服务商与模型配置。
-
-## 快速开始
-
-### 下载安装
-
-当前提供 **Windows x64** 安装包。以下新入口在仓库公开并发布 3.0.1 后生效；迁移前仍可下载 [已发布的 3.0.0](https://github.com/g1at/relay-updates/releases/tag/v3.0.0)。迁移完成后，直接前往 [最新正式版本](https://github.com/g1at/Relay/releases/latest)，或在 PowerShell 5.1 / 7 中执行：
+源码仓库公开且 3.0.1 正式发布后，可从 [本仓库 Releases](https://github.com/g1at/Relay/releases) 下载，或在 PowerShell 5.1 / 7 中执行：
 
 ```powershell
 & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/install.ps1')))
 ```
 
-新用户安装最新版；识别到登记完整的已有安装时，沿原安装目录与范围升级，已是最新版则跳过。脚本支持下载校验和断点续传；安装前需退出 Relay，包括托盘实例。仅下载、指定版本和安装向导用法见 [命令行安装说明](distribution/README.md)。
+安装脚本会校验下载文件；识别到登记完整的已有安装时，沿原目录与范围升级，已是最新版则跳过。安装前请退出 Relay，包括托盘实例。
 
-### 配置一次，开始工作
+仅下载、指定版本与安装向导选项见 [命令行安装说明](distribution/README.md)。维护者发布步骤见 [发布指南](distribution/PUBLISHING.md)。
 
-1. **添加服务商**：打开设置，填写服务地址、凭据和模型，配置需要使用的对话模型档位。
-2. **选择工作位置**：添加本地文件夹作为项目，或直接使用默认工作区。
-3. **发送第一条需求**：按任务需要添加文件、选择技能或 Agent，并选择权限模式。
-4. **查看交付**：在右侧文件、浏览器或终端中继续检查结果。
+</details>
 
-Relay 本身不要求账号登录；在线模型使用你配置的服务商，调用费用与使用条件由对应服务商决定。安装包已包含 SDK 运行时，无需先手工安装 Claude Code CLI。选择 WSL 环境时，需要系统已有可用的 WSL 发行版。
+### 2. 连接模型，选择项目
 
-### 常用快捷键
+1. 在 **设置 → 服务商** 添加服务地址、API Key 和可用模型，配置对话模型档位。
+2. 添加本地文件夹作为项目；也可以直接使用默认的 `RelayProjects` 工作区。
+3. 输入需求，按任务需要附加文件、选择技能或 Agent，并设置权限模式。
+4. 在右侧工作区检查结果，继续追问或修改。
+
+例如，先从一项有明确交付物的小任务开始：
+
+> 阅读项目中的资料，整理成一份中文项目计划，包含目标、里程碑和待确认事项，保存为 `项目计划.md`。
+
+对话服务需要兼容 Anthropic 接口及所需工具能力。安装包包含 SDK 运行时，无需预先手动安装 Claude Code CLI；使用 WSL 执行环境时，需要自行准备可用的 WSL 发行版。
+
+## 一个窗口，完成一项工作
+
+### 项目、文件、终端，就在对话旁边
+
+围绕本地项目开展工作，回复里的文件可以继续在右侧打开。调整侧栏宽度，在讨论和检查交付物之间切换。
+
+| 工作区 | 可以做什么 |
+| --- | --- |
+| **文件** | 浏览目录树，查看源码、Markdown、图片与 HTML，打开回复中的本地文件链接。 |
+| **终端** | 在项目目录创建独立终端标签，运行和调试交付物。 |
+| **浏览器** | 浏览网页、预览本地 HTML，使用多标签、历史、书签、下载与开发者工具。 |
+| **审查** | 在 Git 项目中查看未暂存、已暂存和新增文件的变更。 |
+
+### 长任务进行中，仍然能交流
+
+- **过程可见**：思考、工具调用、阶段性输出与最终回答集中展示，长内容可以折叠。
+- **中途跟进**：补充要求可按设置尽快跟进或加入队列，也可以暂停后继续。
+- **计划与目标**：从输入框 `+` 菜单进入对应模式；目标能力取决于当前 SDK 运行时支持。
+- **权限控制**：选择「请求批准 / 帮我批准 / 完全访问权限」，在当前任务处理审批。
+- **并行与定时**：支持并行对话、后台完成提醒，以及由运行中的 Relay 执行的定时任务。
+
+### 把常用方法和工具装进工作区
+
+**技能**保存可复用的操作方法，**Agent**提供任务角色，**MCP**连接外部工具。它们集中在插件页管理；可以选择一个 Agent 执行任务，也可以多选协作。
+
+<img src="assets/readme/skills.png" alt="Relay 插件页：技能搜索、导入与卡片式管理" width="100%">
+
+<p align="center"><sub>图中六项技能为演示示例，不表示安装即自带。MCP 调用需要对应服务与运行环境可用。</sub></p>
+
+### 留下偏好，让项目接得上
+
+在 **个性化** 中设置 Relay 说明，保存写作偏好与协作方式。记忆区分全局和项目范围，支持查看、维护、版本历史及归档；需要复用的完整流程可以整理成技能。
+
+<img src="assets/readme/memory.png" alt="Relay 个性化设置：工作说明、记忆条目与维护选项" width="100%">
+
+### 随手开始，回到主窗口继续
+
+点击桌面悬浮球，或按 **`Alt+Space`**，打开可拖动、可常驻的快捷小窗。直接提问、切换模型档位、处理审批；需要文件与终端时，再回到主窗口。
+
+<p align="center">
+  <img src="assets/readme/quick-chat.png" alt="Relay 快捷小窗：将一个想法整理成项目介绍，再继续追问" width="520">
+</p>
+
+Relay 还提供图像创作、资料库、使用统计、浅色 / 深色主题，以及可自定义的导航与快捷键。图像创作使用独立的服务商和模型配置。
+
+<details>
+<summary>常用快捷键</summary>
 
 | 操作 | 默认快捷键 |
 | --- | --- |
 | 快捷对话小窗 | `Alt+Space` |
-| 新对话 | `Ctrl+N` |
-| 搜索历史对话 | `Ctrl+K` |
-| 展开 / 收起左侧栏 | `Ctrl+B` |
-| 新建浏览器标签 | `Ctrl+Alt+1` |
-| 打开文件 | `Ctrl+Alt+2` |
-| 新建终端标签 | `Ctrl+Alt+3` |
-| 打开审查 | `Ctrl+Alt+4` |
+| 新对话 / 搜索对话 | `Ctrl+N` / `Ctrl+K` |
+| 展开或收起左侧栏 | `Ctrl+B` |
+| 浏览器 / 文件 / 终端 / 审查 | `Ctrl+Alt+1` / `2` / `3` / `4` |
+| 查看并自定义快捷键 | `Ctrl+Shift+K` |
 
-更多快捷键及可自定义项见「设置 → 键盘快捷键」。
+</details>
 
-## 数据与能力边界
+## 数据与使用说明
 
-- **本地保存，按需联网**：历史、应用设置和 Relay 管理的数据保存在本机。使用在线模型或 MCP 服务时，相关请求仍会发送给所配置的服务。服务商凭据使用系统提供的安全存储能力加密。
-- **与 Claude 资源的关系**：Relay 的应用数据与 SDK 临时缓存有各自目录，但当前部分技能、Agent、记忆及 SDK 资源仍会使用 `~/.claude`。已有 Claude Code 环境的用户需要留意这些共享位置，当前实现不是完全独立的资源沙箱。
-- **项目目录不是沙箱**：项目决定默认工作目录，工具是否能访问其他位置由权限与工具规则控制。
-- **浏览器预览与浏览器自动化不同**：内置浏览器用于浏览、预览和手工调试；目前尚未直接暴露为模型可操控的浏览器工具，可另行配置适合的 MCP。
-- **兼容性以实际服务为准**：对话路由面向 Anthropic 兼容接口；并非填写任意模型名称或 OpenAI 兼容地址就能使用。图片输入、工具调用及上下文能力取决于服务商与模型。
-- **统计有数据来源**：Token 与缓存统计依赖服务商和 SDK 返回的用量；上下文占用是运行时快照，不是逐 Token 实时计量。
-- **桌面平台**：当前正式分发 Windows x64；WSL 是可选的智能体执行环境，不代表已经提供 Linux 桌面版。当前审查功能需要 Git 仓库。
+**应用数据保存在本机，在线服务仍需要联网。** 使用模型或 MCP 时，相关请求会发给你配置的服务。服务商凭据通过系统安全存储能力加密；不要将真实 Key、聊天记录或私人项目文件提交到仓库。
 
-## 参与开发
+<details>
+<summary>数据目录、模型兼容性与能力边界</summary>
 
-Relay 使用 **Electron + 原生 HTML / CSS / JavaScript** 构建桌面界面，以 **Claude Agent SDK** 驱动任务，通过 MCP 扩展工具，使用 `node-pty` 与 xterm.js 提供终端。
+- **应用数据**：历史、设置及服务商配置存放在 Electron 的 `userData` 目录；SDK 临时文件在 Relay 的 `sdk-runtime` 子目录。
+- **共享资源**：部分技能、Agent、记忆与 SDK 资源仍使用 `~/.claude`。已有 Claude Code 环境时，请留意这些共享位置。
+- **文件权限**：项目目录决定默认工作位置，并不是隔离文件访问的沙箱；工具访问范围由权限和工具规则控制。
+- **模型兼容性**：不能仅凭模型名称或 OpenAI 兼容地址判断可用性。图片输入、工具调用和上下文能力以实际服务为准；各服务仍适用自身条款。
+- **浏览器**：内置浏览器供浏览、预览和手工调试，暂未直接提供给模型操控；自动化可另行配置适合的 MCP。
+- **统计**：Token 与缓存统计依赖服务商及 SDK 返回的数据；上下文占用是运行时快照。
+- **平台**：当前分发 Windows x64 桌面版；WSL 是可选的任务执行环境。定时任务需要 Relay 运行。
 
-本仓库保存 Relay 3.0 的应用源码、测试和构建资源。`docs/` 中的本地排查记录及截图、`design/` 中的设计材料不随源码同步。正式安装包与当前源码提交可能存在差异，见下方分发仓库。
+</details>
 
-### 开发运行
+## 本地开发
 
-使用 Windows x64、Git 和 Node.js。原生模块构建可能需要 Visual Studio C++ 工具链与兼容的 Python；重新编译安装器皮肤还需要 LLVM / MinGW，说明位于 `build/installer-skin/README.md`。
+界面使用 **Electron + 原生 HTML / CSS / JavaScript**，任务由 **Claude Agent SDK** 驱动，终端使用 **node-pty + xterm.js**，通过 **MCP** 扩展工具。
 
-默认构建使用仓库内的应用图标。手动运行 `build/generate-icons.cjs` 重新生成图标时，需要本地 `design/` 设计母版。
+开发基线：**Windows x64、Git、Node.js 24.x**。原生模块编译需要 Visual Studio C++ 工具链和兼容的 Python，具体准备步骤见 [贡献指南](CONTRIBUTING.md)。
 
 ```powershell
 git clone https://github.com/g1at/Relay.git
@@ -138,47 +156,53 @@ npm ci
 npm start
 ```
 
-私有阶段克隆需要仓库访问权限。`npm start` 运行开发版，模型配置仍通过 Relay 的设置界面完成，不需要把自己的 API Key 写入源码。
-
-### 检查与构建
+仓库仍为私有时，克隆需要访问权限。服务商凭据在应用设置中填写，无需写进源码。
 
 ```powershell
 # JavaScript 回归测试
 npm test
 
-# UI 冒烟测试（需要 Windows 图形环境）
+# UI 冒烟测试，需要 Windows 图形环境
 npm run test:ui
 
-# 构建 Windows 安装包，不发布到 GitHub
+# 构建 Windows 安装包，不发布
 npm run build -- --x64 --publish never
 ```
 
-构建会核验安装器皮肤并准备匹配版本的 Linux SDK 运行时，用于 WSL。原生组件与安装器皮肤还需要对应资源或构建工具；本机曾成功打包不代表干净克隆已经可以复现。`npm run release` 仅准备安装包及发布计划；`npm run release:publish -- <产物目录>` 才会上传该组已验证产物。完整流程见 [迁移发布说明](distribution/PUBLISHING.md)。
+常规构建使用已提交的图标和安装器资源，会准备匹配版本的 Linux SDK 运行时以支持 WSL。安装器皮肤的独立编译见 [构建说明](build/installer-skin/README.md)；版本与更新源迁移见 [发布指南](distribution/PUBLISHING.md)。
 
-### 代码导航
+<details>
+<summary>代码导航</summary>
 
-| 位置 | 负责的内容 |
+| 位置 | 职责 |
 | --- | --- |
-| `main.js` / `preload.js` | Electron 主进程、应用生命周期与 IPC 边界 |
-| `renderer/` | 对话、项目、设置、插件与右侧工作区界面 |
-| `claude-sdk.js` / `sdk-*.js` | SDK 会话、运行配置、事件、重试与恢复 |
-| `provider-store.js` | 服务商、凭据与模型档位路由 |
+| `main.js` / `preload.js` | 应用生命周期、窗口与 IPC 边界 |
+| `renderer/` | 对话、项目、设置、插件与工作区界面 |
+| `claude-sdk.js` / `sdk-*.js` | SDK 会话、配置、事件与恢复 |
+| `provider-store.js` | 服务商、凭据与模型路由 |
 | `task-*.js` / `live-*.js` | 任务状态、计时、跟进消息及活动流 |
 | `memory-*.js` / `skill-*.js` | 记忆与技能维护 |
 | `workspace-*.js` / `browser-*.js` | 文件、终端、审查与内置浏览器 |
-| `test/` | 单元、回归与桌面 UI 检查 |
-| `build/` / `distribution/` | 安装器、品牌资源与命令行分发 |
+| `test/` | 单元、回归与 UI 检查 |
+| `build/` / `distribution/` | 构建、安装器与分发工具 |
+| `assets/readme/` | 可公开的 README 演示图片及来源 |
 
-从 3.0.1 起，源码、正式安装包和自动更新统一使用 [g1at/Relay](https://github.com/g1at/Relay)。3.0.1 同时发布到 [g1at/relay-updates](https://github.com/g1at/relay-updates)，作为旧仓库最后一个版本；旧版用户升级后，后续更新自动使用新仓库。旧仓库保留历史版本与兼容安装入口。
+`docs/` 中的本地排查材料和 `design/` 设计母版保持本地，不随源码提交；开发与常规构建不依赖它们。只有手动重新生成品牌图标时才需要设计母版。
 
-## 反馈与贡献
+</details>
 
-欢迎提出使用体验、兼容性和文档改进建议。反馈时说明 Relay 版本、Windows 版本、复现步骤和预期结果，并只附经过脱敏的日志或截图。不要在公开 Issue 中粘贴服务商密钥、完整聊天记录或私人项目文件。
+## 参与贡献
 
-贡献指南、安全报告渠道和自动化检查仍在整理中。
+欢迎提交问题、功能建议、文档改进和代码贡献。
+
+- [报告问题或提出建议](https://github.com/g1at/Relay/issues/new/choose)：附上版本、复现步骤、预期结果及脱敏后的必要信息。
+- [贡献指南](CONTRIBUTING.md)：开发环境、检查方式与 Pull Request 流程。
+- [安全报告](SECURITY.md)：安全问题请按私密报告流程处理，避免在公开 Issue 中披露细节。
 
 ## 许可证与致谢
 
-**Relay 的开源许可证待确定。** 仓库公开与授予开源许可是两件事，请以正式加入的 `LICENSE` 为准。
+Relay 原创代码 © 2026 g0at，采用 **[Apache License 2.0](LICENSE)**。
 
-感谢 Electron、Anthropic Claude Agent SDK、Model Context Protocol、xterm.js、node-pty 及其他依赖项目。各依赖与运行时继续适用其自身许可和服务条款，不因 Relay 之后选择的许可证而改变。
+第三方库、Claude Agent SDK 及其运行时、MiSans 字体等分别适用自身许可，不因 Relay 开源而变更。归属见 [NOTICE](NOTICE)，许可正文、来源与分发说明见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
+感谢 Electron、Anthropic、Model Context Protocol、xterm.js、node-pty，以及其他依赖项目的维护者。

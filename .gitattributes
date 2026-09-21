@@ -1,3 +1,11 @@
 # Keep source extraction, vendored text, and native build-manifest hashes stable
 # across Windows and Unix checkouts, including extensionless LICENSE files.
 * text=auto eol=lf
+
+# Preserve upstream license bytes recorded in licenses/provenance.json.
+licenses/anthropic/* -whitespace
+licenses/native/* -whitespace
+licenses/native/GCC-GPL-3.0.txt -text
+licenses/native/GCC-Runtime-Library-Exception-3.1.txt -text
+licenses/native/MinGW-w64-runtime.txt -text
+licenses/native/winpthreads-COPYING.txt -text
