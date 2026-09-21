@@ -22,9 +22,9 @@ Relay 是 Windows 本地 AI 助手。[g1at/Relay](https://github.com/g1at/Relay)
 
 ## 3.0.1 更新源迁移
 
-3.0.1 是旧 `g1at/relay-updates` 仓库的最后一个版本，也会发布到 `g1at/Relay`。旧版应用通过旧源升级到 3.0.1 后，后续应用内更新使用 `g1at/Relay`。
+3.0.1 是旧 `g1at/relay-updates` 仓库的最后一个版本，两个仓库提供同一份经过校验的安装包。旧版应用通过旧源升级到 3.0.1 后，后续应用内更新使用 `g1at/Relay`。
 
-新版安装脚本默认从 `g1at/Relay` 下载最新正式版；显式指定低于 3.0.1 的稳定版本（包括 3.0.0 和 2.x）时，使用旧仓库的精确版本，指定 3.0.1 或更高版本时使用新仓库。发布迁移版时会把新版脚本同步到旧仓库根目录，因此已有的旧安装命令仍能使用，并会按同一规则选择下载源。新命令的脚本路径是 `g1at/Relay/main/distribution/install.ps1`。
+新版安装脚本默认从 `g1at/Relay` 下载最新正式版；显式指定低于 3.0.1 的稳定版本（包括 3.0.0 和 2.x）时，使用旧仓库的精确版本，指定 3.0.1 或更高版本时使用新仓库。旧仓库根目录已同步新版脚本，因此已有的旧安装命令仍能使用，并会按同一规则选择下载源。新命令的脚本路径是 `g1at/Relay/main/distribution/install.ps1`。
 
 ## 下载、版本与安装向导
 
@@ -67,11 +67,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\relay-install.ps1'
 
 网络不可用时，可在另一台电脑下载官方 EXE 和校验文件后带到目标电脑手动安装；在线命令本身需要查询版本，不能当作离线安装命令。当前渠道提供 Windows x64 安装包，尚未提供 ARM64、macOS 或 Linux 安装包。
 
-SHA-256 用于校验下载内容，不替代 Windows 代码签名。当前 3.0.0 安装包未配置签名证书；Windows 的安全提示仍由系统处理。
+SHA-256 用于校验下载内容，不替代 Windows 代码签名。当前 3.0.1 安装包未配置签名证书；Windows 的安全提示仍由系统处理。
 
 ## 手动下载
 
 - [最新正式版本](https://github.com/g1at/Relay/releases/latest)
+- [Relay 3.0.1 Windows 安装包](https://github.com/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe)
 - [Relay 3.0.0 Windows 安装包](https://github.com/g1at/relay-updates/releases/download/v3.0.0/Relay-3.0.0-Setup.exe)
 
 命令行安装与应用内更新使用同一份官方 EXE。Release 资产中的 `latest.yml` 和 `.blockmap` 供应用内更新使用；新仓库的 `distribution/latest.json` 和 `distribution/releases/vX.Y.Z.json` 供命令行安装使用。旧仓库保留根目录下的 `latest.json` 和 `releases/vX.Y.Z.json`。

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "3.0.1",
+  "tag": "v3.0.1",
+  "platform": "win32",
+  "arch": "x64",
+  "installer": {
+    "name": "Relay-3.0.1-Setup.exe",
+    "url": "https://github.com/g1at/Relay/releases/download/v3.0.1/Relay-3.0.1-Setup.exe",
+    "size": 231868966,
+    "sha256": "c128fe1cdfff7870303bfb19a7b28c860710dc3ead27c59b4a94cbbcd65c5c17",
+    "closeRunningAppGuard": false
+  }
+}

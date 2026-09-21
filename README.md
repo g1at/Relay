@@ -36,14 +36,14 @@
 
 当前提供 **Windows x64** 安装包。
 
-**现在可下载：[Relay 3.0.0](https://github.com/g1at/relay-updates/releases/tag/v3.0.0)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
+**现在可下载：[Relay 3.0.1](https://github.com/g1at/Relay/releases/tag/v3.0.1)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
 
-> **3.0.1 更新源迁移准备中。** 下一版将在本仓库和 `relay-updates` 同时发布，作为旧仓库最后一个版本；升级后，后续更新将转到本仓库。当前源码包含尚未随 3.0.0 发布的改进。
+> **3.0.1 为更新源迁移版本。** 本仓库与 [relay-updates](https://github.com/g1at/relay-updates/releases/tag/v3.0.1) 提供同一份安装包，作为旧仓库最后一个版本；升级后，后续更新转到本仓库。具体改进见 [3.0.1 更新说明](https://github.com/g1at/Relay/releases/tag/v3.0.1)。
 
 <details>
-<summary>3.0.1 发布后的下载与命令行安装入口</summary>
+<summary>下载与命令行安装入口</summary>
 
-源码仓库公开且 3.0.1 正式发布后，可从 [本仓库 Releases](https://github.com/g1at/Relay/releases) 下载，或在 PowerShell 5.1 / 7 中执行：
+可从 [本仓库 Releases](https://github.com/g1at/Relay/releases) 下载，或在 PowerShell 5.1 / 7 中执行：
 
 ```powershell
 & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/g1at/Relay/main/distribution/install.ps1')))
@@ -156,7 +156,7 @@ npm ci
 npm start
 ```
 
-仓库仍为私有时，克隆需要访问权限。服务商凭据在应用设置中填写，无需写进源码。
+服务商凭据在应用设置中填写，无需写进源码。
 
 ```powershell
 # JavaScript 回归测试
