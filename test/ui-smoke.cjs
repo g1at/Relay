@@ -10,17 +10,32 @@ const dir = path.join(root, '.codex-tmp', 'ui-smoke');
 fs.mkdirSync(dir, { recursive: true });
 // A failed run must not leave a previous successful result looking current.
 fs.rmSync(path.join(dir, 'result.json'), { force: true });
+fs.rmSync(path.join(dir, 'motion.json'), { force: true });
 app.setPath('userData', path.join(dir, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');
 const deadline = setTimeout(() => { console.error('UI check timed out'); app.exit(1); }, 55000);
 let win;
 const results = {};
+const motionStates = {};
 const evaluate = source => win.webContents.executeJavaScript(source);
 const settle = () => evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
 async function check(name, source) {
   const value = await evaluate(source);
   if (!value) throw new Error(name + ' failed');
   results[name] = true;
+}
+async function recordMotion(stage) {
+  const state = await evaluate(`(() => {
+    const shimmer = modelPopup.querySelector('.model-effort-shimmer');
+    const thumb = modelPopup.querySelector('.model-effort-thumb');
+    return { reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+      animationName: shimmer && getComputedStyle(shimmer).animationName,
+      thumbTransition: thumb && getComputedStyle(thumb).transitionDuration };
+  })()`);
+  motionStates[stage] = state;
+  fs.writeFileSync(path.join(dir, 'motion.json'), JSON.stringify(motionStates, null, 2));
+  console.log(JSON.stringify({ motion: stage, ...state }));
+  return state;
 }
 async function capture(name) {
   // Hidden windows may begin finite entrance animations on their first capture.
@@ -163,7 +178,13 @@ app.whenReady().then(async () => {
   await capture('models');
   await check('modelMenuActuallyVisible', "modelPopup.classList.contains('show') && getComputedStyle(modelPopup).opacity === '1' && modelPopup.getBoundingClientRect().height > 100");
   await evaluate("hideModelPopup(); currentEffort = 'max'; modelPopupHomePage = 'advanced'; showModelPopup();");
+  const hostMotion = await recordMotion('host');
+  // Hosted Windows runners may disable animations. Exercise both CSS branches explicitly.
+  win.webContents.debugger.attach('1.3');
+  await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'no-preference'}]});
+  await check('normalMotionPreferenceIsExplicit', "matchMedia('(prefers-reduced-motion: no-preference)').matches");
   await capture('reasoning');
+  await recordMotion('no-preference');
   await check('reasoningShimmerIsAnimated', "getComputedStyle(modelPopup.querySelector('.model-effort-shimmer')).animationName === 'relay-model-shimmer'");
   await check('reasoningSliderDescribesSelection', "(() => { const range = modelPopup.querySelector('input[type=range]'); return !!range && range.getAttribute('aria-valuetext') === '最大'; })()");
   await check('reasoningMaxUsesPurpleOverlay', "getComputedStyle(modelPopup.querySelector('.model-effort-fill'), '::before').opacity === '1'");
@@ -195,12 +216,14 @@ app.whenReady().then(async () => {
   win.webContents.sendInputEvent({type:'keyUp',keyCode:'Left'});
   await settle();
   await check('reasoningSliderAcceptsKeyboard', "modelPopup.querySelector('input[type=range]').getAttribute('aria-valuetext') !== '最大'");
-  win.webContents.debugger.attach('1.3');
   await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+  await recordMotion('reduce');
   await check('reducedMotionDisablesShimmer', "matchMedia('(prefers-reduced-motion: reduce)').matches && getComputedStyle(modelPopup.querySelector('.model-effort-shimmer')).animationName === 'none'");
   await check('reducedMotionDisablesSliderTransitions', "getComputedStyle(modelPopup.querySelector('.model-effort-thumb')).transitionDuration === '0s' && getComputedStyle(modelPopup.querySelector('.model-effort-fill'), '::before').transitionDuration === '0s'");
   await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {features:[]});
   win.webContents.debugger.detach();
+  await recordMotion('restored');
+  await check('hostMotionPreferenceIsRestored', `matchMedia('(prefers-reduced-motion: reduce)').matches === ${JSON.stringify(hostMotion.reducedMotion)}`);
   win.setSize(520, 900); await settle(); await evaluate('hideModelPopup(); showModelPopup();');
   await evaluate("contextUsageEl.classList.remove('hidden'); contextUsageLabel.textContent = '82%';");
   await capture('reasoning-narrow');
