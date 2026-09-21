@@ -112,6 +112,7 @@ function harness() {
     isAppPermissionMode, applyPermissionModeToLiveSessions: async () => ({}),
     isQuitting: false, _memoryUsageFlushTimer: null, flushMemoryUsage() {},
     usageStatsService: null, usageShutdownPending: false, usageShutdownComplete: false,
+    skillDraftService: null, skillDraftShutdownPending: false, skillDraftShutdownComplete: false,
     app: { on: (event, callback) => { appEvents[event] = callback; }, quit: () => { calls.push(['quit']); appEvents['before-quit']({ preventDefault: () => calls.push(['preventQuit']) }); } },
     attachmentDialog: { dispose: () => calls.push(['attachmentDispose']) }, browserPanelTools: { dispose() {} }, workspaceTools: { dispose() {} },
     flushStreamJournalEvents() {}, flushTaskJournalEvents() {}, scheduler: { shutdown() {} }, taskOrchestrator: null,

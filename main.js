@@ -31,7 +31,7 @@ const { buildRuntimePolicy, createRuntimeDiagnostics } = require('./sdk-runtime-
 const { loadNativeAgent } = require('./native-agent-definition');
 const { requiresFreshContract, contractFingerprints, migrateLegacyRuntimeContract, RUNTIME_FINGERPRINT_VERSION } = require('./sdk-runtime-contract');
 const { SUPPORTED_DIALOG_KINDS, createUserDialogHandler } = require('./sdk-user-dialog');
-const { safeFindings, stageSkillProposals, nativeWorkingDirectory } = require('./sdk-native-events');
+const { safeFindings, nativeWorkingDirectory } = require('./sdk-native-events');
 const { createHistoryManagement } = require('./sdk-history-management');
 const { createPluginStore } = require('./sdk-plugin-store');
 const { createToolProposalHook } = require('./sdk-tool-proposals');
@@ -76,7 +76,7 @@ const {
 } = require('./interaction-broker');
 const { createConversationPermissions, isConversationPermissionMode } = require('./conversation-permissions');
 const { CheckpointManager } = require('./checkpoint-manager');
-const { SkillDraftService } = require('./skill-draft-service');
+const { SkillDraftClient } = require('./skill-draft-client');
 const { prepareSkillGenerationWorkspace } = require('./skill-generation-workspace');
 const { SkillMaintenanceHost } = require('./skill-maintenance-host');
 const { normalizeMaintenancePolicy, evaluateMaintenanceRun } = require('./skill-maintenance-policy');
@@ -385,6 +385,8 @@ let taskEventJournal = null;
 let streamEventJournal = null;
 let checkpointManager = null;
 let skillDraftService = null;
+let skillDraftShutdownPending = false;
+let skillDraftShutdownComplete = false;
 const checkpointWorkspaceLocks = new Map();
 const checkpointConversationLocks = new Map();
 const checkpointUnlockWaiters = new Set();
@@ -494,8 +496,9 @@ if (HAS_SINGLE_INSTANCE_LOCK) {
   checkpointManager = initialize('文件检查点', () => new CheckpointManager({
     rootDir: path.join(app.getPath('userData'), 'checkpoints'),
   }));
-  skillDraftService = initialize('Skill 草稿', () => new SkillDraftService({
+  skillDraftService = initialize('Skill 草稿', () => new SkillDraftClient({
     skillsDir: SKILLS_DIR, draftsDir: path.join(app.getPath('userData'), 'skill-drafts'),
+    stagingRoot: path.join(app.getPath('userData'), 'sdk-skill-proposals'),
   }));
   if (taskEventJournal) taskEventSeq = taskEventJournal.lastSeq;
   if (streamEventJournal) streamEventSeq = streamEventJournal.lastSeq;
@@ -3111,11 +3114,13 @@ function spawnLiveSession({
         if (saved) { saved.sdkReviewFindings = { runId: sess.jobId, findings, cwd: sess.launchSpec.runtimeCwd || cwd, at: new Date().toISOString() }; persistConversationRecord(saved); }
       }
       if (input.tool_name === 'ProposeSkills') {
-        try { stageSkillProposals(input.tool_input, { service: skillDraftService, skillsDir: SKILLS_DIR,
-          stagingRoot: path.join(app.getPath('userData'), 'sdk-skill-proposals'),
-          sourceRef: { type: 'sdk-proposal', conversationId: convId, runId: sess.jobId, toolUseId: input.tool_use_id },
-          onDraft: draft => broadcastSkillDraftEvent(draft.deduplicated ? 'skillDraft.updated' : 'skillDraft.created', { draft }) }); }
-        catch (_) {
+        try {
+          const drafts = await skillDraftService.stageProposals(input.tool_input, {
+            sourceRef: { type: 'sdk-proposal', conversationId: convId, runId: sess.jobId, toolUseId: input.tool_use_id },
+          });
+          for (const draft of drafts) broadcastSkillDraftEvent(draft.deduplicated ? 'skillDraft.updated' : 'skillDraft.created', { draft });
+        } catch (error) {
+          for (const draft of error.drafts || []) broadcastSkillDraftEvent(draft.deduplicated ? 'skillDraft.updated' : 'skillDraft.created', { draft });
           observer.native.put('skill-proposal-failure', { kind: 'skill_proposal', status: 'error', reason: '技能建议未能保存，请检查技能格式及原技能是否仍存在。' });
           sess.onEvent?.({ jobId: sess.jobId, type: 'system', subtype: 'notification', level: 'warning',
             title: '技能建议未能保存', message: '请检查技能格式及原技能是否仍存在；已有技能未被覆盖。' });
@@ -4841,14 +4846,20 @@ function broadcastSkillDraftEvent(type, payload) {
   } catch (_) {}
 }
 
-function skillDraftResult(fn, key = null) {
+async function skillDraftResult(fn, key = null) {
   try {
     if (!skillDraftService) throw new Error('Skill 草稿服务不可用');
-    const value = fn();
+    const value = await fn();
     return key ? { ok: true, [key]: value } : { ok: true, data: value };
   } catch (e) {
     return { ok: false, error: e.message, code: e.code || null, details: e.details || null };
   }
+}
+
+// Keep app-owned live skill writes outside a worker's validation/swap window.
+// Only the short filesystem transaction belongs here, not model calls or reloads.
+function withSkillLibraryWrite(write) {
+  return skillDraftService ? skillDraftService.runExclusive(write) : Promise.resolve().then(write);
 }
 ipcMain.handle('skillDrafts:list', (_e, filter = {}) => skillDraftResult(
   () => skillDraftService.list(filter), 'items',
@@ -4859,15 +4870,14 @@ ipcMain.handle('skillDrafts:diff', (_e, id) => skillDraftResult(
 ipcMain.handle('skillDrafts:validate', (_e, id) => skillDraftResult(
   () => skillDraftService.validate(id), 'validation',
 ));
-ipcMain.handle('skillDrafts:rebase', (_e, { id, options } = {}) => {
-  const result = skillDraftResult(() => skillDraftService.rebaseDraft(id, options || {}), 'result');
+ipcMain.handle('skillDrafts:rebase', async (_e, { id, options } = {}) => {
+  const result = await skillDraftResult(() => skillDraftService.rebaseDraft(id, options || {}), 'result');
   if (result.ok) broadcastSkillDraftEvent('skillDraft.rebased', { draftId: id, result: result.result });
   return result;
 });
 ipcMain.handle('skillDrafts:publish', async (_e, id) => {
-  const result = skillDraftResult(() => skillDraftService.publish(id), 'result');
-  if (result.ok) {
-    const draft = result.result && result.result.draft;
+  const result = await skillDraftResult(() => skillDraftService.publish(id, published => {
+    const draft = published && published.draft;
     try {
       if (draft && draft.skillName) {
         const sidecar = readSkillUsage();
@@ -4881,17 +4891,17 @@ ipcMain.handle('skillDrafts:publish', async (_e, id) => {
         }
         sidecar[draft.skillName] = record;
         writeSkillUsage(sidecar);
-        getSkillMaintenanceHost().recordPublished(result.result);
+        getSkillMaintenanceHost().recordPublished(published);
         notifySkillUsageUpdated({ reason: 'draft-published', skillName: draft.skillName });
       }
     } catch (e) { console.warn('[skill-draft] 更新技能生命周期失败: %s', e.message); }
-    broadcastSkillDraftEvent('skillDraft.published', { draftId: id, result: result.result });
-    result.liveReload = await reloadSkillsInLiveSessions('draft-published');
-  }
+    broadcastSkillDraftEvent('skillDraft.published', { draftId: id, result: published });
+  }), 'result');
+  if (result.ok) result.liveReload = await reloadSkillsInLiveSessions('draft-published');
   return result;
 });
-ipcMain.handle('skillDrafts:reject', (_e, { id, reason } = {}) => {
-  const result = skillDraftResult(() => skillDraftService.reject(id, reason), 'draft');
+ipcMain.handle('skillDrafts:reject', async (_e, { id, reason } = {}) => {
+  const result = await skillDraftResult(() => skillDraftService.reject(id, reason), 'draft');
   if (result.ok) broadcastSkillDraftEvent('skillDraft.rejected', { draft: result.draft });
   return result;
 });
@@ -4899,11 +4909,10 @@ ipcMain.handle('skillDrafts:history', (_e, skillName) => skillDraftResult(
   () => skillDraftService.listHistory(skillName), 'items',
 ));
 ipcMain.handle('skillDrafts:rollback', async (_e, { skillName, versionId, options } = {}) => {
-  const result = skillDraftResult(() => skillDraftService.rollback(skillName, versionId, options || {}), 'result');
-  if (result.ok) {
+  const result = await skillDraftResult(() => skillDraftService.rollback(skillName, versionId, options || {}, restored => {
     try {
       const sidecar = readSkillUsage();
-      if (result.result && result.result.restored && result.result.restored.exists) {
+      if (restored && restored.restored && restored.restored.exists) {
         const record = sidecar[skillName] || {};
         record.state = 'active';
         record.archivedAt = null;
@@ -4917,9 +4926,9 @@ ipcMain.handle('skillDrafts:rollback', async (_e, { skillName, versionId, option
       writeSkillUsage(sidecar);
       notifySkillUsageUpdated({ reason: 'history-rollback', skillName });
     } catch (e) { console.warn('[skill-draft] 回滚后生命周期同步失败: %s', e.message); }
-    broadcastSkillDraftEvent('skillDraft.rolledBack', { skillName, versionId, result: result.result });
-    result.liveReload = await reloadSkillsInLiveSessions('history-rollback');
-  }
+    broadcastSkillDraftEvent('skillDraft.rolledBack', { skillName, versionId, result: restored });
+  }), 'result');
+  if (result.ok) result.liveReload = await reloadSkillsInLiveSessions('history-rollback');
   return result;
 });
 
@@ -7034,7 +7043,14 @@ async function generateRelaySkillPresentation(skillDir) {
       || fm.description
       || '',
   };
-  writeRelaySkillPresentation(skillDir, presentation);
+  await withSkillLibraryWrite(() => {
+    // Generation can outlive an archive, edit or publication. Never recreate a
+    // removed package or attach a summary generated from a different SKILL.md.
+    if (!fs.existsSync(skillFile) || fs.readFileSync(skillFile, 'utf8') !== raw) {
+      throw new Error('技能内容已变化，请重新生成显示信息');
+    }
+    writeRelaySkillPresentation(skillDir, presentation);
+  });
   console.log('[skill-meta] relay.yaml 已生成: %s source=%s', skillName, generated ? 'llm' : 'fallback');
   return { ...presentation, generatedBy: generated ? 'llm' : 'fallback' };
 }
@@ -7459,19 +7475,22 @@ ipcMain.handle('data:readItem', (_e, { kind, key } = {}) => {
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
-ipcMain.handle('data:writeItem', (_e, { kind, key, content } = {}) => {
+ipcMain.handle('data:writeItem', async (_e, { kind, key, content } = {}) => {
   try {
-    if (kind === 'archivedSkill') return { ok: false, message: '归档技能仅支持查看' };
-    const item = managedDataItem(kind, key);
-    if (!item) return { ok: false, message: '非法条目' };
-    if (!fs.existsSync(item.file)) return { ok: false, message: '文件不存在' };
-    const knownSkillOwner = kind === 'skill' ? skillMaintenanceOwnership(path.basename(String(key || ''))) : null;
-    const tmp = item.file + '.tmp';
-    fs.writeFileSync(tmp, Buffer.from(String(content == null ? '' : content), 'utf8'));
-    fs.renameSync(tmp, item.file);
-    if (kind === 'skill') recordSkillActivity(path.basename(String(key || '')), 'edited', { updateOwnedHash: knownSkillOwner?.verified === true });
-    // 技能 Markdown 的描述变化不影响 transcript 派生的历史用量，无需让用量索引失效。
-    return { ok: true };
+    const write = () => {
+      if (kind === 'archivedSkill') return { ok: false, message: '归档技能仅支持查看' };
+      const item = managedDataItem(kind, key);
+      if (!item) return { ok: false, message: '非法条目' };
+      if (!fs.existsSync(item.file)) return { ok: false, message: '文件不存在' };
+      const knownSkillOwner = kind === 'skill' ? skillMaintenanceOwnership(path.basename(String(key || ''))) : null;
+      const tmp = item.file + '.tmp';
+      fs.writeFileSync(tmp, Buffer.from(String(content == null ? '' : content), 'utf8'));
+      fs.renameSync(tmp, item.file);
+      if (kind === 'skill') recordSkillActivity(path.basename(String(key || '')), 'edited', { updateOwnedHash: knownSkillOwner?.verified === true });
+      // 技能 Markdown 的描述变化不影响 transcript 派生的历史用量，无需让用量索引失效。
+      return { ok: true };
+    };
+    return kind === 'skill' ? await withSkillLibraryWrite(write) : write();
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
@@ -7530,12 +7549,14 @@ ipcMain.handle('data:renameAgent', (_e, { file, displayName }) => {
     return { ok: true, items: listAgentNames() };
   } catch (e) { return { ok: false, message: e.message }; }
 });
-ipcMain.handle('data:removeSkill', (_e, { name }) => {
+ipcMain.handle('data:removeSkill', async (_e, { name }) => {
   try {
-    const p = path.join(SKILLS_DIR, path.basename(String(name || '')));
-    getSkillMaintenanceHost().forget(path.basename(String(name || '')));
-    if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
-    return { ok: true, items: listSkillNames() };
+    return await withSkillLibraryWrite(() => {
+      const p = path.join(SKILLS_DIR, path.basename(String(name || '')));
+      getSkillMaintenanceHost().forget(path.basename(String(name || '')));
+      if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+      return { ok: true, items: listSkillNames() };
+    });
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
@@ -7609,7 +7630,8 @@ function tickSkillMaintenance() {
     const currentPolicy = normalizeMaintenancePolicy(readAppSettings());
     if (!currentPolicy.autoArchive) return;
     const usage = loadSkillUsageState();
-    const result = host.run({ ...skillMaintenanceRuntimeSnapshot(), policy: currentPolicy, usage: usage.map, usageReady: usage.ready });
+    const result = await withSkillLibraryWrite(() => host.run({ ...skillMaintenanceRuntimeSnapshot(),
+      policy: normalizeMaintenancePolicy(readAppSettings()), usage: usage.map, usageReady: usage.ready }));
     await synchronizeSkillArchives(result.archived);
   })().catch(async error => {
     await synchronizeSkillArchives(error.archived || []);
@@ -7816,12 +7838,14 @@ ipcMain.handle('skills:archive', async (_e, { name } = {}) => {
   try {
     const n = path.basename(String(name || ''));
     if (!n || n.startsWith('.')) return { ok: false, message: '非法技能名' };
-    const archived = getSkillMaintenanceHost().archive(n);
-    const sidecar = readSkillUsage();
-    const rec = sidecar[n] || { firstSeenAt: new Date().toISOString(), pinned: false };
-    rec.state = 'archived'; rec.archivedAt = archived.archivedAt; rec.backupId = archived.backupId;
-    sidecar[n] = rec;
-    writeSkillUsage(sidecar);
+    await withSkillLibraryWrite(() => {
+      const archived = getSkillMaintenanceHost().archive(n);
+      const sidecar = readSkillUsage();
+      const rec = sidecar[n] || { firstSeenAt: new Date().toISOString(), pinned: false };
+      rec.state = 'archived'; rec.archivedAt = archived.archivedAt; rec.backupId = archived.backupId;
+      sidecar[n] = rec;
+      writeSkillUsage(sidecar);
+    });
     return { ok: true, liveReload: await reloadSkillsInLiveSessions('skill-archived') };
   } catch (e) { return { ok: false, message: e.message }; }
 });
@@ -7831,36 +7855,40 @@ ipcMain.handle('skills:restore', async (_e, { name } = {}) => {
   try {
     const n = path.basename(String(name || ''));
     if (!n || n.startsWith('.')) return { ok: false, message: '非法技能名' };
-    const restored = getSkillMaintenanceHost().restore(n);
-    const sidecar = readSkillUsage();
-    const rec = sidecar[n] || { firstSeenAt: new Date().toISOString(), pinned: false };
-    rec.state = 'active'; rec.archivedAt = null; rec.restoredAt = restored.restoredAt;
-    sidecar[n] = rec;
-    writeSkillUsage(sidecar);
+    await withSkillLibraryWrite(() => {
+      const restored = getSkillMaintenanceHost().restore(n);
+      const sidecar = readSkillUsage();
+      const rec = sidecar[n] || { firstSeenAt: new Date().toISOString(), pinned: false };
+      rec.state = 'active'; rec.archivedAt = null; rec.restoredAt = restored.restoredAt;
+      sidecar[n] = rec;
+      writeSkillUsage(sidecar);
+    });
     return { ok: true, liveReload: await reloadSkillsInLiveSessions('skill-restored') };
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
 // 永久删除归档技能：只允许删除 .archive 下的直接子目录，并同步清理生命周期 sidecar。
-ipcMain.handle('skills:deleteArchived', (_e, { name } = {}) => {
+ipcMain.handle('skills:deleteArchived', async (_e, { name } = {}) => {
   try {
-    const n = path.basename(String(name || ''));
-    if (!n || n.startsWith('.')) return { ok: false, message: '非法技能名' };
-    const archivedRoot = path.resolve(SKILL_ARCHIVE_DIR());
-    const target = path.resolve(archivedRoot, n);
-    const relative = path.relative(archivedRoot, target);
-    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
-      return { ok: false, message: '非法归档路径' };
-    }
-    if (!fs.existsSync(target)) return { ok: false, message: '归档中无此技能' };
-    getSkillMaintenanceHost().forget(n);
-    fs.rmSync(target, { recursive: true, force: true });
-    const sidecar = readSkillUsage();
-    if (sidecar[n]) {
-      delete sidecar[n];
-      writeSkillUsage(sidecar);
-    }
-    return { ok: true };
+    return await withSkillLibraryWrite(() => {
+      const n = path.basename(String(name || ''));
+      if (!n || n.startsWith('.')) return { ok: false, message: '非法技能名' };
+      const archivedRoot = path.resolve(SKILL_ARCHIVE_DIR());
+      const target = path.resolve(archivedRoot, n);
+      const relative = path.relative(archivedRoot, target);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+        return { ok: false, message: '非法归档路径' };
+      }
+      if (!fs.existsSync(target)) return { ok: false, message: '归档中无此技能' };
+      getSkillMaintenanceHost().forget(n);
+      fs.rmSync(target, { recursive: true, force: true });
+      const sidecar = readSkillUsage();
+      if (sidecar[n]) {
+        delete sidecar[n];
+        writeSkillUsage(sidecar);
+      }
+      return { ok: true };
+    });
   } catch (e) { return { ok: false, message: e.message }; }
 });
 
@@ -8054,12 +8082,13 @@ function runSkillReviewJob({ conversationText, workingDir, triggerReason } = {})
   }).then(async () => {
     const drafts = [];
     if (!skillDraftService) throw new Error('Skill 草稿服务不可用');
-    for (const entry of fs.readdirSync(stagingRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    // Admit the complete finalized batch before yielding so shutdown drains all candidates.
+    await Promise.all(fs.readdirSync(stagingRoot, { withFileTypes: true }).map(async entry => {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) return;
       const packageDir = path.join(stagingRoot, entry.name);
-      if (!fs.existsSync(path.join(packageDir, 'SKILL.md'))) continue;
+      if (!fs.existsSync(path.join(packageDir, 'SKILL.md'))) return;
       try {
-        const draft = skillDraftService.createDraft({
+        const draft = await skillDraftService.createDraft({
           skillName: entry.name,
           stagingDir: packageDir,
           baseDir,
@@ -8073,7 +8102,7 @@ function runSkillReviewJob({ conversationText, workingDir, triggerReason } = {})
           console.warn('[skill-review] 候选技能 %s 无法生成草稿: %s', entry.name, e.message);
         }
       }
-    }
+    }));
     const newDrafts = drafts.filter(draft => !draft.deduplicated);
     if (newDrafts.length) {
       try {
@@ -8229,12 +8258,13 @@ async function finalizeSkillCuratorDrafts(result, context) {
   try {
     if (!result || result.ok !== true || !stagingRoot || !fs.existsSync(stagingRoot)) return { drafts };
     if (!context.baseDir || !fs.existsSync(context.baseDir)) throw new Error('技能生成基线缺失，请重新运行体检');
-    for (const entry of fs.readdirSync(stagingRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    // Admit the complete finalized batch before yielding so shutdown drains all candidates.
+    await Promise.all(fs.readdirSync(stagingRoot, { withFileTypes: true }).map(async entry => {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) return;
       const packageDir = path.join(stagingRoot, entry.name);
-      if (!fs.existsSync(path.join(packageDir, 'SKILL.md'))) continue;
+      if (!fs.existsSync(path.join(packageDir, 'SKILL.md'))) return;
       try {
-        const draft = skillDraftService.createDraft({
+        const draft = await skillDraftService.createDraft({
           skillName: entry.name,
           stagingDir: packageDir,
           baseDir: context.baseDir,
@@ -8248,7 +8278,7 @@ async function finalizeSkillCuratorDrafts(result, context) {
           console.warn('[skill-curator] 候选技能 %s 无法生成草稿: %s', entry.name, e.message);
         }
       }
-    }
+    }));
     const newDrafts = drafts.filter(draft => !draft.deduplicated);
     if (newDrafts.length) {
       result.summary = `有 ${newDrafts.length} 个技能更新等待审核`;
@@ -8371,18 +8401,20 @@ ipcMain.handle('data:importZip', async (_e, { kind, zipPath } = {}) => {
       const pkgSkills = path.join(root, '.claude', 'skills');
       let skillNote = '';
       if (fs.existsSync(pkgSkills)) {
-        fs.mkdirSync(SKILLS_DIR, { recursive: true });
-        let sc = 0;
-        const importedSkillDirs = [];
-        for (const e of fs.readdirSync(pkgSkills, { withFileTypes: true })) {
-          if (e.isDirectory()) {
-            const dest = path.join(SKILLS_DIR, e.name);
-            getSkillMaintenanceHost().forget(e.name);
-            fs.cpSync(path.join(pkgSkills, e.name), dest, { recursive: true, force: true });
-            importedSkillDirs.push(dest);
-            sc++;
+        const importedSkillDirs = await withSkillLibraryWrite(() => {
+          fs.mkdirSync(SKILLS_DIR, { recursive: true });
+          const directories = [];
+          for (const e of fs.readdirSync(pkgSkills, { withFileTypes: true })) {
+            if (e.isDirectory()) {
+              const dest = path.join(SKILLS_DIR, e.name);
+              getSkillMaintenanceHost().forget(e.name);
+              fs.cpSync(path.join(pkgSkills, e.name), dest, { recursive: true, force: true });
+              directories.push(dest);
+            }
           }
-        }
+          return directories;
+        });
+        const sc = importedSkillDirs.length;
         if (sc) {
           const meta = await generateImportedSkillPresentations(importedSkillDirs);
           skillNote = `，并附带 ${sc} 个技能`;
@@ -8392,20 +8424,22 @@ ipcMain.handle('data:importZip', async (_e, { kind, zipPath } = {}) => {
       return { ok: true, message: `已导入 ${mds.length} 个 Agent${skillNote}`, items: listAgentNames() };
     }
     // skill
-    fs.mkdirSync(SKILLS_DIR, { recursive: true });
     const dirs = findDirsWithFile(root, 'SKILL.md', 3);
     if (!dirs.length) return { ok: false, message: '压缩包里没找到技能(缺少 SKILL.md)' };
-    let count = 0;
-    const importedSkillDirs = [];
-    for (const d of dirs) {
-      // SKILL.md 直接在解压根(无文件夹包裹)→ 用 zip 名;否则用所在文件夹名
-      const name = (d === temp) ? path.basename(zip, path.extname(zip)) : path.basename(d);
-      const dest = path.join(SKILLS_DIR, name);
-      getSkillMaintenanceHost().forget(name);
-      fs.cpSync(d, dest, { recursive: true, force: true });
-      importedSkillDirs.push(dest);
-      count++;
-    }
+    const importedSkillDirs = await withSkillLibraryWrite(() => {
+      fs.mkdirSync(SKILLS_DIR, { recursive: true });
+      const directories = [];
+      for (const d of dirs) {
+        // SKILL.md 直接在解压根(无文件夹包裹)→ 用 zip 名;否则用所在文件夹名
+        const name = (d === temp) ? path.basename(zip, path.extname(zip)) : path.basename(d);
+        const dest = path.join(SKILLS_DIR, name);
+        getSkillMaintenanceHost().forget(name);
+        fs.cpSync(d, dest, { recursive: true, force: true });
+        directories.push(dest);
+      }
+      return directories;
+    });
+    const count = importedSkillDirs.length;
     const meta = await generateImportedSkillPresentations(importedSkillDirs);
     const metaNote = meta.fallbackCount
       ? `；${meta.fallbackCount} 个中文摘要生成失败，已使用原始说明`
@@ -8749,6 +8783,17 @@ app.on('window-all-closed', () => {
 // 退出前兜底清理:无论从哪条路径退出,都确保子进程被杀、托盘被销毁(否则托盘图标残留)
 app.on('before-quit', event => {
   isQuitting = true;
+  if (skillDraftService && !skillDraftShutdownComplete) {
+    event.preventDefault();
+    if (!skillDraftShutdownPending) {
+      skillDraftShutdownPending = true;
+      skillDraftService.close().catch(error => console.warn('[skill-draft] 退出排空失败:', error.message)).finally(() => {
+        skillDraftShutdownComplete = true;
+        app.quit();
+      });
+    }
+    return;
+  }
   if (miniChat && !miniShutdownComplete) {
     event.preventDefault();
     if (!miniShutdownPending) {

@@ -9306,6 +9306,67 @@ async function openSkillVersionHistory(skillName, onRolledBack = null) {
   overlay.querySelector('.preview-close').focus();
 }
 
+// 合并同一批通知和操作回调；读取期间的新通知必须留下下一轮刷新。
+// hold 用于保留确认/提交中的行，既不提前读取旧状态，也不让迟到响应重建 busy 行。
+function createSkillPanelRefreshQueue({ load, render, onError, isConnected }) {
+  let pending = false, pendingOptions = {}, revision = 0, holds = 0, running = false, timer = null;
+  let waiters = [];
+  const mergeOptions = (left, right) => ({ ...left, ...right,
+    refresh: left.refresh === true || right.refresh === true,
+    throwOnError: left.throwOnError === true || right.throwOnError === true,
+  });
+  const settle = error => {
+    const current = waiters; waiters = [];
+    current.forEach(({ resolve, reject }) => error ? reject(error) : resolve());
+  };
+  const schedule = () => {
+    if (running || timer !== null || holds || !pending) return;
+    timer = setTimeout(drain, 32);
+  };
+  const drain = async () => {
+    timer = null;
+    if (holds || running || !pending) return;
+    if (!isConnected()) { pending = false; pendingOptions = {}; settle(); return; }
+    const options = pendingOptions, startedRevision = revision;
+    pending = false; pendingOptions = {}; running = true;
+    let failure;
+    try {
+      const result = await load(options);
+      if (holds || revision !== startedRevision) {
+        // A completed read cannot cover invalidations that arrived after it began.
+        pending = true;
+      } else if (isConnected()) render(result, options);
+    } catch (error) {
+      failure = error;
+      if (holds || revision !== startedRevision) pending = true;
+      else if (isConnected()) onError(error, options);
+    } finally {
+      running = false;
+      if (pending) schedule(); else settle(failure);
+    }
+  };
+  const invalidate = (options = {}) => {
+    pending = true; revision++; pendingOptions = mergeOptions(pendingOptions, options); schedule();
+  };
+  return {
+    invalidate,
+    whenIdle() {
+      return pending || running
+        ? new Promise((resolve, reject) => waiters.push({ resolve, reject }))
+        : Promise.resolve();
+    },
+    request(options = {}) {
+      const promise = new Promise((resolve, reject) => waiters.push({ resolve, reject }));
+      invalidate(options); return promise;
+    },
+    hold() {
+      holds++;
+      let released = false;
+      return () => { if (!released) { released = true; holds--; schedule(); } };
+    },
+  };
+}
+
 // 技能 Curator 面板:在"导入/列表/删除"基础上,补用量遥测(从 transcript 现算)+ 闲置标记 +
 //   置顶(pin)/归档/恢复。状态机只标记不自动归档;归档是移动到 .archive/(可恢复)。
 //   mount = #skillSection 容器。
@@ -9431,14 +9492,15 @@ async function renderSkillCuratorPanel(mount) {
   bindSettingsSegmented(mount);
 
   const draftApi = window.api && window.api.skillDrafts;
-  let draftLoadSequence = 0;
 
   const draftExpanded = new Set();
   const rememberExpansion = (details, key) => {
     details.open = draftExpanded.has(key);
     details.addEventListener('toggle', () => { if (details.isConnected) { if (details.open) draftExpanded.add(key); else draftExpanded.delete(key); } });
   };
-  const refreshDraftState = () => Promise.all([reloadDrafts(), reload({ refresh: false })]);
+  const refreshDraftState = () => {
+    draftRefresh.invalidate(); overviewRefresh.invalidate({ refresh: false });
+  };
 
   const renderDraftRow = (draft, options = {}) => {
     const row = document.createElement('div');
@@ -9484,10 +9546,25 @@ async function renderSkillCuratorPanel(mount) {
       const text = document.createElement('p'); text.textContent = validation.title || '请查看差异并修复技能包结构后，再生成更新。';
       problems.append(summary, text); row.querySelector('.dp-item-main').append(problems);
     }
+    let releaseRefresh = null;
     const setBusy = value => {
+      if (value && !releaseRefresh) {
+        const releaseDraft = draftRefresh.hold(), releaseOverview = overviewRefresh.hold();
+        releaseRefresh = () => { releaseDraft(); releaseOverview(); };
+      } else if (!value && releaseRefresh) {
+        releaseRefresh(); releaseRefresh = null;
+      }
       row.dataset.busy = value ? '1' : '';
       row.querySelectorAll('button').forEach(button => { button.disabled = value; });
       if (!value) syncState();
+    };
+    const finishBusy = async () => {
+      if (releaseRefresh) { releaseRefresh(); releaseRefresh = null; }
+      // Keep the old row disabled until its replacement is ready; a slow list
+      // must not expose a second publish/reject for the just-completed mutation.
+      try { await Promise.all([draftRefresh.whenIdle(), overviewRefresh.whenIdle()]); }
+      catch (_) { /* The refresh queues already display their read error. */ }
+      finally { if (row.isConnected) setBusy(false); }
     };
     const failed = async (response, fallback) => {
       if (response?.code === 'BASE_CONFLICT' || response?.code === 'CURRENT_CHANGED') readiness = { ...readiness, key: 'stale', label: '当前版本已变化', canPublish: false, canRebase: true };
@@ -9496,15 +9573,15 @@ async function renderSkillCuratorPanel(mount) {
       syncState();
       const message = row.querySelector('[data-draft-message]'); message.hidden = false; message.textContent = skillDraftErrorMessage(response, fallback);
       showToast(message.textContent);
-      await reloadDrafts();
+      draftRefresh.invalidate();
     };
-    diffButton.addEventListener('click', async () => { setBusy(true); try { await openSkillDraftDiff(draft); } finally { if (row.isConnected) setBusy(false); } });
+    diffButton.addEventListener('click', async () => { setBusy(true); try { await openSkillDraftDiff(draft); } finally { await finishBusy(); } });
     historyButton.addEventListener('click', () => openSkillVersionHistory(draft.skillName, refreshDraftState));
     rebaseButton.addEventListener('click', async () => {
       if (!readiness.canRebase) return;
       setBusy(true);
       try { await openSkillDraftRebase(draft, refreshDraftState); }
-      finally { if (row.isConnected) setBusy(false); }
+      finally { await finishBusy(); }
     });
     publishButton.addEventListener('click', async () => {
       if (!readiness.canPublish || row.dataset.busy) return;
@@ -9516,7 +9593,7 @@ async function renderSkillCuratorPanel(mount) {
           if (!checked || checked.ok === false) { await failed(checked, '草稿校验失败'); return; }
           if (checked.validation?.ok === false) { await failed({ code: 'DRAFT_INVALID' }, '草稿需要修复'); return; }
           if (checked.validation?.readiness === 'stale' || checked.validation?.baseMatches === false) { await failed({ code: 'BASE_CONFLICT' }, '当前技能已变化'); return; }
-          if (checked.validation?.readiness === 'already_applied') { await reloadDrafts(); showToast('当前版本已包含这份更新'); return; }
+          if (checked.validation?.readiness === 'already_applied') { draftRefresh.invalidate(); showToast('当前版本已包含这份更新'); return; }
         }
         const ok = await customConfirm({ title: `发布「${draft.skillName}」？`, message: `${operation}，${changes.text}。发布前会保存当前版本，之后可安全回滚。`, confirmText: '发布', cancelText: '取消' });
         if (!ok) return;
@@ -9524,19 +9601,19 @@ async function renderSkillCuratorPanel(mount) {
         if (!response || response.ok === false) { await failed(response, '发布失败'); return; }
         showToast(`已发布技能「${draft.skillName}」`); await refreshDraftState();
       } catch (error) { showToast(error.message || '发布失败'); }
-      finally { if (row.isConnected) setBusy(false); }
+      finally { await finishBusy(); }
     });
     rejectButton.addEventListener('click', async () => {
       if (row.dataset.busy || typeof draftApi?.reject !== 'function') return;
-      const ok = await customConfirm({ title: `忽略「${draft.skillName}」的这份更新？`, message: '记录会移入已处理，不改动正式技能；其他候选仍然保留。', confirmText: '忽略', cancelText: '取消', danger: true });
-      if (!ok) return;
       setBusy(true);
       try {
+        const ok = await customConfirm({ title: `忽略「${draft.skillName}」的这份更新？`, message: '记录会移入已处理，不改动正式技能；其他候选仍然保留。', confirmText: '忽略', cancelText: '取消', danger: true });
+        if (!ok) return;
         const response = await draftApi.reject(draft.id, '用户在插件页忽略技能草稿');
         if (!response || response.ok === false) { await failed(response, '忽略失败'); return; }
-        showToast('更新已移入已处理'); await reloadDrafts();
+        showToast('更新已移入已处理'); draftRefresh.invalidate();
       } catch (error) { showToast(error.message || '忽略失败'); }
-      finally { if (row.isConnected) setBusy(false); }
+      finally { await finishBusy(); }
     });
     bindDpMenu(row);
     const entries = Array.isArray(draft.sources) && draft.sources.length ? draft.sources : [{ sourceRef: draft.sourceRef, note: draft.note }];
@@ -9581,31 +9658,32 @@ async function renderSkillCuratorPanel(mount) {
     archivedList.replaceChildren(...processed.map(draft => renderDraftRow(draft)));
   };
 
-  const reloadDrafts = async () => {
-    const sequence = ++draftLoadSequence;
-    const list = q('[data-draft-list]');
-    const count = q('[data-draft-count]');
-    if (!draftApi || typeof draftApi.list !== 'function') {
-      if (list) list.innerHTML = '<div class="dp-empty">当前版本暂不支持 Skill 草稿</div>';
-      if (count) count.textContent = '不可用';
-      return;
-    }
-    try {
-      const response = await draftApi.list({});
-      if (sequence !== draftLoadSequence || !mount.isConnected) return;
+  const draftRefresh = createSkillPanelRefreshQueue({
+    isConnected: () => mount.isConnected,
+    load: () => typeof draftApi?.list === 'function' ? draftApi.list({}) : null,
+    render: response => {
+      const list = q('[data-draft-list]');
+      const count = q('[data-draft-count]');
+      if (!draftApi || typeof draftApi.list !== 'function') {
+        if (list) list.innerHTML = '<div class="dp-empty">当前版本暂不支持 Skill 草稿</div>';
+        if (count) count.textContent = '不可用';
+        return;
+      }
       if (!response || response.ok === false) {
         if (list) list.innerHTML = '<div class="dp-empty">草稿加载失败，请稍后重试</div>';
         if (count) count.textContent = '加载失败';
         return;
       }
       renderDrafts(Array.isArray(response) ? response : response.items);
-    } catch (error) {
-      if (sequence !== draftLoadSequence || !mount.isConnected) return;
+    },
+    onError: error => {
+      const list = q('[data-draft-list]'), count = q('[data-draft-count]');
       if (list) list.innerHTML = '<div class="dp-empty">草稿加载失败，请稍后重试</div>';
       if (count) count.textContent = '加载失败';
       console.warn('[skills] Skill 草稿读取失败', error);
-    }
-  };
+    },
+  });
+  const reloadDrafts = () => draftRefresh.request().catch(() => {});
 
   q('[data-draft-refresh]').addEventListener('click', async (event) => {
     const button = event.currentTarget;
@@ -9797,29 +9875,31 @@ async function renderSkillCuratorPanel(mount) {
   }
 
   // 拉数据 + 渲染。refresh=false 用于 Worker 完成通知，只读取新索引，避免再次启动校准。
-  const reload = async ({ refresh = true, throwOnError = false } = {}) => {
-    if (!mount.isConnected || !q('[data-list]')) return;
-    const r = await window.api.skills.overview({ refresh });
-    if (!mount.isConnected || !q('[data-list]')) return;
-    if (!r || !r.ok) {
-      const message = r?.message || '技能列表读取失败';
-      if (throwOnError) throw new Error(message);
-      showToast(message); return;
-    }
-    skillOverviewCache = r;
-    renderList(r.items, r.usageReady !== false);
-    renderArchived(r.archived);
-    // 回填阈值下拉(程序设值,bindCustomSelects 只处理点击)
-    const root = q('#skill-stale-days');
-    if (root && r.staleDays != null) {
-      const val = String(r.staleDays);
-      root.dataset.value = val;
-      const opt = root.querySelector(`.cs-option[data-value="${val}"]`);
-      const txt = root.querySelector('.cs-text');
-      if (txt) txt.textContent = opt ? opt.textContent.trim() : (val + ' 天');
-      root.querySelectorAll('.cs-option').forEach((o) => o.classList.toggle('selected', o === opt));
-    }
-  };
+  const overviewRefresh = createSkillPanelRefreshQueue({
+    isConnected: () => mount.isConnected && !!q('[data-list]'),
+    load: ({ refresh = false }) => window.api.skills.overview({ refresh }),
+    render: r => {
+      if (!r || !r.ok) {
+        const message = r?.message || '技能列表读取失败';
+        throw new Error(message);
+      }
+      skillOverviewCache = r;
+      renderList(r.items, r.usageReady !== false);
+      renderArchived(r.archived);
+      // 回填阈值下拉(程序设值,bindCustomSelects 只处理点击)
+      const root = q('#skill-stale-days');
+      if (root && r.staleDays != null) {
+        const val = String(r.staleDays);
+        root.dataset.value = val;
+        const opt = root.querySelector(`.cs-option[data-value="${val}"]`);
+        const txt = root.querySelector('.cs-text');
+        if (txt) txt.textContent = opt ? opt.textContent.trim() : (val + ' 天');
+        root.querySelectorAll('.cs-option').forEach((o) => o.classList.toggle('selected', o === opt));
+      }
+    },
+    onError: (error, { throwOnError }) => { if (!throwOnError) showToast(error.message); },
+  });
+  const reload = ({ refresh = true, throwOnError = false } = {}) => overviewRefresh.request({ refresh, throwOnError }).catch(error => { if (throwOnError) throw error; });
 
   // 阈值切换 → 存 + 重算状态机 + 刷新
   const staleRoot = q('#skill-stale-days');
@@ -10005,16 +10085,16 @@ async function renderSkillCuratorPanel(mount) {
   if (skillUsageUpdateOff) skillUsageUpdateOff();
   skillUsageUpdateOff = window.api.skills.onUsageUpdated(() => {
     if (!mount.isConnected) return;
-    void reload({ refresh: false }).catch(error => showToast(error.message));
+    overviewRefresh.invalidate({ refresh: false });
   });
 
   if (skillDraftEventOff) skillDraftEventOff();
   if (draftApi && typeof draftApi.onEvent === 'function') {
     skillDraftEventOff = draftApi.onEvent((event) => {
       if (!mount.isConnected) return;
-      void reloadDrafts();
+      draftRefresh.invalidate();
       if (event && ['skillDraft.published', 'skillDraft.rolledBack'].includes(event.type)) {
-        void reload({ refresh: false }).catch(error => showToast(error.message));
+        overviewRefresh.invalidate({ refresh: false });
       }
     });
   }

@@ -119,6 +119,37 @@ test('standalone unpacked helpers can load their production dependencies without
   }
 });
 
+test('packaged draft client resolves and runs the unpacked worker with its complete dependency set', async t => {
+  const f = fixture(t);
+  const files = ['skill-draft-client.js', 'skill-draft-worker.js', 'skill-draft-service.js', 'sdk-native-events.js'];
+  for (const file of files) write(path.join(f.root, file), fs.readFileSync(path.join(project, file)));
+  await new AsarPackager(f.root, f.resources, { smartUnpack: false }, f.unpackMatcher.createFilter())
+    .pack(await f.collect(), f.packager);
+  const archive = path.join(f.resources, 'app.asar');
+  for (const file of files.slice(1)) {
+    assert.equal(asar.statFile(archive, file).unpacked, true, file);
+    assert.deepEqual(fs.readFileSync(path.join(archive + '.unpacked', file)), fs.readFileSync(path.join(project, file)));
+  }
+  // Load the actual packaged client with Electron's app.asar directory. The
+  // Worker runs ordinary Node, so missing unpacked dependencies fail for real.
+  const packagedModule = { exports: {} };
+  const load = new Function('__dirname', 'require', 'module', asar.extractFile(archive, 'skill-draft-client.js').toString('utf8'));
+  load(archive, require, packagedModule);
+  const skillsDir = path.join(f.root, 'isolated-skills');
+  const client = new packagedModule.exports.SkillDraftClient({ skillsDir, draftsDir: path.join(f.root, 'isolated-drafts') });
+  try {
+    assert.deepEqual(await client.list(), []);
+    const stagingDir = path.join(f.root, 'isolated-staging');
+    write(path.join(stagingDir, 'SKILL.md'), '---\nname: packaged-skill\ndescription: Synthetic packaged-worker test.\n---\n# Packaged worker\n');
+    const draft = await client.createDraft({ skillName: 'packaged-skill', stagingDir });
+    assert.equal(draft.canPublish, true);
+    const published = await client.publish(draft.id);
+    assert.equal(published.draft.status, 'published');
+    assert.match(fs.readFileSync(path.join(skillsDir, 'packaged-skill', 'SKILL.md'), 'utf8'), /Packaged worker/);
+    assert.equal((await client.listHistory('packaged-skill')).length, 1);
+  } finally { await client.close(); }
+});
+
 function nativeResolver(directory) {
   const source = fs.readFileSync(path.join(project, 'claude-sdk.js'), 'utf8');
   const start = source.indexOf('const RUNTIME_PKG =');

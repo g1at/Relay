@@ -169,6 +169,8 @@
       "checkpoint-manager.js",
       "memory-schema.js",
       "skill-draft-service.js",
+      "skill-draft-client.js",
+      "skill-draft-worker.js",
       "skill-generation-workspace.js",
       "skill-maintenance-host.js",
       "usage-capture.js",
@@ -243,6 +245,9 @@
       }
     ],
     "asarUnpack": [
+      "skill-draft-worker.js",
+      "skill-draft-service.js",
+      "sdk-native-events.js",
       "skill-usage-worker.js",
       "**/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**",
       "**/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/**",

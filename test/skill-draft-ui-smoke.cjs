@@ -6,13 +6,17 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { SkillDraftService } = require('../skill-draft-service');
+const { SkillDraftClient } = require('../skill-draft-client');
 const root = path.resolve(__dirname, '..'), output = path.join(root, '.codex-tmp/skill-draft-ui-smoke');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', path.join(output, 'profile')); app.commandLine.appendSwitch('disable-gpu');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-draft-ui-'));
 const service = new SkillDraftService({ skillsDir: path.join(fixtureRoot, 'skills'), draftsDir: path.join(fixtureRoot, 'records') });
+const client = new SkillDraftClient({ skillsDir: service.skillsDir, draftsDir: service.draftsDir });
 const checks = {}, failures = [], calls = [], ids = {};
 let win, step = 'starting';
+let holdMutation = null, releaseMutation = null;
+let holdList = false, releaseList = null;
 const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ checks, failures, step, calls }, null, 2));
 const deadline = setTimeout(() => { failures.push(`Timeout: ${step}`); save(); app.exit(1); }, 180000);
 const content = (name, text) => `---\nname: ${name}\ndescription: Synthetic local UI fixture.\n---\n${text}\n`;
@@ -56,17 +60,33 @@ function prepare() {
   writePackage(liveDir('applied-skill'), 'applied-skill', '# Already included');
 }
 prepare();
-ipcMain.handle('skill-draft-ui-fixture', (_event, method, args) => {
+const emitDraft = (type, fields = {}) => win.webContents.send('skill-draft-ui-event', { channel: 'draft', event: { type, ...fields } });
+const emitUsage = () => win.webContents.send('skill-draft-ui-event', { channel: 'usage', event: { reason: 'draft-published' } });
+ipcMain.handle('skill-draft-ui-fixture', async (_event, method, args) => {
   calls.push({ method, args });
   try {
-    if (method === 'list') return { ok: true, items: service.list(args[0]) };
-    if (method === 'diff') return { ok: true, diff: service.diff(args[0]) };
-    if (method === 'validate') return { ok: true, validation: service.validate(args[0]) };
-    if (method === 'publish') return { ok: true, result: service.publish(args[0]) };
-    if (method === 'reject') return { ok: true, draft: service.reject(...args) };
-    if (method === 'history') return { ok: true, items: service.listHistory(args[0]) };
-    if (method === 'rollback') return { ok: true, result: service.rollback(...args) };
-    if (method === 'rebase') return { ok: true, result: service.rebase(...args) };
+    if (method === 'list') {
+      const items = await client.list(args[0]);
+      if (holdList) await new Promise(resolve => { releaseList = () => { releaseList = null; holdList = false; resolve(); }; });
+      return { ok: true, items };
+    }
+    if (method === 'diff') return { ok: true, diff: await client.diff(args[0]) };
+    if (method === 'validate') return { ok: true, validation: await client.validate(args[0]) };
+    if (method === 'publish' || method === 'reject') {
+      const value = method === 'publish' ? await client.publish(args[0]) : await client.reject(...args);
+      // Match main: usage and draft events precede the mutation IPC response.
+      if (method === 'publish') emitUsage();
+      emitDraft(method === 'publish' ? 'skillDraft.published' : 'skillDraft.rejected', { draftId: args[0] });
+      if (holdMutation === method) await new Promise(resolve => { releaseMutation = () => { releaseMutation = null; holdMutation = null; resolve(); }; });
+      return { ok: true, [method === 'publish' ? 'result' : 'draft']: value };
+    }
+    if (method === 'history') return { ok: true, items: await client.listHistory(args[0]) };
+    if (method === 'rollback' || method === 'rebase') {
+      const result = await client[method === 'rebase' ? 'rebaseDraft' : method](...args);
+      if (method === 'rollback') emitUsage();
+      emitDraft(method === 'rollback' ? 'skillDraft.rolledBack' : 'skillDraft.rebased');
+      return { ok: true, result };
+    }
     throw Error('Unexpected fixture operation');
   } catch (error) { return { ok: false, code: error.code, error: error.message, details: error.details }; }
 });
@@ -74,6 +94,11 @@ const evaluate = code => win.webContents.executeJavaScript(code);
 const act = code => evaluate(`(()=>{${code}\n})()`);
 async function waitFor(code) { await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+7000;function next(){if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify('Timeout: ' + code)}));setTimeout(next,25);}next();})`); }
 async function settle() { await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); }
+async function waitForMutation(isReady = () => !!releaseMutation) {
+  const deadline = Date.now() + 7000;
+  while (!isReady()) { if (Date.now() > deadline) throw Error('Fixture response was not held'); await new Promise(resolve => setTimeout(resolve, 20)); }
+}
+async function eventTurn() { await evaluate('new Promise(resolve=>setTimeout(resolve,120))'); await settle(); }
 async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); if (!checks[name]) throw Error(name); }
 function localCheck(name, value) { step = name; checks[name] = !!value; save(); if (!value) throw Error(name); }
 async function click(selector) { await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('Missing '+${JSON.stringify(selector)});e.scrollIntoView({block:'nearest'});e.click();})()`); await settle(); }
@@ -93,8 +118,8 @@ async function chooseConflicts() {
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
   const preload = path.join(output, 'fixture-preload.cjs');
-  fs.writeFileSync(preload, "const{contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('draftFixtureBridge',{call:(method,args)=>ipcRenderer.invoke('skill-draft-ui-fixture',method,args)});");
-  const bridgeFixture = `(()=>{const base=window.api;window.draftUiFixture={ids:${JSON.stringify(ids)}};const drafts={onEvent:()=>()=>{}};for(const method of ['list','diff','validate','publish','rebase','reject','history','rollback'])drafts[method]=(...args)=>draftFixtureBridge.call(method,args);window.api=new Proxy(base,{get(target,key){return key==='skillDrafts'?drafts:target[key];}});})();`;
+  fs.writeFileSync(preload, "const{contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('draftFixtureBridge',{call:(method,args)=>ipcRenderer.invoke('skill-draft-ui-fixture',method,args),onEvent:(channel,callback)=>{const handler=(_event,payload)=>{if(payload.channel===channel)callback(payload.event);};ipcRenderer.on('skill-draft-ui-event',handler);return()=>ipcRenderer.removeListener('skill-draft-ui-event',handler);}});");
+  const bridgeFixture = `(()=>{const base=window.api;window.draftUiFixture={ids:${JSON.stringify(ids)},heartbeats:0};setInterval(()=>draftUiFixture.heartbeats++,16);const drafts={onEvent:callback=>draftFixtureBridge.onEvent('draft',callback)};for(const method of ['list','diff','validate','publish','rebase','reject','history','rollback'])drafts[method]=(...args)=>draftFixtureBridge.call(method,args);const skills=new Proxy(base.skills,{get(target,key){return key==='onUsageUpdated'?callback=>draftFixtureBridge.onEvent('usage',callback):target[key];}});window.api=new Proxy(base,{get(target,key){return key==='skillDrafts'?drafts:key==='skills'?skills:target[key];}});})();`;
   const fixture = ['ui-api-fixture.js', 'workspace-api-fixture.js', 'plugins-api-fixture.js'].map(name => fs.readFileSync(path.join(__dirname, name), 'utf8')).join('\n') + bridgeFixture;
   const html = fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', `<head><base href="${pathToFileURL(path.join(root, 'renderer') + path.sep).href}"><script>${fixture}\nlocalStorage.clear();</script>`);
   const page = path.join(output, 'fixture.html'); fs.writeFileSync(page, html);
@@ -145,7 +170,20 @@ app.whenReady().then(async () => {
   await waitFor(`!!document.querySelector('[data-draft-list] ${row(next.id)}')`);
   await click(row(next.id) + ' [data-action=publish]'); await waitFor("!!document.querySelector('.confirm-overlay')");
   localCheck('generatedCandidateStillRequiresPublishConfirmation', !calls.some(call => call.method === 'publish'));
-  await click('.confirm-btn.primary'); await waitFor(`!document.querySelector('[data-draft-list] ${row(next.id)}')`);
+  await act(`draftUiFixture.busyRow=document.querySelector(${JSON.stringify(row(next.id))});draftUiFixture.heartbeatBefore=draftUiFixture.heartbeats;`);
+  const publishLists = calls.filter(call => call.method === 'list').length;
+  const publishOverviews = await evaluate('pluginsFixture.overviewCount');
+  holdMutation = 'publish';
+  await click('.confirm-btn.primary'); await waitForMutation(); await eventTurn();
+  await check('publishEventsKeepTheOriginalBusyRowWhileItsResponseIsPending', `draftUiFixture.busyRow===document.querySelector(${JSON.stringify(row(next.id))})&&draftUiFixture.busyRow.dataset.busy==='1'&&draftUiFixture.busyRow.querySelector('[data-action=publish]').disabled`);
+  localCheck('publishEventsDoNotStartRedundantDraftReadsMidOperation', calls.filter(call => call.method === 'list').length === publishLists);
+  await click('[data-skill-view=library]'); await click('[data-skill-view=updates]');
+  await check('pendingPublishKeepsPluginNavigationAndRendererTimersResponsive', "document.querySelector('[data-skill-view=updates]').getAttribute('aria-selected')==='true'&&draftUiFixture.heartbeats>draftUiFixture.heartbeatBefore+2");
+  holdList = true; releaseMutation(); await waitForMutation(() => !!releaseList); await eventTurn();
+  await check('completedPublishRemainsDisabledUntilItsReplacementListArrives', `draftUiFixture.busyRow===document.querySelector(${JSON.stringify(row(next.id))})&&draftUiFixture.busyRow.dataset.busy==='1'&&draftUiFixture.busyRow.querySelector('[data-action=publish]').disabled`);
+  releaseList(); await waitFor(`!document.querySelector('[data-draft-list] ${row(next.id)}')`); await eventTurn();
+  localCheck('publishEventAndActionPerformExactlyOneDraftReload', calls.filter(call => call.method === 'list').length - publishLists === 1);
+  localCheck('publishUsageEventDraftEventAndActionPerformExactlyOneOverviewReload', await evaluate('pluginsFixture.overviewCount') - publishOverviews === 1);
   localCheck('confirmedPublishWritesMergedContentAndKeepsRollbackVersion', fs.readFileSync(path.join(liveDir('conflict-skill'), 'SKILL.md'), 'utf8') === mergedText && service.listHistory('conflict-skill').length === 1);
   await click('[data-draft-processed] > summary');
   await click(row(ids.published) + ' .skill-update-sources > summary');
@@ -153,8 +191,22 @@ app.whenReady().then(async () => {
   await click(row(next.id) + ' [data-action=history]');
   await waitFor("!!document.querySelector('[data-rollback]')"); await click('[data-rollback]'); await waitFor("!!document.querySelector('.confirm-overlay')"); await click('.confirm-btn.primary'); await waitFor("!document.querySelector('.preview-overlay')");
   localCheck('archivedCandidateStillProvidesWorkingRollback', fs.readFileSync(path.join(liveDir('conflict-skill'), 'SKILL.md'), 'utf8').includes('Later concurrent edit'));
-  await click(row(ids.invalid) + ' .dp-more'); await click(row(ids.invalid) + ' [data-action=reject]'); await waitFor("!!document.querySelector('.confirm-overlay')"); await click('.confirm-btn.danger');
-  await waitFor(`!document.querySelector('[data-draft-list] ${row(ids.invalid)}')`);
+  await click(row(ids.invalid) + ' .dp-more'); await click(row(ids.invalid) + ' [data-action=reject]'); await waitFor("!!document.querySelector('.confirm-overlay')");
+  const rejectsBeforeCancel = calls.filter(call => call.method === 'reject').length;
+  emitDraft('skillDraft.updated'); await eventTurn();
+  await click('.confirm-btn.cancel'); await waitFor(`!document.querySelector('.confirm-overlay')&&document.querySelector(${JSON.stringify(row(ids.invalid))}).dataset.busy!=='1'`); await eventTurn();
+  localCheck('cancelRejectMakesNoMutationAndReleasesDeferredRefresh', calls.filter(call => call.method === 'reject').length === rejectsBeforeCancel && service.get(ids.invalid).status === 'draft');
+  await check('canceledRejectLeavesTheCandidateActionsUsable', `!document.querySelector(${JSON.stringify(row(ids.invalid) + ' [data-action=reject]')}).disabled`);
+  await click(row(ids.invalid) + ' .dp-more'); await click(row(ids.invalid) + ' [data-action=reject]'); await waitFor("!!document.querySelector('.confirm-overlay')");
+  await act(`draftUiFixture.busyRow=document.querySelector(${JSON.stringify(row(ids.invalid))});`);
+  const rejectLists = calls.filter(call => call.method === 'list').length;
+  emitDraft('skillDraft.updated'); await eventTurn();
+  await check('rejectLocksTheRowBeforeConfirmationAndIgnoresRefreshUntilTheDecision', `draftUiFixture.busyRow===document.querySelector(${JSON.stringify(row(ids.invalid))})&&draftUiFixture.busyRow.dataset.busy==='1'&&draftUiFixture.busyRow.querySelector('[data-action=reject]').disabled&&document.querySelectorAll('.confirm-overlay').length===1`);
+  localCheck('notificationDuringRejectConfirmationDoesNotReadDrafts', calls.filter(call => call.method === 'list').length === rejectLists);
+  holdMutation = 'reject'; await click('.confirm-btn.danger'); await waitForMutation(); await eventTurn();
+  localCheck('rejectEventDoesNotReadDraftsBeforeTheMutationResponse', calls.filter(call => call.method === 'list').length === rejectLists);
+  releaseMutation(); await waitFor(`!document.querySelector('[data-draft-list] ${row(ids.invalid)}')`); await eventTurn();
+  localCheck('rejectEventAndActionPerformExactlyOneDraftReload', calls.filter(call => call.method === 'list').length - rejectLists === 1);
   localCheck('ignoreArchivesRecordWithoutDeletingItsPackage', service.get(ids.invalid).status === 'rejected' && fs.existsSync(path.join(service.draftRecordsDir, ids.invalid, 'proposed/SKILL.md')));
   fs.appendFileSync(path.join(liveDir('grouped-skill'), 'SKILL.md'), '\nConcurrent change before publish\n');
   const beforePublish = calls.filter(call => call.method === 'publish').length;
@@ -169,9 +221,12 @@ app.whenReady().then(async () => {
   await act("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));");
   await check('cancelComparisonPreservesCandidatesAndChatDraft', "!document.querySelector('.skill-rebase-overlay')&&inputEl.value==='技能更新期间保留的对话草稿'");
   await check('rendererHasNoErrorsOrNodeAccess', "uiFixture.errors.length===0&&typeof require==='undefined'&&typeof process==='undefined'");
+  await client.close();
   step = 'completed'; save(); clearTimeout(deadline); win.destroy(); fs.rmSync(fixtureRoot, { recursive: true, force: true }); app.exit(0);
 }).catch(async error => {
   failures.push(String(error.stack || error)); save(); console.error(error.stack);
   try { if (win && !win.isDestroyed()) { console.error(await evaluate('JSON.stringify(uiFixture.errors)')); await screenshot('failure'); } } catch (_) {}
-  clearTimeout(deadline); app.exit(1);
+  if (releaseMutation) releaseMutation();
+  if (releaseList) releaseList();
+  await client.close(); clearTimeout(deadline); app.exit(1);
 });

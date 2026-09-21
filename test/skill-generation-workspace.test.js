@@ -7,8 +7,10 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const { prepareSkillGenerationWorkspace } = require('../skill-generation-workspace');
 const { SkillDraftService } = require('../skill-draft-service');
+const { SkillDraftClient } = require('../skill-draft-client');
 const mainSource = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
 
 function segment(start, end) {
@@ -117,6 +119,62 @@ test('cancelled curator only cleans its workspace and emits no draft or live wri
   assert.match(fs.readFileSync(path.join(h.skillsDir, 'guide/SKILL.md'), 'utf8'), /Original/);
 });
 
+test('shutdown drains every finalized curator candidate before deleting its workspace', async t => {
+  const h = fixture(t), { context, events } = mainFixture(h);
+  const workspace = context.prepareSkillCurator();
+  h.write(path.join(workspace.stagingRoot, 'guide'), 'First finalized candidate.');
+  const second = path.join(workspace.stagingRoot, 'second');
+  fs.mkdirSync(second);
+  fs.writeFileSync(path.join(second, 'SKILL.md'), '---\nname: second\ndescription: Synthetic second candidate.\n---\nSecond finalized candidate.\n');
+
+  class FakeWorker extends EventEmitter {
+    constructor() { super(); this.sent = []; }
+    postMessage(message) { this.sent.push(message); }
+    ref() {}
+    unref() {}
+    reply() {
+      const request = this.sent.at(-1);
+      assert.equal(request.method, 'createDraft');
+      // Persist through the real service when the simulated worker completes.
+      const value = h.service.createDraft(...request.args);
+      this.emit('message', { requestId: request.requestId, ok: true, value });
+    }
+  }
+  const client = new SkillDraftClient({
+    skillsDir: h.skillsDir, draftsDir: path.join(h.root, 'draft-state'), WorkerClass: FakeWorker,
+  });
+  context.skillDraftService = client;
+  const finished = context.finalizeSkillCuratorDrafts({ ok: true }, workspace);
+  const worker = client.worker;
+  try {
+    assert.equal(worker.sent.length, 1);
+    const closing = client.close();
+    await assert.rejects(client.list(), { code: 'SKILL_DRAFT_CLOSED' });
+
+    worker.reply();
+    await Promise.resolve();
+    assert.equal(worker.sent.length, 2, 'The second candidate was admitted before shutdown');
+    assert.equal(worker.sent[1].method, 'createDraft');
+    assert.equal(fs.existsSync(workspace.workspaceRoot), true, 'Queued candidates still need their staging files');
+
+    worker.reply();
+    const result = await finished;
+    assert.equal(result.drafts.length, 2);
+    assert.deepEqual(h.service.list().map(draft => draft.skillName).sort(), ['guide', 'second']);
+    assert.equal(events.length, 2);
+    assert.equal(fs.existsSync(workspace.workspaceRoot), false);
+    assert.match(fs.readFileSync(path.join(h.skillsDir, 'guide/SKILL.md'), 'utf8'), /Original/);
+    assert.equal(fs.existsSync(path.join(h.skillsDir, 'second')), false);
+    assert.deepEqual(worker.sent.at(-1), { type: 'close' });
+    worker.emit('exit', 0);
+    await closing;
+  } finally {
+    if (client.worker) worker.emit('exit', 1);
+    await client.close();
+    await finished;
+  }
+});
+
 function reviewFixture(h, generate) {
   const events = [], notices = [], runs = [];
   class Notification {
@@ -185,7 +243,7 @@ test('failed conversation review cleans both snapshots without creating a candid
   assert.equal(fs.existsSync(path.dirname(review.runs[0].cwd)), false);
 });
 
-test('draft rebase IPC preserves conflict details and never reloads or publishes live skills', () => {
+test('draft rebase IPC preserves conflict details and never reloads or publishes live skills', async () => {
   const handlers = new Map(), seen = [], events = [];
   const context = vm.createContext({
     ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
@@ -195,13 +253,13 @@ test('draft rebase IPC preserves conflict details and never reloads or publishes
       return { draft: { id: 'replacement', status: 'draft' }, previous: { id }, alreadyApplied: false };
     } }, broadcastSkillDraftEvent: (...args) => events.push(args),
   });
-  vm.runInContext(segment('function skillDraftResult(', "ipcMain.handle('skillDrafts:publish'"), context);
+  vm.runInContext(segment('async function skillDraftResult(', "ipcMain.handle('skillDrafts:publish'"), context);
   const handler = handlers.get('skillDrafts:rebase');
-  const conflict = handler({}, { id: 'original' });
+  const conflict = await handler({}, { id: 'original' });
   assert.equal(conflict.ok, false); assert.equal(conflict.code, 'REBASE_CONFLICT');
   assert.equal(conflict.details.currentTreeHash, 'current');
   const options = { expectedCurrentTreeHash: 'current', resolutions: { 'SKILL.md': { text: 'Resolved content' } } };
-  const success = handler({}, { id: 'original', options });
+  const success = await handler({}, { id: 'original', options });
   assert.equal(success.result.draft.status, 'draft');
   assert.equal(seen[1].options, options);
   assert.equal(events[0][0], 'skillDraft.rebased');
