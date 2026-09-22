@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { UsageStatsService, normalizeUsageRecord, configurationKey } = require('../usage-stats-service');
-const { summarizeConversation, applyUsageRecord, refreshStats, emptyIndex } = require('../usage-stats-worker');
+const { UsageStatsService, normalizeUsageRecord, configurationKey } = require('../src/main/usage/usage-stats-service');
+const { summarizeConversation, applyUsageRecord, refreshStats, emptyIndex } = require('../src/main/usage/usage-stats-worker');
 
 const NOW = Date.parse('2026-09-09T12:00:00Z');
 const DAY = 86400000;
@@ -76,7 +76,7 @@ test('running checkpoints count before a terminal result and final cumulative to
 test('a persisted running checkpoint survives abrupt worker termination without a result or graceful flush', async t => {
   const { Worker } = require('node:worker_threads');
   const options = fixture(t);
-  const worker = new Worker(path.join(__dirname, '../usage-stats-worker.js'), { workerData: options });
+  const worker = new Worker(path.join(__dirname, '../src/main/usage/usage-stats-worker.js'), { workerData: options });
   t.after(() => worker.terminate());
   const checkpoint = normalizeUsageRecord(usage({ resultId: 'usage-checkpoint:0:1', modelUsage: { model: counters(80, 15, 20, 0) } }));
   await new Promise((resolve, reject) => {
@@ -353,7 +353,7 @@ test('a successful display refresh cannot hide an unpersisted metric; the next r
 });
 
 test('daily Token totals reuse exact journal buckets with no additional history scan', () => {
-  const { tokenDailyView } = require('../usage-stats-worker');
+  const { tokenDailyView } = require('../src/main/usage/usage-stats-worker');
   const data = { recordingStartedAt: '2026-09-07T00:00:00', days: { '2026-09-07': { results: 1, models: { one: counters(10, 4, 2, 1) } }, '2026-09-09': { results: 1, models: { two: counters(20, 8, 4, 2) } } } };
   const daily = tokenDailyView(['2026-09-06', '2026-09-07', '2026-09-08', '2026-09-09'], data, true);
   assert.deepEqual(daily.map(day => day.totalTokens), [null, 17, 0, 34]);
@@ -362,7 +362,7 @@ test('daily Token totals reuse exact journal buckets with no additional history 
   assert.equal(tokenDailyView(['2026-09-07'], data, false)[0].totalTokens, 17);
 });
 test('new daily Token fields preserve additive range totals and never invent records before recording began', () => {
-  const { buildSnapshot } = require('../usage-stats-worker');
+  const { buildSnapshot } = require('../src/main/usage/usage-stats-worker');
   const index = emptyIndex('synthetic'); applyUsageRecord(index.usage, usage());
   const result = buildSnapshot(index, { available: true, complete: true, warnings: [] }, true, NOW);
   for (const days of [7, 30, 90]) {

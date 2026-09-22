@@ -3,8 +3,8 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { LiveTurnRouter } = require('../live-turn-router');
+const relay = require('../src/main/sdk/claude-sdk');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-sdk-priority-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
 fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');

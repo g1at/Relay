@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-const { MEMORY_CONSOLIDATION_PROMPT } = require('../memory-runtime');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
+const { MEMORY_CONSOLIDATION_PROMPT } = require('../src/main/memory/memory-runtime');
 function fn(name, next) {
   const start = source.indexOf('function ' + name + '('), end = source.indexOf(next, start);
   assert.ok(start >= 0 && end > start); return source.slice(start, end);

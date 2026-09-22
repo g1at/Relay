@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'interaction-surface.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../renderer/interaction-surface.js'), 'utf8');
 function implementation(name) {
   const begin = source.search(new RegExp(`^  (?:async )?function ${name}\\(`, 'm'));
   assert.notEqual(begin, -1, name);

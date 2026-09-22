@@ -5,13 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { prepareAttachmentContent, snapshotAttachments, stripAttachmentImageData, MAX_IMAGE_BYTES } = require('../attachment-input');
+const { prepareAttachmentContent, snapshotAttachments, stripAttachmentImageData, MAX_IMAGE_BYTES } = require('../src/main/sdk/attachment-input');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
 const windowsPath = 'C:\\Users\\fixture\\AppData\\Roaming\\relay\\attachments\\截图 & example.png';
 test('packaged Relay includes the shared attachment SDK input boundary', () => {
   const manifest = require('../package.json');
-  assert.ok(manifest.build.files.includes('attachment-input.js'));
+  assert.ok(manifest.build.files.includes('src/main/**/*.js') && fs.existsSync(path.join(__dirname, '../src/main/sdk/attachment-input.js')));
 });
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-attachment-'));

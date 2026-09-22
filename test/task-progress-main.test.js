@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 
 function fixture() {
   const handlers = new Map(), calls = [], records = new Map([

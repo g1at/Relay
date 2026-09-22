@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { EventEmitter } = require('node:events');
-const { SkillDraftClient } = require('../skill-draft-client');
-const { SkillDraftService } = require('../skill-draft-service');
+const { SkillDraftClient } = require('../src/main/skills/skill-draft-client');
+const { SkillDraftService } = require('../src/main/skills/skill-draft-service');
 
 function fixture(t) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'relay-draft-client-')));
@@ -358,7 +358,7 @@ test('main-thread heartbeat continues during real package reads after worker sta
       if(enabled&&!delayed&&String(file).includes('proposed')){delayed=true;parentPort.postMessage({probe:'package-read'});Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,300);}
       return read.call(this,file,...args);
     };
-    require(${JSON.stringify(path.resolve(__dirname, '../skill-draft-worker.js'))});`);
+    require(${JSON.stringify(path.resolve(__dirname, '../src/main/skills/skill-draft-worker.js'))});`);
   const client = h.client({ workerFile });
   await client.get(draft.id); // Startup has finished before heartbeat measurement.
   const beganReading = new Promise(resolve => client.worker.on('message', message => { if (message.probe === 'package-read') resolve(); }));

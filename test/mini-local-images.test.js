@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { registerMiniLocalImages } = require('../mini-local-images');
+const { registerMiniLocalImages } = require('../src/main/app/mini-local-images');
 
 function fixture(readImage = async () => ({ ok: true, dataUrl: 'data:image/png;base64,iVBORw0KGgo=' })) {
   const sender = { mainFrame: { url: 'file:///mini.html' } }, event = { sender }; event.senderFrame = sender.mainFrame;

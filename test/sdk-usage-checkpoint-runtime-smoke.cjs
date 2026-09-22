@@ -4,9 +4,9 @@
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { createUsageObserver } = require('../usage-capture');
-const { applyUsageRecord, emptyIndex } = require('../usage-stats-worker');
+const relay = require('../src/main/sdk/claude-sdk');
+const { createUsageObserver } = require('../src/main/usage/usage-capture');
+const { applyUsageRecord, emptyIndex } = require('../src/main/usage/usage-stats-worker');
 const method = 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET';
 const fields = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'];
 const numbers = value => Object.fromEntries(Object.entries(value || {}).map(([model, usage]) => [model, Object.fromEntries(fields.map(field => [field, usage[field]]))]));

@@ -4,12 +4,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const { LiveTurnRouter } = require('../live-turn-router');
-const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../live-async-agent-tracker');
-const supplements = require('../live-supplement-input');
-const { SdkSessionObserver, backgroundOwnedTask, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../sdk-session-observer');
-const { resourceEntries, mergeResources } = require('../sdk-task-resources');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
+const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../src/main/live/live-async-agent-tracker');
+const supplements = require('../src/main/live/live-supplement-input');
+const { SdkSessionObserver, backgroundOwnedTask, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../src/main/sdk/sdk-session-observer');
+const { resourceEntries, mergeResources } = require('../src/main/sdk/sdk-task-resources');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const ids = { conv: '11111111-1111-4111-8111-111111111111', run: '22222222-2222-4222-8222-222222222222', first: '33333333-3333-4333-8333-333333333333', second: '44444444-4444-4444-8444-444444444444', other: '55555555-5555-4555-8555-555555555555' };
 function declaration(name) {
@@ -30,7 +30,7 @@ function harness() {
     child: { push(text, metadata) { pushes.push({ text, metadata }); return true; } },
   };
   sess.turnRouter.begin(ids.run);liveSessions.set(ids.conv, sess);
-  const context = { TaskClock: require('../task-clock').TaskClock, ...supplements, observer, resourceEntries, mergeResources, routeTimingHistory: new RouteTimingHistory(), sess, convId: ids.conv, liveSessions, jobs, liveTombstones: new Map(),
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock, ...supplements, observer, resourceEntries, mergeResources, routeTimingHistory: new RouteTimingHistory(), sess, convId: ids.conv, liveSessions, jobs, liveTombstones: new Map(),
     readAppSettings: () => ({ followUpMode: 'steer' }),
     liveResultDisposition, observeOwnedBackgroundTasks, console: { log() {}, warn() {}, error() {} },
     taskLedger: { get: id => ledger.get(id) || null }, isTerminalState: value => ['succeeded', 'failed', 'canceled'].includes(value),
@@ -371,12 +371,12 @@ test('a save after final settlement recovers the live receipt even when all earl
 });
 
 test('preload and distribution include the steer IPC and its production helper', () => {
-  const preload=fs.readFileSync(path.join(__dirname,'../preload.js'),'utf8');let exposed;
+  const preload=fs.readFileSync(path.join(__dirname, '../preload.js'),'utf8');let exposed;
   const calls=[];vm.runInNewContext(preload,{require:()=>({contextBridge:{exposeInMainWorld(_key,value){exposed=value;}},ipcRenderer:{invoke:(...args)=>calls.push(args),on(){},removeListener(){}},webUtils:{}}),process:{platform:'win32',argv:[]}});
   const payload={jobId:ids.run,conversationId:ids.conv,messageId:ids.first,prompt:'extra'};exposed.steerClaude(payload);
   assert.equal(calls[0][0],'claude:steer');assert.equal(calls[0][1],payload);
-  const pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8'));
-  assert.ok(pkg.build.files.includes('live-supplement-input.js'));assert.match(pkg.scripts['test:noninterrupt-steering'],/noninterrupt-steering-smoke/);
+  const pkg=JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'),'utf8'));
+  assert.ok(pkg.build.files.includes('src/main/**/*.js') && fs.existsSync(path.join(__dirname, '../src/main/live/live-supplement-input.js')));assert.match(pkg.scripts['test:noninterrupt-steering'],/noninterrupt-steering-smoke/);
 });
 
 

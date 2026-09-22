@@ -18,7 +18,7 @@ async function mcpFixture(marker) {
 async function hostFixture() {
   const assert = require('node:assert/strict'), http = require('node:http');
   const { randomUUID } = require('node:crypto');
-  const relay = require('../claude-sdk');
+  const relay = require('../src/main/sdk/claude-sdk');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-structured-isolation-'));
   const config = path.join(base, 'config'), cwd = path.join(base, 'workspace'), marker = path.join(base, 'mcp-events.txt');
   fs.mkdirSync(config); fs.mkdirSync(cwd);

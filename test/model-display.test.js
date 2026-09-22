@@ -43,7 +43,7 @@ test('missing and not-yet-loaded routes are explicit rather than showing an SDK 
 });
 
 test('compact composer tier label keeps the real configured model in its tooltip and expanded menu', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
   class Element {
     constructor() { this.children = []; this.attributes = {}; this.handlers = {}; }
     appendChild(child) { this.children.push(child); }

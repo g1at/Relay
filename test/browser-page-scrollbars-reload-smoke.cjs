@@ -3,8 +3,8 @@
 // come from the page itself before DOMContentLoaded, including its first paint.
 const { app, BrowserWindow, WebContentsView, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
-const { createBrowserPanelHost } = require('../browser-panel-host');
-const { attachBrowserPageScrollbars } = require('../browser-page-scrollbars');
+const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
+const { attachBrowserPageScrollbars } = require('../src/main/browser/browser-page-scrollbars');
 const output = path.resolve(__dirname, '../.codex-tmp/browser-page-scrollbars-reload-smoke');
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-background-networking'); app.on('window-all-closed', () => {});

@@ -6,7 +6,7 @@ const {
   consumeOneShotMessages,
   oneShotTerminalError,
   sanitizeResultPermissionDenials,
-} = require('../claude-sdk');
+} = require('../src/main/sdk/claude-sdk');
 
 test('一次性执行在后台 Bash 后的最终 result 立即停止消费', async () => {
   const emitted = [];

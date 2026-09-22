@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'interaction-surface.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../renderer/interaction-surface.js'), 'utf8');
 const start = source.indexOf('  function collectAnswers(');
 const end = source.indexOf('  async function respond(', start);
 const question = (text, multiSelect = false) => ({ question: text, multiSelect });

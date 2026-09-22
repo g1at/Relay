@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { SkillMaintenanceHost } = require('../skill-maintenance-host');
-const { SkillDraftService, scanPackage } = require('../skill-draft-service');
+const { SkillMaintenanceHost } = require('../src/main/skills/skill-maintenance-host');
+const { SkillDraftService, scanPackage } = require('../src/main/skills/skill-draft-service');
 const DAY = 86400000;
 const START = Date.parse('2026-01-01T12:00:00Z');
 

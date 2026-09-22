@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LiveMcpReadiness, McpControlQueue, mcpConfigKey, publicMcpItems } = require('../live-mcp-readiness');
+const { LiveMcpReadiness, McpControlQueue, mcpConfigKey, publicMcpItems } = require('../src/main/live/live-mcp-readiness');
 
 const registry = { docs: { type: 'stdio', command: 'synthetic-mcp', env: { TOKEN: 'fixture-secret' } } };
 const connected = (name = 'docs') => ({ name, status: 'connected', tools: [{ name: 'read' }] });

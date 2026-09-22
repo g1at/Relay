@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
-const output = path.join(root, '.codex-tmp', 'workspace-navigation-smoke');
+const output = process.env.RELAY_SMOKE_OUTPUT ? path.resolve(process.env.RELAY_SMOKE_OUTPUT) : path.join(root, '.codex-tmp', 'workspace-navigation-smoke');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');

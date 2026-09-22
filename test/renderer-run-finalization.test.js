@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { harness } = require('./renderer-activity-harness.cjs');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
 
 test('renderer terminal cleanup survives history persistence rejection', () => {
   assert.match(source, /async function finishRunUnsafe\(jobId, doneEvt\)/);

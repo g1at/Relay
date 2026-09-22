@@ -3,12 +3,12 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { MAX_RELAY_INSTRUCTIONS, normalizeRelayInstructions, validateRelayInstructions, relayInstructionsPrompt } = require('../relay-instructions');
-const { normalizePreferences, createGeneralPreferences } = require('../general-preferences');
-const { buildRuntimePolicy } = require('../sdk-runtime-policy');
-const { contractFingerprints, requiresFreshContract } = require('../sdk-runtime-contract');
-const { buildNativeAgent } = require('../native-agent-definition');
-const { _buildOptions } = require('../claude-sdk');
+const { MAX_RELAY_INSTRUCTIONS, normalizeRelayInstructions, validateRelayInstructions, relayInstructionsPrompt } = require('../src/main/sdk/relay-instructions');
+const { normalizePreferences, createGeneralPreferences } = require('../src/main/app/general-preferences');
+const { buildRuntimePolicy } = require('../src/main/sdk/sdk-runtime-policy');
+const { contractFingerprints, requiresFreshContract } = require('../src/main/sdk/sdk-runtime-contract');
+const { buildNativeAgent } = require('../src/main/sdk/native-agent-definition');
+const { _buildOptions } = require('../src/main/sdk/claude-sdk');
 
 test('guidance defaults empty and saves exact multiline text without truncation or external capability probes', async () => {
   const text = '  请用中文。\r\n优先解释结论。\n  ';
@@ -67,7 +67,7 @@ test('shared SDK options include guidance for ordinary, plan, goal and selected 
 });
 
 function sdkHarness() {
-  const sdkPath = path.join(__dirname, '../claude-sdk.js'), calls = [];
+  const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js'), calls = [];
   const source = fs.readFileSync(sdkPath, 'utf8').replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fixtureSdk);');
   const fixtureSdk = { query({ options, prompt }) {
     calls.push({ options, prompt });
@@ -96,7 +96,7 @@ test('live and scheduled SDK launches carry current guidance; internal title gen
 });
 
 test('the scheduled main-process resume boundary keeps history but retires a session after guidance edits or removal', () => {
-  const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const start = main.indexOf('function runClaudeJob({'), end = main.indexOf('  const nativeFork =', start);
   assert.ok(start > 0 && end > start);
   let settings = { relayInstructions: 'Original preference' }, builds = 0;

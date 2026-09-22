@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { InteractionBroker } = require('../interaction-broker');
-const { normalizeElicitationSchema, validateElicitationContent, normalizeElicitationUrl } = require('../elicitation-schema');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
+const { normalizeElicitationSchema, validateElicitationContent, normalizeElicitationUrl } = require('../src/main/tasks/elicitation-schema');
 
 const context = { runId: 'run-A', conversationId: 'A', windowId: 7 };
 const request = schema => ({ serverName: 'fixture-mcp', message: '填写测试参数', requestedSchema: schema });

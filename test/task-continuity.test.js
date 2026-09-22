@@ -3,8 +3,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const Continuity = require('../renderer/task-continuity');
-const { TaskContinuityHost } = require('../task-continuity-host');
-const { TaskClock } = require('../task-clock');
+const { TaskContinuityHost } = require('../src/main/tasks/task-continuity-host');
+const { TaskClock } = require('../src/main/tasks/task-clock');
 
 function paused() {
   const taskRun = Continuity.finish(Continuity.begin({ runId: 'first', startedAt: 1000 }), { finishedAt: 37000 });

@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
-const { instructionFingerprint, requiresFreshContract, contractFingerprints, migrateLegacyRuntimeContract } = require('../sdk-runtime-contract');
+const { instructionFingerprint, requiresFreshContract, contractFingerprints, migrateLegacyRuntimeContract } = require('../src/main/sdk/sdk-runtime-contract');
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-instruction-contract-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

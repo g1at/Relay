@@ -6,8 +6,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { createConversationWorkspaces } = require('../conversation-workspaces');
-const schedulerPath = require.resolve('../scheduler');
+const { createConversationWorkspaces } = require('../src/main/projects/conversation-workspaces');
+const schedulerPath = require.resolve('../src/main/scheduling/scheduler');
 const route = { providerId: 'synthetic', providerRevision: 1, routeTier: 'haiku' };
 function fixture(t, { command = false, agent = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-scheduled-workspaces-'));
@@ -26,7 +26,7 @@ function fixture(t, { command = false, agent = false } = {}) {
   };
   delete require.cache[schedulerPath];
   let scheduler;
-  try { scheduler = require('../scheduler'); } finally { cp.spawn = originalSpawn; }
+  try { scheduler = require('../src/main/scheduling/scheduler'); } finally { cp.spawn = originalSpawn; }
   const agentDir = path.join(home, 'agents'); fs.mkdirSync(agentDir);
   if (agent) {
     fs.mkdirSync(path.join(home, 'installed-agent'));

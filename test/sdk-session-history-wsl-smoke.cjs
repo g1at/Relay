@@ -4,7 +4,7 @@
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { spawnSync } = require('node:child_process'), { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const { executeSessionOperation } = require('../sdk-session-history');
+const { executeSessionOperation } = require('../src/main/sdk/sdk-session-history');
 const distribution = process.argv[2];
 if (process.platform !== 'win32' || !distribution || /[\x00-\x1f]/.test(distribution)) throw Error('Run with Windows Node and an explicit fixture WSL distribution');
 const output = path.join(__dirname, '../.codex-tmp/sdk-session-history-runtime'); fs.mkdirSync(output, { recursive: true });

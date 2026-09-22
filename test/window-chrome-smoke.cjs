@@ -8,7 +8,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
 const repo = path.resolve(__dirname, '..');
-const output = path.join(repo, '.codex-tmp', 'window-chrome-smoke');
+const output = process.env.RELAY_SMOKE_OUTPUT || path.join(repo, '.codex-tmp', 'window-chrome-smoke');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', path.join(output, 'profile'));
 // Keep GPU composition enabled and exercise physical display transitions.
@@ -21,12 +21,12 @@ const displayChecks = [];
 const nativeCaptures = [];
 let win;
 const timeout = setTimeout(() => finish(new Error('Isolated chrome test timed out')), 60000);
-const source = fs.readFileSync(path.join(repo, 'main.js'), 'utf8');
+const source = fs.readFileSync(path.join(repo, 'src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
 const mainStart = source.indexOf('function createMainWindow(');
 const constructorStart = source.indexOf('  const win = new BrowserWindow({', mainStart);
 const constructorEnd = source.indexOf('\n  });', constructorStart) + '\n  });'.length;
 const context = vm.createContext({
-  process: { platform: process.platform }, os: require('node:os'), mainWindow: null, path, __dirname: repo,
+  process: { platform: process.platform }, os: require('node:os'), mainWindow: null, path, appRoot: repo,
   nativeTheme: { shouldUseDarkColors: false }, bgColor: '#fafafa', currentAppIcon: () => undefined,
   BrowserWindow: class { constructor(options) { this.options = options; } },
   ipcMain: { on(channel, handler) {

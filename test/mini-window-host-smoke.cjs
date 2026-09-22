@@ -7,10 +7,10 @@ const { app, BrowserWindow, ipcMain, screen, Menu } = require('electron');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createMiniWindowHost } = require('../mini-window-host');
+const { createMiniWindowHost } = require('../src/main/app/mini-window-host');
 
 const root = path.resolve(__dirname, '..');
-const out = path.join(root, '.codex-tmp/mini-window-host-validation');
+const out = process.env.RELAY_SMOKE_OUTPUT ? path.resolve(process.env.RELAY_SMOKE_OUTPUT) : path.join(root, '.codex-tmp/mini-window-host-validation');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');

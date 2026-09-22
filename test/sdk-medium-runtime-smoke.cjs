@@ -3,8 +3,8 @@
 // No user profile, credentials, browser, cron or remote access is involved.
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const assert = require('node:assert/strict'), { randomUUID } = require('node:crypto');
-const relay = require('../claude-sdk'), { buildRuntimePolicy } = require('../sdk-runtime-policy'), { createPluginStore } = require('../sdk-plugin-store');
-const { executeSessionOperation } = require('../sdk-session-history'), { createHistoryManagement } = require('../sdk-history-management');
+const relay = require('../src/main/sdk/claude-sdk'), { buildRuntimePolicy } = require('../src/main/sdk/sdk-runtime-policy'), { createPluginStore } = require('../src/main/sdk/sdk-plugin-store');
+const { executeSessionOperation } = require('../src/main/sdk/sdk-session-history'), { createHistoryManagement } = require('../src/main/sdk/sdk-history-management');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-medium-runtime-'));
 const config = path.join(root, 'config'), cwd = path.join(root, 'workspace'); fs.mkdirSync(config); fs.mkdirSync(cwd);
 fs.writeFileSync(path.join(config, 'settings.json'), '{}'); fs.writeFileSync(path.join(cwd, 'fixture.txt'), 'SDK_READ_FILE_MARKER');
@@ -53,7 +53,7 @@ function save(ok) { report.ok = ok; fs.writeFileSync(path.join(out, `runtime-${p
     policy.settingSources = []; Object.assign(policy.settings, plugins.settings, { worktree: { baseRef: 'head' } }); policy.options.maxTurns = 6; policy.diagnostics = true;
     live = relay.createLiveSession({ cwd, model: 'fixture-model', runtimeEnv, runtimePolicy: policy, plugins: plugins.plugins, permissionMode: 'default',
       canUseTool: async (name, input) => ['Read', 'ReportFindings', 'EnterWorktree', 'ExitWorktree'].includes(name) ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'Synthetic fixture permits read only' },
-      onNativeHook: input => { report.hooks.push(input.hook_event_name);const changed=require('../sdk-native-events').nativeWorkingDirectory(input);if(changed){report.cwdChanges||=[];report.cwdChanges.push(changed);} if(input.hook_event_name==='PostToolUse'){report.postTools||=[];report.postTools.push(input.tool_name);if(input.tool_name==='ReportFindings')report.findings=require('../sdk-native-events').safeFindings(input.tool_input);} return input.hook_event_name === 'SessionStart' ? { watchPaths: [cwd] } : undefined; },
+      onNativeHook: input => { report.hooks.push(input.hook_event_name);const changed=require('../src/main/sdk/sdk-native-events').nativeWorkingDirectory(input);if(changed){report.cwdChanges||=[];report.cwdChanges.push(changed);} if(input.hook_event_name==='PostToolUse'){report.postTools||=[];report.postTools.push(input.tool_name);if(input.tool_name==='ReportFindings')report.findings=require('../src/main/sdk/sdk-native-events').safeFindings(input.tool_input);} return input.hook_event_name === 'SessionStart' ? { watchPaths: [cwd] } : undefined; },
       onMessage: notify, onExit: (code, error) => { if (code && error) failures.push(String(error)); }, stderr: () => {} });
     await live.whenReady();
     const reload = await live.reloadPlugins(); report.reload = { commands: reload.commands?.map(x=>x.name), agents: reload.agents?.map(x=>x.name), plugins: reload.plugins?.map(x=>x.name), errors: reload.errors };

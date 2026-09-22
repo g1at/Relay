@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { registerBrowserPanelIpc } = require('../browser-panel-ipc');
+const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
 
 function fixture() {
   const entryFile = path.resolve(__dirname, '../renderer/index.html');

@@ -5,26 +5,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const vm = require('node:vm');
-
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-const start = source.indexOf('function loadConversation(id) {');
-const end = source.indexOf('\n}\n', start) + 2;
-assert.ok(start >= 0 && end > start);
+const loadCommonJs = require('./helpers/load-commonjs.cjs');
 
 function harness(t, options = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-history-load-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-history-load-'));
+  t.after(() => fs.rmSync(userData, { recursive: true, force: true }));
   const warnings = [];
-  const context = {
-    fs: options.fs || fs, path,
-    app: { getPath: () => directory },
-    convFilePath: id => path.join(directory, id + '.json'),
-    recoverLegacyOutput: options.recover || (value => value),
-    console: { warn: (...args) => warnings.push(args) },
-  };
-  vm.runInNewContext(source.slice(start, end), context);
-  return { directory, warnings, load: context.loadConversation };
+  const { createHistoryStore } = loadCommonJs('src/main/app/history-store.js', {
+    modules: { fs: { ...fs, ...options.fs } },
+    globals: { console: { warn: (...args) => warnings.push(args) } },
+  });
+  const store = createHistoryStore({ getUserDataDir: () => userData,
+    recoverLegacyOutput: options.recover || (value => value) });
+  return { directory: store.getHistoryDir(), userData, warnings, load: store.loadConversation };
 }
 
 test('missing history is a quiet null and can be loaded after it is saved', t => {
@@ -59,7 +52,7 @@ test('existing history still uses legacy output recovery without changing its ac
   let recoveries = 0;
   const h = harness(t, { recover: (record, options) => {
     recoveries++;
-    assert.equal(options.rootDir, path.join(h.directory, 'task-ledger'));
+    assert.equal(options.rootDir, path.join(h.userData, 'task-ledger'));
     return { ...record, recovered: true };
   } });
   const record = { id: 'existing', updatedAt: '2020-01-01T00:00:00Z' };

@@ -3,7 +3,7 @@
 // No real model, registry, credentials or user files are read or modified.
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const assert = require('node:assert/strict'), { randomUUID } = require('node:crypto');
-const relay = require('../claude-sdk'), { InteractionBroker } = require('../interaction-broker');
+const relay = require('../src/main/sdk/claude-sdk'), { InteractionBroker } = require('../src/main/tasks/interaction-broker');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-mcp-permissions-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace'); fs.mkdirSync(config); fs.mkdirSync(cwd);
 const output = path.join(__dirname, '../.codex-tmp/sdk-mcp-permissions-runtime'); fs.mkdirSync(output, { recursive: true });

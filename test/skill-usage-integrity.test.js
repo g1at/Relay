@@ -7,7 +7,7 @@ const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 function scan(projectsRoot, previous = null) {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(path.join(__dirname, '..', 'skill-usage-worker.js'), { workerData: { projectsRoot, previous } });
+    const worker = new Worker(path.join(__dirname, '../src/main/skills/skill-usage-worker.js'), { workerData: { projectsRoot, previous } });
     worker.once('message', resolve); worker.once('error', reject);
     worker.once('exit', code => { if (code) reject(new Error(`Worker exited ${code}`)); });
   });

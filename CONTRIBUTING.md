@@ -48,11 +48,16 @@ npm run verify:installer-skin
 
 # 本地目录构建，明确禁止发布
 npm run build:dir -- --x64 --publish never
+
+# 检查实际安装目录的资源、后台进程与原生依赖
+npm run test:packaged-app
 ```
 
 `test:ui` 使用 `.codex-tmp/ui-smoke/` 下的隔离配置和合成数据，并阻止页面的 HTTP(S) 请求。更多 UI 或原生模块检查见 `package.json` 中的 `test:*` 脚本；运行其他手动检查前先读脚本说明，确认是否需要特定环境。真实服务商、WSL、外部 MCP、安装升级与数据迁移，需要单独验收，不能从单测或模拟结果推断通过。
 
 目录构建会准备锁定版本的 Linux SDK 运行时，用于打包中的 WSL 支持；首次准备可能访问官方 npm registry。安装依赖、下载 Electron 和构建工具也需要网络。运行这些检查不需要 `GH_TOKEN`、服务商 API Key 或发布权限。
+
+主进程模块的职责、状态归属和路径规则见 [结构说明](src/main/README.md)。目录调整需同时维护 `build.files`、`asarUnpack` 和后台脚本的本地依赖，不能仅验证开发目录中的模块可加载。
 
 ## 修改范围与提交说明
 

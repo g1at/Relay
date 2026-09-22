@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
-const { createTaskbarCompletionBadge, createNativeTaskbarOverlay, TASKBAR_FRAME_SIZES } = require('../taskbar-completion-badge');
+const { createTaskbarCompletionBadge, createNativeTaskbarOverlay, TASKBAR_FRAME_SIZES } = require('../src/main/app/taskbar-completion-badge');
 function fixture() {
   const calls = [], errors = [];
   let focused = false, win = { isDestroyed: () => false, setOverlayIcon: (...args) => calls.push(args) };
@@ -42,8 +42,8 @@ test('large counts remain exact in accessibility text while the icon may cap at 
   assert.equal(f.badge.count(),24);assert.deepEqual(f.calls.at(-1),['image-10','24 个后台任务已结束']);
 });
 test('packaged app includes the badge controller and all renderer artwork', () => {
-  const config=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8'));
-  assert.ok(config.build.files.includes('taskbar-completion-badge.js'));
+  const config=JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'),'utf8'));
+  assert.ok(config.build.files.includes('src/main/**/*.js') && fs.existsSync(path.join(__dirname, '../src/main/app/taskbar-completion-badge.js')));
   assert.ok(config.build.files.includes('renderer/**/*'));
 });
 
@@ -72,12 +72,12 @@ test('native count ICOs contain independently rasterized frames for every Window
 
 test('main-process focus wiring clears the main badge; focusing mini only acknowledges its conversation', () => {
   const vm=require('node:vm'), {EventEmitter}=require('node:events');
-  const source=fs.readFileSync(path.join(__dirname,'../main.js'),'utf8');
+  const source=fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'),'utf8');
   const events=new EventEmitter(), overlays=[];
   const main={isDestroyed:()=>false,isVisible:()=>true,isMinimized:()=>false,isFocused:()=>false,setOverlayIcon:(...args)=>overlays.push(args)};
   const mini={isDestroyed:()=>false,isVisible:()=>true,isMinimized:()=>false,isFocused:()=>false};
-  const ctx=vm.createContext({app:events,createTaskbarCompletionBadge,createNativeTaskbarOverlay,fs,path,__dirname:path.resolve(__dirname,'..'),process:{platform:'win32'},
-    mainWindow:main,miniHost:{getPanelWindow:()=>mini},miniChat:{getConversationId:()=> 'mini'},
+  const ctx=vm.createContext({app:events,createTaskbarCompletionBadge,createNativeTaskbarOverlay,fs,path,appRoot:path.resolve(__dirname,'..'),process:{platform:'win32'},
+    applicationWindows:{mainWindow:main},miniHost:{getPanelWindow:()=>mini},miniChat:{getConversationId:()=> 'mini'},
     nativeImage:{createFromPath:file=>({file,isEmpty:()=>false,addRepresentation(){}})},console});
   vm.runInContext(source.slice(source.indexOf('const taskbarBadgeImages'),source.indexOf('function broadcastTaskLedgerChange')),ctx);
   const badge=vm.runInContext('taskbarCompletionBadge',ctx);

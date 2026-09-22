@@ -3,10 +3,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { createBrowserPanelHost, normalizeBrowserUrl, resolveBrowserAddress } = require('../browser-panel-host');
-const { createBrowserProfileStore } = require('../browser-profile-store');
+const { createBrowserPanelHost, normalizeBrowserUrl, resolveBrowserAddress } = require('../src/main/browser/browser-panel-host');
+const { createBrowserProfileStore } = require('../src/main/browser/browser-profile-store');
 const tick = () => new Promise(setImmediate);
-const { MAX_HTML_BYTES } = require('../browser-preview-session');
+const { MAX_HTML_BYTES } = require('../src/main/browser/browser-preview-session');
 function fixture(options = {}) {
   const partitions = [], views = [], events = [], external = [];
   const owner = new EventEmitter(); owner.closed = false; owner.size = [1000, 700]; owner.webContents = new EventEmitter();

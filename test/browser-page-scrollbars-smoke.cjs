@@ -3,7 +3,7 @@
 // No Relay main window/services and no external webpage is opened.
 const { app, BrowserWindow, WebContentsView, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
-const { createBrowserPanelHost } = require('../browser-panel-host');
+const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
 const output = path.resolve(__dirname, '../.codex-tmp/browser-page-scrollbars-smoke');
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-background-networking'); app.on('window-all-closed', () => {});

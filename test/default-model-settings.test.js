@@ -5,11 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const vm = require('node:vm');
-const { ProviderStore } = require('../provider-store');
-const { isAppPermissionMode } = require('../interaction-broker');
-const { createGeneralPreferences, normalizePreferences } = require('../general-preferences');
-const { isQuickChatEnabled, normalizeQuickChatPatch } = require('../mini-window-host');
+const { registerSettingsIpc } = require('../src/main/app/settings-ipc');
+const { ProviderStore } = require('../src/main/providers/provider-store');
+const { createGeneralPreferences } = require('../src/main/app/general-preferences');
 const copy = value => JSON.parse(JSON.stringify(value));
 
 function fixture(t, models = { haiku: 'fast', sonnet: 'think', opus: 'expert' }) {
@@ -32,24 +30,19 @@ function fixture(t, models = { haiku: 'fast', sonnet: 'think', opus: 'expert' })
 }
 
 function settingsHarness(store, initial = {}) {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  const from = source.indexOf("ipcMain.handle('settings:read'");
-  const end = source.indexOf('// IPC: Relay 服务商管理', from);
-  assert.ok(from > 0 && end > from);
   let appSettings = { permissionMode: 'default', ...initial };
   const handlers = {}, events = [], writes = [];
-  const context = vm.createContext({ providerStore: store, Object,
-    isQuickChatEnabled, normalizeQuickChatPatch,
-    normalizePreferences, generalPreferences: createGeneralPreferences({ getSettings: () => appSettings }),
+  const context = { providerStore: store,
+    generalPreferences: createGeneralPreferences({ getSettings: () => appSettings }),
     ipcMain: { handle: (name, handler) => { handlers[name] = handler; } },
     readAppSettings: () => copy(appSettings),
     writeAppSettings: next => { appSettings = copy(next); writes.push(copy(next)); },
     publishProviderChange: (reason, options = {}) => events.push({ reason, options, persisted: store.getRoutingView() }),
-    app: { getVersion: () => 'test' }, isAppPermissionMode,
-    miniHost: null, miniBrandCache: null, publishMiniState() {},
-    applyPermissionModeToLiveSessions: async () => ({ updated: true }),
-  });
-  vm.runInContext(source.slice(from, end), context);
+    app: { getVersion: () => 'test' },
+    windows: { applyTheme() {}, updateNativeBrandTheme() {} },
+    applyParallelTaskLimit() {}, onEnvironmentChanged() {}, onQuickChatChanged() {}, refreshMiniBrand() {},
+  };
+  registerSettingsIpc({ ...context, writeAppSettings: next => context.writeAppSettings(next) });
   return { context, events, writes,
     read: () => handlers['settings:read'](),
     write: payload => handlers['settings:write']({}, payload),

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 function harness() {
   const start = source.indexOf('const TITLE_MAX_W =');
   const end = source.indexOf('// IPC: 用最快档位', start);
@@ -12,7 +12,7 @@ function harness() {
   const saveEnd = source.indexOf('// 上下文占用', saveStart);
   const records = [];
   const context = vm.createContext({ Intl, liveSessions: new Map(), fs: { existsSync: () => false }, convFilePath: id => id,
-    mergeSupplementHistory: require('../live-supplement-input').mergeSupplementHistory,
+    mergeSupplementHistory: require('../src/main/live/live-supplement-input').mergeSupplementHistory,
     persistConversationRecord: conv => records.push(structuredClone(conv)) });
   require('./helpers/conversation-permissions-fixture')(context);
   vm.runInContext(source.slice(start, end) + source.slice(saveStart, saveEnd)

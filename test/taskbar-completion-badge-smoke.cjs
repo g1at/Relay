@@ -2,7 +2,7 @@
 // Isolated native window, local artwork, synthetic terminal transitions only.
 const { app, BrowserWindow, nativeImage, screen } = require('electron');
 const fs = require('node:fs'), path = require('node:path');
-const { createTaskbarCompletionBadge, createNativeTaskbarOverlay, TASKBAR_FRAME_SIZES } = require('../taskbar-completion-badge');
+const { createTaskbarCompletionBadge, createNativeTaskbarOverlay, TASKBAR_FRAME_SIZES } = require('../src/main/app/taskbar-completion-badge');
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp/taskbar-completion-badge-smoke');
 fs.mkdirSync(out, { recursive: true }); app.setPath('userData', path.join(out, 'profile'));
 app.setAppUserModelId('relay.fixture.taskbar-completion-badge');
@@ -111,11 +111,13 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(out, 'dpi-comparison.png'), Buffer.from(png, 'base64'));
   check('SyntheticDpiComparisonArtifactWritten', true);
   // Exercise the production loader through an ASAR and its unpacked native file.
-  const asar = require('@electron/asar'), fixture = path.join(out, 'asar-fixture');
+  const asar = require('@electron/asar'), fixture = fs.mkdtempSync(path.join(out, 'asar-fixture-'));
   const source = path.join(fixture, 'source'), nativeDir = path.join(source, 'renderer/taskbar-badges/native');
   fs.mkdirSync(nativeDir, { recursive: true });
   fs.copyFileSync(path.join(directory, 'native/win32-x64.node'), path.join(nativeDir, 'win32-x64.node'));
-  fs.copyFileSync(path.join(root, 'taskbar-completion-badge.js'), path.join(source, 'taskbar-completion-badge.js'));
+  const moduleRelativePath = 'src/main/app/taskbar-completion-badge.js';
+  fs.mkdirSync(path.dirname(path.join(source, moduleRelativePath)), { recursive: true });
+  fs.copyFileSync(path.join(root, moduleRelativePath), path.join(source, moduleRelativePath));
   const suffix = expectedSize === 16 ? '' : '@' + expectedSize / 16 + 'x';
   fs.copyFileSync(path.join(directory, '1' + suffix + '.png'),
     path.join(source, 'renderer/taskbar-badges', '1' + suffix + '.png'));
@@ -123,7 +125,7 @@ app.whenReady().then(async () => {
   // @electron/asar matches absolute filenames; electron-builder's asarUnpack
   // rules are project-relative and are covered by the packaging unit test.
   await asar.createPackageWithOptions(source, archive, { unpack: '*.node' });
-  const packedModule = require(path.join(archive, 'taskbar-completion-badge.js'));
+  const packedModule = require(path.join(archive, moduleRelativePath));
   const packedErrors = [];
   const packedSetter = packedModule.createNativeTaskbarOverlay({
     assetDirectory: path.join(archive, 'renderer/taskbar-badges'), onError: error => packedErrors.push(String(error)),

@@ -7,8 +7,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
-const { SkillMaintenanceHost } = require('../skill-maintenance-host');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { SkillMaintenanceHost } = require('../src/main/skills/skill-maintenance-host');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 
 function declaration(name) {
   const match = new RegExp(`(?:async )?function ${name}\\(`).exec(source);

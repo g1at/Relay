@@ -8,27 +8,36 @@ const os = require('node:os');
 const http = require('node:http');
 const vm = require('node:vm');
 const { randomUUID } = require('node:crypto');
-const relay = require('../claude-sdk');
-const { LiveTurnRouter } = require('../live-turn-router');
-const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../live-async-agent-tracker');
-const { normalizeSupplement, submitLiveSupplement, observeSupplement } = require('../live-supplement-input');
+const relay = require('../src/main/sdk/claude-sdk');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
+const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../src/main/live/live-async-agent-tracker');
+const { normalizeSupplement, submitLiveSupplement, observeSupplement } = require('../src/main/live/live-supplement-input');
+const { SdkSessionObserver, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../src/main/sdk/sdk-session-observer');
+const { resourceEntries, mergeResources } = require('../src/main/sdk/sdk-task-resources');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-steering-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
 fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');
 const fixture = path.join(cwd, 'fixture.txt'); fs.writeFileSync(fixture, 'Synthetic itinerary fixture');
 const output = path.join(__dirname, '../.codex-tmp/sdk-midstream-steering'); fs.mkdirSync(output, { recursive: true });
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const onStart = source.indexOf('  const onMessage = (evt) => {', source.indexOf('function spawnLiveSession'));
 const onEnd = source.indexOf('  const onExit = ', onStart);
 const finishStart = source.indexOf('function finishTurn(sess, resultEvt) {');
 const finishEnd = source.indexOf('// 预启动:', finishStart);
+assert.ok(onStart >= 0 && onEnd > onStart && finishStart >= 0 && finishEnd > finishStart, 'current bootstrap stream boundaries exist');
+function declaration(name) {
+  const start = source.indexOf('function ' + name + '(');
+  assert.ok(start >= 0, name + ' exists in bootstrap');
+  const tail = source.slice(start), next = /\n(?:async )?function \w+\(/.exec(tail);
+  return next ? tail.slice(0, next.index) : tail;
+}
 const report = { sdk: require('../package.json').dependencies['@anthropic-ai/claude-agent-sdk'], checks: [], scenarios: [] };
 let active, server;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function check(name, value) { assert.ok(value, name); report.checks.push(name); }
 async function until(test, label) {
   const deadline = Date.now() + 30000;
-  while (!test()) { if (Date.now() > deadline) throw Error('Timed out: ' + label); await sleep(20); }
+  while (!test()) { if (active?.fatal) throw active.fatal; if (Date.now() > deadline) throw Error('Timed out: ' + label); await sleep(20); }
 }
 function reply(res, body, blocks, hold = false) {
   const message = { id: 'msg_' + randomUUID(), type: 'message', role: 'assistant', model: body.model,
@@ -56,19 +65,29 @@ function reply(res, body, blocks, hold = false) {
 function harness(name) {
   const original = randomUUID(), supplement = randomUUID();
   const state = active = { name, original, supplement, events: [], raw: [], requests: [], results: [] };
-  const sess = state.session = { convId: 'synthetic-conversation', jobId: original, busy: true,
+  const observer = new SdkSessionObserver(), liveSessions = new Map(), records = new Map();
+  const sess = state.session = { convId: randomUUID(), jobId: original, busy: true,
+    observer, launchSpec: { cwd, runtimeCwd: cwd, agentEnvironment: 'native' },
     onEvent: event => { state.events.push(event); if (event.type === 'result') state.results.push(event); },
     keepAliveForAsyncAgents: true, asyncAgentTracker: new LiveAsyncAgentTracker(),
     backgroundTaskTracker: new LiveBackgroundTaskTracker(), turnRouter: new LiveTurnRouter(),
     checkpointRunIds: new Set(), supplementInputs: new Map(), turnStartedAt: Date.now() };
-  sess.turnRouter.begin(original);
-  const context = { TaskClock: require('../task-clock').TaskClock, sess, convId: sess.convId, liveResultDisposition, observeSupplement,
+  sess.turnRouter.begin(original); liveSessions.set(sess.convId, sess);
+  records.set(sess.convId, { id: sess.convId, title: 'Synthetic steering fixture', turns: [{ runId: original, user: 'original', assistant: '' }] });
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock, sess, convId: sess.convId, liveResultDisposition, observeSupplement,
+    observer, liveSessions, liveTombstones: new Map(), nativeFork: null,
+    routeTimingHistory: new RouteTimingHistory(), observeOwnedBackgroundTasks, resourceEntries, mergeResources,
+    process: { env: { CLAUDE_CONFIG_DIR: config } }, path, os: { homedir: () => base },
+    loadConversation: id => records.has(id) ? structuredClone(records.get(id)) : null,
+    persistConversationRecord: record => records.set(record.id, structuredClone(record)),
+    applicationWindows: { mainWindow: null },
     publishLiveSupplement() {}, settleLiveSupplements() { return []; },
     console: { log() {}, warn() {}, error() {} }, interactionBroker: { rejectTask() {} }, checkpointManager: null,
     touchIdleTimer() {}, refreshTrayMenu() {}, retryMissingOrchestrateAgents() { return false; },
     setTimeout() { return { unref() {} }; }, snapshotMcpChildren() {}, killLiveSession() { throw Error('Unexpected session recycle'); } };
-  vm.runInNewContext(`${source.slice(finishStart, finishEnd)}\n${source.slice(onStart, onEnd)}\nglobalThis.ingest = onMessage;`, context);
-  state.ingest = event => { state.raw.push(event); context.ingest(event); };
+  require('./helpers/conversation-permissions-fixture')(context);
+  vm.runInNewContext(`${declaration('compactContextUsage')}\n${declaration('contextRuntimeKey')}\n${source.slice(finishStart, finishEnd)}\n${source.slice(onStart, onEnd)}\nglobalThis.ingest = onMessage;`, context);
+  state.ingest = event => { state.raw.push(event); try { context.ingest(event); } catch (error) { state.fatal = error; throw error; } };
   return state;
 }
 async function scenario(name, url) {
@@ -79,6 +98,8 @@ async function scenario(name, url) {
     CLAUDE_CODE_GIT_BASH_PATH: process.platform === 'win32' ? 'C:\\Program Files\\Git\\bin\\bash.exe' : '',
     HTTP_PROXY: '', HTTPS_PROXY: '', ALL_PROXY: '', http_proxy: '', https_proxy: '', all_proxy: '', NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost' };
   const child = session.child = relay.createLiveSession({ cwd, model: 'fixture-model', runtimeEnv, tools: ['Read'],
+    includeRelayInstructions: false, mcpServers: {},
+    runtimePolicy: { settingSources: [], options: { strictMcpConfig: true, mcpServers: {}, persistSession: false, maxTurns: 4 } },
     canUseTool: async (name, input) => name === 'Read' && input.file_path === fixture
       ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'Only fixture Read is allowed' },
     onMessage: state.ingest, onExit(code, error) { state.exit = { code, error }; },

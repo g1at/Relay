@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { TaskClock } = require('../task-clock');
+const { TaskClock } = require('../src/main/tasks/task-clock');
 
 test('task clock includes retry backoff, Agent and supplement waiting until final delivery', () => {
   let now = 1000;

@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const { SdkSessionObserver, backgroundOwnedTask } = require('../sdk-session-observer');
+const { SdkSessionObserver, backgroundOwnedTask } = require('../src/main/sdk/sdk-session-observer');
 const context = vm.createContext({ window: {} });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/activity-stream.js'), 'utf8'), context);
 const Activity = context.window.RelayActivity;
@@ -78,7 +78,7 @@ test('a late rejection is stale after reset and cannot replace the new context e
 
 test('host and preload expose one owned background command and deny untrusted senders', async () => {
   const h = fixture(), handlers = new Map();
-  const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const begin = main.indexOf("ipcMain.handle('claude:backgroundTask'");
   const end = main.indexOf('\nipcMain.handle(', begin + 1);
   vm.runInNewContext(main.slice(begin, end), { ipcMain: { handle: (name, callback) => handlers.set(name, callback) },

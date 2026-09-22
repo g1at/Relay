@@ -8,8 +8,8 @@ const os = require('node:os');
 const { EventEmitter, once } = require('node:events');
 const { Worker } = require('node:worker_threads');
 const { performance } = require('node:perf_hooks');
-const { TaskProgressClient } = require('../task-progress-client');
-const { TaskProgressStore } = require('../task-progress-store');
+const { TaskProgressClient } = require('../src/main/tasks/task-progress-client');
+const { TaskProgressStore } = require('../src/main/tasks/task-progress-store');
 const Output = require('../renderer/assistant-output');
 
 const assistant = (id, text) => ({ type: 'assistant', uuid: `frame-${id}`, message: { id, content: [{ type: 'text', text }] } });
@@ -230,7 +230,7 @@ test('16 MiB snapshots are reduced and serialized off-thread while the host hear
           return snapshot.call(this, entry);
         };
         require(workerData.implementation);`, { eval: true, workerData: { ...options.workerData,
-          implementation: file, storeFile: require.resolve('../task-progress-store') } });
+          implementation: file, storeFile: require.resolve('../src/main/tasks/task-progress-store') } });
     }
   }
   const client = h.client({ rootDir: path.join(h.root, 'instrumented'), WorkerClass: ObservedWorker });

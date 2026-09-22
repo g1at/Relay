@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TaskEventJournal } = require('../task-event-journal');
+const { TaskEventJournal } = require('../src/main/tasks/task-event-journal');
 
 function makeRoot(t) {
   let rootDir;

@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const test = require('node:test');
-const { CheckpointManager } = require('../checkpoint-manager');
+const { CheckpointManager } = require('../src/main/tasks/checkpoint-manager');
 
 function fixture(t) {
   let base = os.tmpdir();

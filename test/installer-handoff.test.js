@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
 const start = source.indexOf('const wizardHandoffs = new WeakMap();');
-const end = source.indexOf('// ─', start);
+const end = source.indexOf('function markQuitting()', start);
 
 function fixture() {
   const events = [], attempts = [];
@@ -17,7 +17,7 @@ function fixture() {
   const sender = { getURL: () => state.url };
   let handler;
   vm.runInNewContext(source.slice(start, end), {
-    WeakMap, Promise, Error, path, pathToFileURL, __dirname: path.join(__dirname, '..'),
+    WeakMap, Promise, Error, path, pathToFileURL, appRoot: path.join(__dirname, '..'),
     FIRST_RUN_SETUP_VERSION: 1,
     BrowserWindow: { fromWebContents: value => value === sender ? wizard : null },
     ipcMain: { handle: (name, fn) => { assert.equal(name, 'wizard:complete'); handler = fn; } },

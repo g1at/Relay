@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeRuntimePolicy, buildRuntimePolicy, createRuntimeDiagnostics, summarizeInstructionsLoaded } = require('../sdk-runtime-policy');
+const { normalizeRuntimePolicy, buildRuntimePolicy, createRuntimeDiagnostics, summarizeInstructionsLoaded } = require('../src/main/sdk/sdk-runtime-policy');
 
 test('defaults explicitly retain Relay memory without automatic SDK writes or project settings', () => {
   const input = { model: 'provider-secret-model', alwaysThinking: false, updatedAt: 'unchanged' };

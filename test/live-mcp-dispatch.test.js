@@ -5,11 +5,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { dispatchLiveInput, cancelPendingLiveInput } = require('../live-mcp-dispatch');
+const { dispatchLiveInput, cancelPendingLiveInput } = require('../src/main/live/live-mcp-dispatch');
 
 // All preparation, input and observer APIs are in-memory doubles. Loading the
 // actual dispatch helper and selected main functions never starts Relay/SDK/MCP.
-const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const copy = value => JSON.parse(JSON.stringify(value));
 function deferred() {
   let resolve, reject;
@@ -242,7 +242,7 @@ function mainHarness() {
   const end = main.indexOf('// IPC: 中止任务', start);
   assert.ok(start >= 0 && end > start);
   vm.runInNewContext(main.slice(start, end), context);
-  context.liveTurnControls = new (require('../live-turn-control').LiveTurnControls)({
+  context.liveTurnControls = new (require('../src/main/live/live-turn-control').LiveTurnControls)({
     cancelPendingInput: cancelPendingLiveInput, settleUnsent: context.settleUnsentLiveTurn,
     withTimeout: context.withLiveControlTimeout, waitForIdle: context.waitForLiveTurnIdle, killSession: context.killLiveSession,
   });

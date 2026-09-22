@@ -2,18 +2,21 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-const openSource = source.slice(source.indexOf('async function openConfiguredWebLink('), source.indexOf('// 创建首次设置向导窗口'));
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
+const windowSource = fs.readFileSync(path.join(__dirname, '../src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
+const openSource = windowSource.slice(windowSource.indexOf('async function openConfiguredWebLink('), windowSource.indexOf('// 创建首次设置向导窗口'));
 const shellSource = source.slice(source.indexOf("ipcMain.handle('shell:open'"), source.indexOf('// IPC: 文件选择对话框'));
 function fixture() {
   const routed = [], external = [], warnings = [], handlers = new Map(); let shown = 0;
   const main = { webContents: { mainFrame: {}, on() {}, setWindowOpenHandler() {} }, isDestroyed: () => false, relayContentReady: Promise.resolve() };
-  const context = vm.createContext({ mainWindow: main, pathToFileURL, Promise, require: require('node:module').createRequire(path.join(__dirname, '../main.js')),
+  const context = vm.createContext({ mainWindow: main, pathToFileURL, Promise, require: require('node:module').createRequire(path.join(__dirname, '../src/main/app/application-windows.js')),
     browserPanelTools: { openLink: async url => { routed.push(url); return { ok: true, tab: { id: 'tab', url } }; } },
     showMainWindow: () => shown++, createMainWindow: () => main,
     shell: { openExternal: async url => external.push(url) }, logger: { warn: (...args) => warnings.push(args) },
     ipcMain: { handle: (name, fn) => handlers.set(name, fn) }, miniPanelCaller: event => !!event.mini,
   });
+  context.browser = { openLink: url => context.browserPanelTools.openLink(url) };
+  context.applicationWindows = { get mainWindow() { return context.mainWindow; }, openConfiguredWebLink: url => context.openConfiguredWebLink(url) };
   vm.runInContext(openSource + '\n' + shellSource, context);
   return { context, main, routed, external, warnings, shown: () => shown,
     open: (url, event = { sender: main.webContents, senderFrame: main.webContents.mainFrame }) => handlers.get('shell:open')(event, url) };

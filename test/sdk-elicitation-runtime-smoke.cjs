@@ -26,8 +26,8 @@ async function runHostFixture() {
   const assert = require('node:assert/strict');
   const http = require('node:http');
   const { randomUUID } = require('node:crypto');
-  const relay = require('../claude-sdk');
-  const { InteractionBroker } = require('../interaction-broker');
+  const relay = require('../src/main/sdk/claude-sdk');
+  const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-sdk-elicitation-'));
   const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
   fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');

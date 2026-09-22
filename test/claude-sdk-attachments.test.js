@@ -7,9 +7,9 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { dispatchLiveInput } = require('../live-mcp-dispatch');
-const { submitLiveSupplement, normalizeSupplement } = require('../live-supplement-input');
-const { LiveTurnRouter } = require('../live-turn-router');
+const { dispatchLiveInput } = require('../src/main/live/live-mcp-dispatch');
+const { submitLiveSupplement, normalizeSupplement } = require('../src/main/live/live-supplement-input');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
 const JOB = '11111111-1111-4111-8111-111111111111';
@@ -33,7 +33,7 @@ function fixture(t, { prepareContent } = {}) {
       },
     };
   } };
-  const sdkPath = path.join(__dirname, '..', 'claude-sdk.js');
+  const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const source = fs.readFileSync(sdkPath, 'utf8').replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fixtureSdk);');
   const context = vm.createContext({ fixtureSdk: fakeSdk, process, AbortController, console: { warn() {}, error() {} }, setTimeout, clearTimeout });
   const factory = new vm.Script(`(function(require,module,exports,__dirname) {\n${source}\n})`, { filename: sdkPath }).runInContext(context);
@@ -99,7 +99,7 @@ for (const kind of ['live', 'one-shot']) test(`${kind} cancellation during host 
   let markReading, finishReading;
   const reading = new Promise(resolve => { markReading = resolve; });
   const gate = new Promise(resolve => { finishReading = resolve; });
-  const actual = require('../attachment-input').prepareAttachmentContent;
+  const actual = require('../src/main/sdk/attachment-input').prepareAttachmentContent;
   const f = fixture(t, { prepareContent: async (...args) => { markReading(); await gate; return actual(...args); } });
   const params = { prompt: '检查截图', files: [{ path: f.imagePath }], onEvent: f.emit, onMessage: f.emit, onExit() {} };
   const handle = kind === 'live' ? f.sdk.createLiveSession(params) : f.sdk.runOneShot(params).handle;

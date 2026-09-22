@@ -5,8 +5,8 @@ const { harness, clone, full, result, stream } = require('./renderer-activity-ha
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TaskEventJournal } = require('../task-event-journal');
-const { TaskProgressStore } = require('../task-progress-store');
+const { TaskEventJournal } = require('../src/main/tasks/task-event-journal');
+const { TaskProgressStore } = require('../src/main/tasks/task-progress-store');
 
 const ledgerTask = (runId, state, turnIndex) => ({
   runId, kind: 'chat', state, source: { conversationId: 'conv', turnIndex },

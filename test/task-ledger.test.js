@@ -10,8 +10,8 @@ const {
   canTransition,
   assertTransition,
   selectTaskSnapshotRuns,
-} = require('../task-protocol');
-const { TaskLedger } = require('../task-ledger');
+} = require('../src/main/tasks/task-protocol');
+const { TaskLedger } = require('../src/main/tasks/task-ledger');
 
 function makeLedger(t, overrides = {}) {
   let rootDir;

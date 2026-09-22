@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { createUsageObserver } = require('../usage-capture');
+const { createUsageObserver } = require('../src/main/usage/usage-capture');
 const plain = value => JSON.parse(JSON.stringify(value));
 const result = (extra = {}) => ({ type: 'result', subtype: 'success', is_error: false,
   session_id: 'fixture-session', uuid: 'fixture-result', num_turns: 1,
@@ -47,7 +47,7 @@ test('invalid numbers remain absent and collector failures cannot break executio
 });
 
 function sdkFixture(queryFactory) {
-  const file = path.join(__dirname, '../claude-sdk.js');
+  const file = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const original = fs.readFileSync(file, 'utf8');
   const source = original.replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fixtureSdk);');
   assert.notEqual(source, original);

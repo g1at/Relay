@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeClaudeTaskEvent, summarizeResultText } = require('../task-event-normalizer');
+const { normalizeClaudeTaskEvent, summarizeResultText } = require('../src/main/tasks/task-event-normalizer');
 
 const now = '2026-08-24T10:00:00.000Z';
 

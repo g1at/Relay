@@ -4,13 +4,13 @@
 // synthetic; directories and instruction fingerprints are isolated in /tmp.
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), vm = require('node:vm'), crypto = require('node:crypto');
-const sdk = require('../claude-sdk');
-const execution = require('../execution-modes');
-const { createProjectStore } = require('../project-store');
-const workspace = require('../conversation-workspaces');
-const provenance = require('../sdk-session-provenance');
-const { createSessionForkService } = require('../sdk-session-forks');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const sdk = require('../src/main/sdk/claude-sdk');
+const execution = require('../src/main/projects/execution-modes');
+const { createProjectStore } = require('../src/main/projects/project-store');
+const workspace = require('../src/main/projects/conversation-workspaces');
+const provenance = require('../src/main/sdk/sdk-session-provenance');
+const { createSessionForkService } = require('../src/main/sdk/sdk-session-forks');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const uuid = n => `10000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 function declaration(name) {
@@ -32,23 +32,23 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
   const persistConversationRecord = value => records.set(value.id, clone(value));
   const workspaces = workspace.createConversationWorkspaces({ homeDir: root, getBaseDir: () => base, loadConversation, persistConversationRecord });
   let handler, saveHandler;
-  const context = { TaskClock: require('../task-clock').TaskClock,
-    taskContinuityHost: new (require('../task-continuity-host').TaskContinuityHost)({ loadConversation }),
-    ...execution, ...workspace, ...provenance, ...require('../sdk-runtime-contract'), ...require('../sdk-runtime-policy'),
-    ...require('../live-async-agent-tracker'), ...require('../sdk-session-observer'), ...require('../sdk-task-resources'),
-    ...require('../live-supplement-input'), ...require('../live-mcp-dispatch'),
-    ...require('../sdk-user-dialog'), ...require('../sdk-tool-proposals'),
-    ...require('../live-prewarm-reuse'),
-    ...require('../memory-runtime'), relayMemoryStore: new (require('../memory-store').MemoryStore)({ dir: memory }),
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
+    taskContinuityHost: new (require('../src/main/tasks/task-continuity-host').TaskContinuityHost)({ loadConversation }),
+    ...execution, ...workspace, ...provenance, ...require('../src/main/sdk/sdk-runtime-contract'), ...require('../src/main/sdk/sdk-runtime-policy'),
+    ...require('../src/main/live/live-async-agent-tracker'), ...require('../src/main/sdk/sdk-session-observer'), ...require('../src/main/sdk/sdk-task-resources'),
+    ...require('../src/main/live/live-supplement-input'), ...require('../src/main/live/live-mcp-dispatch'),
+    ...require('../src/main/sdk/sdk-user-dialog'), ...require('../src/main/sdk/sdk-tool-proposals'),
+    ...require('../src/main/live/live-prewarm-reuse'),
+    ...require('../src/main/memory/memory-runtime'), relayMemoryStore: new (require('../src/main/memory/memory-store').MemoryStore)({ dir: memory }),
     memoryRequestContexts: new Map(), rebuildMemoryIndex() {}, notifySkillUsageUpdated() {},
     readMemoryUsage: () => ({}), flushMemoryUsage() {},
     getSdkPluginStore: () => ({ runtime: () => ({ plugins: [], settings: { enabledPlugins: {}, pluginConfigs: {} }, fingerprint: 'fixture' }) }),
-    LiveTurnRouter: require('../live-turn-router').LiveTurnRouter, createSessionForkService,
+    LiveTurnRouter: require('../src/main/live/live-turn-router').LiveTurnRouter, createSessionForkService,
     crypto, path, process: { env: { CLAUDE_CONFIG_DIR: path.join(root, '.claude') } }, os: { homedir: () => root },
     fs: { ...fs, existsSync: file => records.has(file) || fs.existsSync(file) },
     convFilePath: id => id, loadConversation, persistConversationRecord, getProjectStore: () => projects,
     getConversationWorkspaces: () => workspaces, readAppSettings: () => settings,
-    getSdkRuntimeStorage: () => require('../sdk-runtime-storage').createSdkRuntimeStorage({ dataDir: path.join(root, 'app-data') }),
+    getSdkRuntimeStorage: () => require('../src/main/sdk/sdk-runtime-storage').createSdkRuntimeStorage({ dataDir: path.join(root, 'app-data') }),
     normalizePreferences: value => ({ ...value, agentEnvironment: value.agentEnvironment || 'native' }),
     WORKSPACE_UUID: workspace.UUID, toWslPath: value => value, MEMORY_DIR: memory, AGENTS_DIR: path.join(root, 'agents'),
     loadNativeAgent: () => { throw Error('No Agent fixture should be loaded'); },
@@ -102,8 +102,16 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
     'runLiveTurn', 'runClaudeJob', 'saveConversation', 'getNativeForkService']) vm.runInContext(declaration(name), context);
   const start = source.indexOf("ipcMain.handle('claude:run',"), end = source.indexOf('// IPC: 丢弃某对话', start);
   vm.runInContext(source.slice(start, end), context);
-  const saveStart = source.indexOf("ipcMain.handle('history:save',"), saveEnd = source.indexOf("\nipcMain.handle(", saveStart + 1);
-  vm.runInContext(source.slice(saveStart, saveEnd), context);
+  const { registerHistoryIpc } = require('./helpers/load-commonjs.cjs')('src/main/app/history-ipc.js', {
+    modules: { fs: context.fs },
+  });
+  registerHistoryIpc({
+    ipcMain: { handle(name, value) { if (name === 'history:save') saveHandler = value; } },
+    history: { loadConversation, persistConversationRecord, convFilePath: context.convFilePath },
+    projects: { projectConversation: value => context.projectConversation(value) }, nativeHistory: {},
+    isMiniChatActive: () => false, saveConversation: value => context.saveConversation(value),
+    protectSdkMetadata: provenance.protectSdkMetadata,
+  });
   const record = { id: uuid(1), title: 'Source', sessionId: uuid(2), projectId: null, workingDir: null,
     model: 'haiku', effort: 'low', mode: 'plain', permissionMode: 'default', executionMode: { kind: 'default' },
     sessionProviderId: runtime.id, sessionProviderRevision: runtime.revision, sessionAgentEnvironment: 'native', sessionRouteTier: 'haiku',

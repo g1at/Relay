@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { ProviderStore } = require('../provider-store');
-const { buildRelayRuntimeEnv, RELAY_PROVIDER_ENV_KEYS } = require('../claude-sdk');
+const { ProviderStore } = require('../src/main/providers/provider-store');
+const { buildRelayRuntimeEnv, RELAY_PROVIDER_ENV_KEYS } = require('../src/main/sdk/claude-sdk');
 const {
   providerApiUrl,
   providerModelApiCandidates,
@@ -17,7 +17,7 @@ const {
   imageRequestRoute,
   testProviderConnection,
   discoverProviderModels,
-} = require('../provider-connectivity');
+} = require('../src/main/providers/provider-connectivity');
 
 test('模型目录候选兼容 Claude 网关前缀且始终限制在同域', () => {
   assert.deepEqual(providerModelApiCandidates('https://gateway.example/team/anthropic/v1'), [
@@ -787,13 +787,15 @@ test('旧版独立图像配置迁移到同连接服务商且不复制明文密�
 
 test('Relay 主进程不再写外部 Claude API / 模型配置', () => {
   const root = path.resolve(__dirname, '..');
-  const main = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
+  const main = ['src/main/bootstrap.js', 'src/main/providers/provider-ipc.js',
+    'src/main/app/app-settings-service.js', 'src/main/app/application-windows.js']
+    .map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n');
   const renderer = fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8');
   const preload = fs.readFileSync(path.join(root, 'preload.js'), 'utf8');
   const wizard = fs.readFileSync(path.join(root, 'installer', 'wizard.html'), 'utf8');
   const wizardScript = fs.readFileSync(path.join(root, 'installer', 'wizard.js'), 'utf8');
   const packageJson = fs.readFileSync(path.join(root, 'package.json'), 'utf8');
-  const providerStore = fs.readFileSync(path.join(root, 'provider-store.js'), 'utf8');
+  const providerStore = fs.readFileSync(path.join(root, 'src/main/providers/provider-store.js'), 'utf8');
   assert.doesNotMatch(main, /function\s+writeSettings\s*\(/);
   assert.match(main, /function\s+readLegacyClaudeSettings\s*\(/);
   assert.match(main, /providerStore\.createProfile\s*\(/);

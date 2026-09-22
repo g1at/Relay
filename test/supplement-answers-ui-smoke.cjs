@@ -4,7 +4,7 @@
 const { app, BrowserWindow, session, ipcMain } = require('electron');
 const fs = require('node:fs'), path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { createMiniChatController } = require('../mini-chat-controller');
+const { createMiniChatController } = require('../src/main/app/mini-chat-controller');
 const root = path.resolve(__dirname, '..');
 const out = path.join(root, '.codex-tmp/supplement-answers-ui-smoke');
 fs.mkdirSync(out, { recursive: true });

@@ -2,8 +2,8 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const Context = require('../renderer/conversation-context');
-const { protectSdkMetadata } = require('../sdk-session-provenance');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { protectSdkMetadata } = require('../src/main/sdk/sdk-session-provenance');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const start = source.indexOf("ipcMain.handle('claude:clearContext'");
 const end = source.indexOf('\n});', start) + 4;
 function harness() {

@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { createSessionForkService } = require('../sdk-session-forks');
-const { createProjectStore } = require('../project-store');
+const { createSessionForkService } = require('../src/main/sdk/sdk-session-forks');
+const { createProjectStore } = require('../src/main/projects/project-store');
 const copy = value => JSON.parse(JSON.stringify(value));
 const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 function fixture() {

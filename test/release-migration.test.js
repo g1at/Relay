@@ -12,7 +12,7 @@ const vm = require('node:vm');
 const yaml = require('js-yaml');
 const { NsisUpdater } = require('electron-updater/out/NsisUpdater');
 const manifest = require('../package.json');
-const source = fs.readFileSync(path.join(__dirname, '../updater.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/app/updater.js'), 'utf8');
 
 function client(t, { current, repository, latest, unavailable = false }) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-feed-migration-'));

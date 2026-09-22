@@ -8,6 +8,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { createRequire } = require('node:module');
 const asar = require('@electron/asar');
 const { CancellationToken } = require('builder-util-runtime');
 const { Platform } = require('app-builder-lib/out/core');
@@ -15,7 +16,7 @@ const { getMainFileMatchers, getNodeModuleFileMatcher, getFileMatchers } = requi
 const { computeFileSets, computeNodeModuleFileSets, getDestinationPath } = require('app-builder-lib/out/util/appFileCopier');
 const { AsarPackager } = require('app-builder-lib/out/asar/asarUtil');
 const verifySdkPackaging = require('../build/verify-sdk-packaging.cjs');
-const { runtimePath } = require('../agent-environment');
+const { runtimePath } = require('../src/main/sdk/agent-environment');
 
 const project = path.resolve(__dirname, '..');
 const manifest = require('../package.json');
@@ -31,6 +32,12 @@ function fixture(t, nested = false) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   write(path.join(root, 'package.json'), JSON.stringify({ name: 'relay', version: manifest.version, dependencies: manifest.dependencies }));
   write(path.join(root, 'main.js'), '// Packaging fixture only. Never launch this as an application.');
+  for (const file of ['src/main/bootstrap.js', 'src/main/app/paths.js', 'src/main/sdk/fixture.cjs']) {
+    write(path.join(root, file), '// Controlled application source fixture.');
+  }
+  for (const file of ['docs/private.js', 'design/private.js', 'build/private.js', 'src/main/private.json', 'src/main/private.test.txt']) {
+    write(path.join(root, file), 'Do not package this fixture.');
+  }
   const sdkDir = path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
   write(path.join(sdkDir, 'package.json'), JSON.stringify({ name: sdk.name, version: sdk.version }));
   write(path.join(sdkDir, 'sdk.mjs'), 'export const packagingFixture = true;');
@@ -72,6 +79,8 @@ for (const nested of [false, true]) test(`actual builder file collection keeps e
   const sets = await f.collect();
   const destinations = sets.flatMap(set => set.files.filter(file => set.metadata.get(file)?.isFile()).map(file => path.relative(f.destination, getDestinationPath(file, set)).replace(/\\/g, '/')));
   const binaries = destinations.filter(file => /\/claude(?:\.exe)?$/.test(file)).sort();
+  for (const file of ['src/main/bootstrap.js', 'src/main/app/paths.js', 'src/main/sdk/fixture.cjs']) assert.ok(destinations.includes(file), file);
+  assert.equal(destinations.some(file => /^(?:docs|design|build)\//.test(file) || file.includes('/private.')), false);
   assert.deepEqual(binaries, wanted.map(name => `node_modules/${name}/${binName(name)}`).sort());
   for (const name of platformNames.filter(name => !wanted.includes(name))) assert.equal(destinations.some(file => file.includes(name)), false, `${name} must not ship`);
   for (const name of wanted) {
@@ -109,7 +118,7 @@ test('standalone unpacked helpers can load their production dependencies without
   await new AsarPackager(f.root, f.resources, { smartUnpack: false }, f.unpackMatcher.createFilter())
     .pack(await f.collect(), f.packager);
   const unpacked = path.join(f.resources, 'app.asar.unpacked');
-  for (const file of ['sdk-settings-probe.cjs', 'sdk-session-history.js', 'usage-stats-service.js']) {
+  for (const file of ['src/main/sdk/sdk-settings-probe.cjs', 'src/main/sdk/sdk-session-history.js', 'src/main/usage/usage-stats-service.js']) {
     const result = spawnSync(process.execPath, ['-e', 'require(process.argv[1]);', path.join(unpacked, file)], {
       encoding: 'utf8', timeout: 10000,
       env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' },
@@ -121,20 +130,21 @@ test('standalone unpacked helpers can load their production dependencies without
 
 test('packaged draft client resolves and runs the unpacked worker with its complete dependency set', async t => {
   const f = fixture(t);
-  const files = ['skill-draft-client.js', 'skill-draft-worker.js', 'skill-draft-service.js', 'sdk-native-events.js'];
+  const files = ['src/main/skills/skill-draft-client.js', 'src/main/skills/skill-draft-worker.js', 'src/main/skills/skill-draft-service.js', 'src/main/sdk/sdk-native-events.js', 'src/main/app/paths.js'];
   for (const file of files) write(path.join(f.root, file), fs.readFileSync(path.join(project, file)));
   await new AsarPackager(f.root, f.resources, { smartUnpack: false }, f.unpackMatcher.createFilter())
     .pack(await f.collect(), f.packager);
   const archive = path.join(f.resources, 'app.asar');
   for (const file of files.slice(1)) {
-    assert.equal(asar.statFile(archive, file).unpacked, true, file);
+    assert.equal(asar.statFile(archive, path.normalize(file)).unpacked, true, file);
     assert.deepEqual(fs.readFileSync(path.join(archive + '.unpacked', file)), fs.readFileSync(path.join(project, file)));
   }
   // Load the actual packaged client with Electron's app.asar directory. The
   // Worker runs ordinary Node, so missing unpacked dependencies fail for real.
   const packagedModule = { exports: {} };
-  const load = new Function('__dirname', 'require', 'module', asar.extractFile(archive, 'skill-draft-client.js').toString('utf8'));
-  load(archive, require, packagedModule);
+  const load = new Function('__dirname', 'require', 'module', asar.extractFile(archive, path.normalize('src/main/skills/skill-draft-client.js')).toString('utf8'));
+  const clientFile = path.join(archive, files[0]);
+  load(path.dirname(clientFile), createRequire(path.join(archive + '.unpacked', files[0])), packagedModule);
   const skillsDir = path.join(f.root, 'isolated-skills');
   const client = new packagedModule.exports.SkillDraftClient({ skillsDir, draftsDir: path.join(f.root, 'isolated-drafts') });
   try {
@@ -151,13 +161,17 @@ test('packaged draft client resolves and runs the unpacked worker with its compl
 });
 
 function nativeResolver(directory) {
-  const source = fs.readFileSync(path.join(project, 'claude-sdk.js'), 'utf8');
+  const source = fs.readFileSync(path.join(project, 'src/main/sdk/claude-sdk.js'), 'utf8');
   const start = source.indexOf('const RUNTIME_PKG =');
   const end = source.indexOf('\nfunction buildOptions(', start);
   assert.ok(start >= 0 && end > start, 'native runtime resolver source boundaries must exist');
   const code = source.slice(start, end);
   const probes = [];
-  const context = vm.createContext({ __dirname: directory, path, process: { platform: 'win32', arch: 'x64' }, console: { warn() {} },
+  const unpackPath = file => file.replace(/([\\/])app\.asar(?=[\\/]|$)/, '$1app.asar.unpacked');
+  const resourcePath = (...segments) => path.join(directory, ...segments);
+  const context = vm.createContext({ __dirname: path.join(directory, 'src/main/sdk'), appRoot: directory, resourcePath,
+    unpackPath, unpackedPath: (...segments) => unpackPath(resourcePath(...segments)),
+    path, process: { platform: 'win32', arch: 'x64' }, console: { warn() {} },
     fs: { existsSync(file) { probes.push(file); return fs.existsSync(file); } } });
   vm.runInContext(code + '\nthis.resolve = bundledExecutable;', context);
   return { resolve: () => context.resolve(), probes };

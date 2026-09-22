@@ -8,8 +8,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { create } = require('../renderer/window-chrome');
 const repo = path.resolve(__dirname, '..');
-const mainSource = fs.readFileSync(path.join(repo, 'main.js'), 'utf8');
-const chromeSource = mainSource.slice(mainSource.indexOf('const MAIN_WINDOW_CHROME_HEIGHT'), mainSource.indexOf('// renderer 的 warning'));
+const loadCommonJs = require('./helpers/load-commonjs.cjs');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function mainFixture(platform = 'win32', dark = false, release = '10.0.22631') {
@@ -18,7 +17,7 @@ function mainFixture(platform = 'win32', dark = false, release = '10.0.22631') {
     constructor(options) {
       super();
       this.options = options;
-      this.webContents = { mainFrame: {}, openDevTools() {} };
+      this.webContents = Object.assign(new EventEmitter(), { mainFrame: {}, openDevTools() {}, setWindowOpenHandler() {} });
       this.overlays = [];
       this.backgrounds = [];
       this.backgroundColor = options.backgroundColor;
@@ -36,23 +35,36 @@ function mainFixture(platform = 'win32', dark = false, release = '10.0.22631') {
     setTitleBarOverlay(options) { this.titleBarOverlay = options; this.overlays.push(options); }
     hide() { this.hidden = true; }
   }
-  const context = vm.createContext({
-    process: { platform }, os: { release: () => release }, path, __dirname: repo, mainWindow: null, currentAppIcon: () => 'fixture-icon',
-    BrowserWindow: MockWindow, readAppSettings: () => ({ theme: dark ? 'dark' : 'light' }),
-    nativeTheme: { shouldUseDarkColors: dark }, IS_DEV: false,
-    ipcMain: { on(name, callback) { assert.equal(handlers.has(name), false); handlers.set(name, callback); } },
-    attachExternalLinkGuard() {}, attachRendererConsoleLog() {}, createTray() {},
-    taskbarCompletionBadge: { refresh() {} },
-    interactionBroker: { rejectWindow() {} }, isQuitting: false, trayBalloonShown: true,
+  MockWindow.getAllWindows = () => [];
+  class MockTray extends EventEmitter {
+    setToolTip() {} setContextMenu() {} displayBalloon() {}
+  }
+  const { createApplicationWindows } = loadCommonJs('src/main/app/application-windows.js', {
+    globals: { process: { platform }, },
+    modules: { './native-brand-theme': { createNativeBrandTheme: () => ({ usesLightArtwork: () => false, dispose() {} }) } },
   });
-  vm.runInContext(chromeSource, context);
+  const context = createApplicationWindows({
+    electron: { app: { isPackaged: false }, BrowserWindow: MockWindow,
+      Tray: MockTray, Menu: { buildFromTemplate: value => value },
+      nativeImage: { createFromPath: () => ({ isEmpty: () => false }) },
+      nativeTheme: { shouldUseDarkColors: dark },
+      ipcMain: {
+        on(name, callback) { assert.equal(handlers.has(name), false); handlers.set(name, callback); },
+        handle(name, callback) { assert.equal(handlers.has(name), false); handlers.set(name, callback); },
+      } },
+    logger: { error() {}, warn() {} }, settings: { read: () => ({ theme: dark ? 'dark' : 'light' }) },
+    tasks: { refreshBadge() {}, rejectWindow() {}, scheduleRetention() {},
+      runningCount: () => 0, waitingInteractions: () => [], nextScheduledHint: () => null },
+    mini: { shortcut: () => '' }, browser: {}, startup: {},
+    providers: { store: { getRoutingView: () => ({ chatRoutes: [] }) } }, HAS_SINGLE_INSTANCE_LOCK: false,
+  });
   return { win: context.createMainWindow(), handlers, context };
 }
 
 test('Windows 原生按钮叠层留出底部分隔线并保留窗口及托盘行为', () => {
   const { win } = mainFixture('win32', true);
   assert.equal(win.options.title, 'Relay');
-  assert.equal(win.options.icon, 'fixture-icon');
+  assert.equal(win.options.icon, path.join(repo, 'build', 'icon.ico'));
   assert.equal(win.options.titleBarStyle, 'hidden');
   assert.deepEqual(plain(win.options.titleBarOverlay), { color: '#1a1a1a', symbolColor: '#e4e4e7', height: 35 });
   assert.notEqual(win.options.frame, false);

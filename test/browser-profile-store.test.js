@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
-const { createBrowserProfileStore } = require('../browser-profile-store');
+const { createBrowserProfileStore } = require('../src/main/browser/browser-profile-store');
 function temporary(t) { const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-browser-profile-')); t.after(() => fs.rmSync(rootDir, { recursive: true, force: true })); return rootDir; }
 
 test('settings, history, bookmarks and permission rules survive reopening an isolated browser profile', t => {

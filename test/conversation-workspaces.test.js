@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createConversationWorkspaces, conversationContext } = require('../conversation-workspaces');
+const { createConversationWorkspaces, conversationContext } = require('../src/main/projects/conversation-workspaces');
 const ID = '10000000-0000-4000-8000-000000000001';
 const OTHER = '10000000-0000-4000-8000-000000000002';
 function fixture(t) {
@@ -256,7 +256,7 @@ test('scratch rejects invalid IDs and junctions escaping the owned data director
 test('native tool process uses session scratch by default while its cwd remains the project', t => {
   const f = fixture(t), project = path.join(f.home, 'project'); fs.mkdirSync(project);
   const resolved = f.service.resolveWorkspace({ conversationId: ID, workingDir: project });
-  const options = require('../claude-sdk')._buildOptions({ cwd: resolved.cwd, scratchDir: resolved.scratchDir });
+  const options = require('../src/main/sdk/claude-sdk')._buildOptions({ cwd: resolved.cwd, scratchDir: resolved.scratchDir });
   // A harmless Node subprocess substitutes for a tool, with no SDK/network call.
   const source = "const fs=require('fs'),os=require('os'),path=require('path'); const temp=fs.mkdtempSync(path.join(os.tmpdir(),'fixture-')); fs.writeFileSync(path.join(temp,'sample.txt'),'synthetic'); console.log(JSON.stringify({cwd:process.cwd(),temp}));";
   const child = require('node:child_process').spawnSync(process.execPath, ['-e', source], { cwd: options.cwd, env: options.env, encoding: 'utf8', timeout: 10000 });

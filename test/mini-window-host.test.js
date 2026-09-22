@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
-const { createMiniWindowHost, isQuickChatEnabled, normalizeQuickChatPatch } = require('../mini-window-host');
+const { createMiniWindowHost, isQuickChatEnabled, normalizeQuickChatPatch } = require('../src/main/app/mini-window-host');
 
 function fixture(t, initial = {}) {
   let settings = structuredClone(initial), clock = 0, nextTimer = 0, failWrites = false;

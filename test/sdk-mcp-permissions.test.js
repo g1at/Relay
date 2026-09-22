@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { McpPermissionOverrides, createMcpPermissions, requiresMcpApproval, mcpApprovalHook } = require('../sdk-mcp-permissions');
-const { InteractionBroker } = require('../interaction-broker');
-const relay = require('../claude-sdk');
+const { McpPermissionOverrides, createMcpPermissions, requiresMcpApproval, mcpApprovalHook } = require('../src/main/sdk/sdk-mcp-permissions');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
+const relay = require('../src/main/sdk/claude-sdk');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm'), { createRequire } = require('node:module');
 
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
@@ -21,7 +21,7 @@ function liveFixture({ onOverride = async () => {} } = {}) {
       async *[Symbol.asyncIterator]() { for await (const input of prompt) { inputs.push(input); received.resolve(); yield { type: 'result', subtype: 'success', result: 'fixture', user_message_uuid: input.uuid }; } },
     };
   } };
-  const filename = path.join(__dirname, '../claude-sdk.js');
+  const filename = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const source = fs.readFileSync(filename, 'utf8').replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fakeSdk);');
   const context = vm.createContext({ fakeSdk, process, console: { error() {}, warn() {} }, AbortController, setTimeout, clearTimeout });
   const loaded = { exports: {} };

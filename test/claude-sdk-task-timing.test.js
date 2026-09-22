@@ -3,10 +3,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { TaskClock } = require('../task-clock');
+const { TaskClock } = require('../src/main/tasks/task-clock');
 
 function fixture(events, clock) {
-  const file = path.join(__dirname, '../claude-sdk.js');
+  const file = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const localRequire = createRequire(file);
   const fakeSdk = { query({ prompt }) {
     return { initializationResult: async () => ({}), close() {}, async *[Symbol.asyncIterator]() {
@@ -18,7 +18,7 @@ function fixture(events, clock) {
   const context = vm.createContext({ fixtureSdk: fakeSdk, process, AbortController, console: { warn() {}, error() {} }, setTimeout, clearTimeout });
   const factory = new vm.Script(`(function(require,module,exports,__dirname) {\n${source}\n})`, { filename: file }).runInContext(context);
   const loaded = { exports: {} };
-  factory(name => name === './task-clock' ? { TaskClock: class extends TaskClock {
+  factory(name => name === '../tasks/task-clock' ? { TaskClock: class extends TaskClock {
     constructor(options) { super({ ...options, now: () => clock.now }); }
   } } : localRequire(name), loaded, loaded.exports, path.dirname(file));
   return loaded.exports;

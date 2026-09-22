@@ -34,7 +34,7 @@ function seed() {
 }
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
-  const scripts = fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8') + `\n(${seed.toString()})();`;
+  const scripts = fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8') + `\n(${seed.toString()})();`;
   const html = fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', `<head><base href="${pathToFileURL(path.join(root, 'renderer') + path.sep).href}"><script>${scripts}</script>`);
   const page = path.join(out, 'fixture.html'); fs.writeFileSync(page, html);
   win = new BrowserWindow({ width: 1100, height: 760, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });

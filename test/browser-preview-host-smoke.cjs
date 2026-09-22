@@ -4,8 +4,8 @@
 // No real Relay settings, providers, history or browser session are loaded.
 const { app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
 const http = require('node:http'), fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
-const { createBrowserPanelHost } = require('../browser-panel-host');
-const { createBrowserProfileStore } = require('../browser-profile-store');
+const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
+const { createBrowserProfileStore } = require('../src/main/browser/browser-profile-store');
 const out = path.resolve(__dirname, '../.codex-tmp/browser-preview-host-smoke');
 const runDir = path.join(out, 'profile-' + Date.now());
 fs.mkdirSync(runDir, { recursive: true }); app.setPath('userData', path.join(runDir, 'electron'));

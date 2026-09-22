@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
-const dir = path.join(root, '.codex-tmp', 'ui-smoke');
+const dir = process.env.RELAY_SMOKE_OUTPUT ? path.resolve(process.env.RELAY_SMOKE_OUTPUT) : path.join(root, '.codex-tmp', 'ui-smoke');
 fs.mkdirSync(dir, { recursive: true });
 // A failed run must not leave a previous successful result looking current.
 fs.rmSync(path.join(dir, 'result.json'), { force: true });
@@ -67,7 +67,7 @@ async function permission(id, canAllowForSession = true, fromOther = false) {
 
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
-  const fixtureScript = fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8');
+  const fixtureScript = fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8');
   const html = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixtureScript + '</script>');
   const page = path.join(dir, 'fixture.html'); fs.writeFileSync(page, html);
   win = new BrowserWindow({ width: 1120, height: 920, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });

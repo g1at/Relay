@@ -4,11 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { LiveTurnControls } = require('../live-turn-control');
+const { LiveTurnControls } = require('../src/main/live/live-turn-control');
 
 // Exercise the real adapter with an in-memory Query and synthetic attachment
 // preparation. No model, native process, provider, or real history is opened.
-const sdkPath = path.join(__dirname, '../claude-sdk.js');
+const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
 const source = fs.readFileSync(sdkPath, 'utf8').replace('let sdkPromise = null;',
   'let sdkPromise = Promise.resolve(globalThis.fixtureSdk);');
 const clone = value => JSON.parse(JSON.stringify(value));

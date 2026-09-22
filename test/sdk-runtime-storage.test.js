@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createSdkRuntimeStorage } = require('../sdk-runtime-storage');
+const { createSdkRuntimeStorage } = require('../src/main/sdk/sdk-runtime-storage');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-storage-'));

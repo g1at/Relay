@@ -10,7 +10,7 @@ const {
   parseSkillFrontmatter,
   validateSkillPackage,
   scanPackage,
-} = require('../skill-draft-service');
+} = require('../src/main/skills/skill-draft-service');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-skill-drafts-'));

@@ -10,7 +10,7 @@ const {
   isAppPermissionMode,
   normalizeAppPermissionMode,
   resolveUnattendedPermissionMode,
-} = require('../interaction-broker');
+} = require('../src/main/tasks/interaction-broker');
 
 test('老用户原有工具权限保持不变，新安装才默认逐项确认', () => {
   for (const mode of ['default', 'acceptEdits', 'plan', 'bypassPermissions']) {

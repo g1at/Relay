@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path'), crypto = require('node:crypto');
-const { createBrowserFormStore } = require('../browser-form-store');
+const { createBrowserFormStore } = require('../src/main/browser/browser-form-store');
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'relay-browser-forms-')); t.after(() => fs.rm(root, { recursive: true, force: true }));

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const renderer = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };

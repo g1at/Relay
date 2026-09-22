@@ -2,7 +2,7 @@
 const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { attachLocalPreviewGuard } = require('../local-preview-guard');
+const { attachLocalPreviewGuard } = require('../src/main/projects/local-preview-guard');
 const root = path.resolve(__dirname, '..'), output = path.join(root, '.codex-tmp/workspace-html-smoke');
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'));
 const results = {}, requests = [], failures = []; let win;

@@ -7,7 +7,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { registerNativeAttachmentDialog, CHANNEL } = require('../native-attachment-dialog');
+const { registerNativeAttachmentDialog, CHANNEL } = require('../src/main/app/native-attachment-dialog');
 
 const out = path.resolve(__dirname, '../.codex-tmp/electron-attachment-validation');
 fs.mkdirSync(out, { recursive: true });

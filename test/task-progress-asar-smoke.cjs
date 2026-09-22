@@ -9,10 +9,13 @@ const minimatchPackage = require('minimatch');
 const matches = typeof minimatchPackage === 'function' ? minimatchPackage : minimatchPackage.minimatch;
 const root = path.resolve(__dirname, '..');
 const out = path.join(root, '.codex-tmp/task-progress-asar-smoke');
-const archive = path.join(out, 'app.asar');
-const progressDir = path.join(out, 'progress');
 fs.mkdirSync(out, { recursive: true });
-app.setPath('userData', path.join(out, 'profile'));
+// Electron caches ASAR headers for the lifetime of the process. Never replace
+// an archive that cleanup/stat calls may already have opened in this process.
+const fixture = fs.mkdtempSync(path.join(out, 'run-'));
+const archive = path.join(fixture, 'app.asar');
+const progressDir = path.join(fixture, 'progress');
+app.setPath('userData', path.join(fixture, 'profile'));
 const report = { checks: [], failures: [], versions: { electron: process.versions.electron, node: process.versions.node } };
 let client, step = 'starting';
 const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, ...report }, null, 2));
@@ -24,10 +27,9 @@ const timeout = setTimeout(() => { report.failures.push('timeout: ' + step); sav
 
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
-  for (const generated of [archive, archive + '.unpacked', progressDir]) fs.rmSync(generated, { recursive: true, force: true });
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-  const entries = ['task-progress-client.js', 'task-progress-worker.js', 'task-progress-store.js', 'task-protocol.js',
-    'renderer/activity-stream.js', 'renderer/assistant-output.js', 'renderer/task-continuity.js'];
+  const entries = ['src/main/tasks/task-progress-client.js', 'src/main/tasks/task-progress-worker.js', 'src/main/tasks/task-progress-store.js', 'src/main/tasks/task-protocol.js',
+    'renderer/activity-stream.js', 'renderer/assistant-output.js', 'renderer/task-continuity.js', 'src/main/app/paths.js'];
   const packagedPatterns = manifest.build.files.filter(value => typeof value === 'string');
   const unpackedPatterns = manifest.build.asarUnpack;
   const included = file => packagedPatterns.some(pattern => !pattern.startsWith('!') && matches(file, pattern))
@@ -38,16 +40,20 @@ app.whenReady().then(async () => {
   check('ReleaseManifestKeepsTheClientInsideAsar', !unpacked(entries[0]));
   // Explicit per-file unpack flags are resolved from the real release rules.
   // This avoids a fixture-only glob that could hide a missing packaging rule.
+  const directories = new Set();
+  for (const file of entries) {
+    for (let directory = path.posix.dirname(file); directory !== '.'; directory = path.posix.dirname(directory)) directories.add(directory);
+  }
   await asar.createPackageFromStreams(archive, [
-    { path: 'renderer', type: 'directory', unpacked: false },
+    ...[...directories].sort().map(directory => ({ path: directory, type: 'directory', unpacked: false })),
     ...entries.map(file => ({ path: file, type: 'file', unpacked: unpacked(file),
       stat: fs.statSync(path.join(root, file)), streamGenerator: () => fs.createReadStream(path.join(root, file)) })),
   ]);
   for (const file of entries) {
     const external = fs.existsSync(path.join(archive + '.unpacked', file));
-    check('ArchivePlacement_' + file, !!asar.statFile(archive, file).unpacked === unpacked(file) && external === unpacked(file));
+    check('ArchivePlacement_' + file, !!asar.statFile(archive, path.normalize(file)).unpacked === unpacked(file) && external === unpacked(file));
   }
-  const packedClientPath = path.join(archive, 'task-progress-client.js');
+  const packedClientPath = path.join(archive, 'src/main/tasks/task-progress-client.js');
   const { TaskProgressClient } = require(packedClientPath);
   check('ClientLoadsFromTheRealAsarPath', require.resolve(packedClientPath) === packedClientPath && typeof TaskProgressClient === 'function');
   const warnings = [];

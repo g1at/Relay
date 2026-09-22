@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resourceEntries, mergeResources, ownedResource, resourceTarget } = require('../sdk-task-resources');
+const { resourceEntries, mergeResources, ownedResource, resourceTarget } = require('../src/main/sdk/sdk-task-resources');
 
 const event = { type: 'system', subtype: 'task_notification', task_id: 'task', output_file: '/tmp/result.txt',
   resource_links: [{ uri: 'report.md', name: 'Report' }, { uri: 'https://example.test/result' }] };

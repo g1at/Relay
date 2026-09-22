@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto'), tar = require('tar');
-const { ensureRuntime, descriptor } = require('../ensure-sdk-linux-runtime');
+const { ensureRuntime, descriptor } = require('../build/ensure-sdk-linux-runtime');
 const name = '@anthropic-ai/claude-agent-sdk-linux-x64', version = '0.3.266';
 async function fixture(t, mutate) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-runtime-install-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));

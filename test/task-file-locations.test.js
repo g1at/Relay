@@ -6,9 +6,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
-const { createConversationWorkspaces } = require('../conversation-workspaces');
-const { createSdkRuntimeStorage } = require('../sdk-runtime-storage');
-const { _buildOptions } = require('../claude-sdk');
+const { createConversationWorkspaces } = require('../src/main/projects/conversation-workspaces');
+const { createSdkRuntimeStorage } = require('../src/main/sdk/sdk-runtime-storage');
+const { _buildOptions } = require('../src/main/sdk/claude-sdk');
 
 const A='40000000-0000-4000-8000-000000000001',B='40000000-0000-4000-8000-000000000002';
 

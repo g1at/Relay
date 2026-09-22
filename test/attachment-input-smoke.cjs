@@ -7,7 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const { randomUUID } = require('node:crypto');
-const relay = require('../claude-sdk');
+const relay = require('../src/main/sdk/claude-sdk');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-images-smoke-'));
 const config = path.join(root, 'config'); fs.mkdirSync(config);

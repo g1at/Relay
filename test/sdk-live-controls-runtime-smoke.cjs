@@ -4,7 +4,7 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
+const relay = require('../src/main/sdk/claude-sdk');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-live-controls-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace'), plugin = path.join(base, 'fixture-plugin');
 for (const dir of [config, cwd, path.join(plugin, '.claude-plugin')]) fs.mkdirSync(dir, { recursive: true });

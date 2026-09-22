@@ -2,8 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { SdkRetryGuard, CONNECTION_FAILURE_MESSAGE, RETRY_ENV, RETRY_CONTROL_FAILURE,
-  interruptFailedConnection, closeFailedRetryQuery } = require('../sdk-retry-policy');
-const { buildRelayRuntimeEnv } = require('../claude-sdk');
+  interruptFailedConnection, closeFailedRetryQuery } = require('../src/main/sdk/sdk-retry-policy');
+const { buildRelayRuntimeEnv } = require('../src/main/sdk/claude-sdk');
 const retry = (attempt, error_status = null) => ({ type: 'system', subtype: 'api_retry', attempt, error_status,
   max_retries: 300, retry_delay_ms: 1000 });
 
@@ -164,7 +164,7 @@ test('fallback cleanup closes the SDK transport and waits for public generator d
 
 test('live adapter waits for failed retry Query cleanup before announcing exit', async () => {
   const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-  const sdkPath = path.join(__dirname, '../claude-sdk.js');
+  const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const source = fs.readFileSync(sdkPath, 'utf8').replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fixtureSdk);');
   const originalRequire = require('node:module').createRequire(sdkPath);
   const calls = [];

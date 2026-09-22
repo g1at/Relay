@@ -7,6 +7,8 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+const mainSources = () => ['bootstrap.js', 'app/application-windows.js', 'app/application-lifecycle.js',
+  'app/app-settings-service.js'].map(file => read('src/main/' + file)).join('\n');
 const sliceBetween = (source, startMarker, endMarker) => {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
@@ -16,16 +18,16 @@ const sliceBetween = (source, startMarker, endMarker) => {
 };
 
 test('打开旧历史会话的服务商迁移不刷新左侧排序时间', () => {
-  const main = read('main.js');
+  const main = mainSources();
   const preload = read('preload.js');
   const renderer = read('renderer/app.js');
 
   assert.match(preload, /invalidateSessionForProvider:[\s\S]{0,180}history:invalidateSessionForProvider/);
 
   const metadataPersist = sliceBetween(
-    main,
+    read('src/main/app/history-store.js').replace(/^  /gm, ''),
     'function persistConversationRecord(conv)',
-    '\nfunction saveConversation(conv)',
+    '\nfunction forEachConversation(fn)',
   );
   assert.match(metadataPersist, /writeJsonAtomic\(convFilePath\(conv\.id\), conv\)/);
   assert.match(metadataPersist, /writeHistoryIndex\(items\)/);
@@ -35,7 +37,7 @@ test('打开旧历史会话的服务商迁移不刷新左侧排序时间', () =>
   const handler = sliceBetween(
     main,
     "ipcMain.handle('history:invalidateSessionForProvider'",
-    "ipcMain.handle('history:save'",
+    '\n});',
   );
   assert.match(handler, /const c = loadConversation\(id\)/);
   assert.match(handler, /c\.sessionId = null/);
@@ -47,7 +49,7 @@ test('打开旧历史会话的服务商迁移不刷新左侧排序时间', () =>
   assert.doesNotMatch(handler, /c\.updatedAt\s*=/);
 
   const genericSave = sliceBetween(
-    main,
+    read('src/main/app/history-ipc.js').replace(/^  /gm, ''),
     "ipcMain.handle('history:save'",
     "ipcMain.handle('history:delete'",
   );
@@ -83,7 +85,7 @@ test('原生提问和权限审批使用独立文档流决策面', () => {
   const surface = read('renderer/interaction-surface.js');
   const css = read('renderer/interaction-surface.css');
   const preload = read('preload.js');
-  const main = read('main.js');
+  const main = mainSources();
 
   assert.match(html, /id="interactionSurfaceMount"/);
   const inputAreaAt = html.indexOf('class="input-area"');
@@ -105,7 +107,8 @@ test('原生提问和权限审批使用独立文档流决策面', () => {
   assert.match(surface, /refreshPromise/);
   assert.ok(surface.includes('Basic\\s+'), '审批参数展示必须隐藏 Basic 凭据');
   assert.ok(surface.includes("[a-z][a-z0-9+.-]*:\\/\\/"), '审批参数展示必须隐藏 URL userinfo');
-  assert.match(main, /interactionBroker\.rejectWindow\(win\.id/);
+  assert.match(main, /tasks\.rejectWindow\(win\.id/);
+  assert.match(main, /rejectWindow: .*interactionBroker\.rejectWindow/);
   assert.match(main, /waitingCount[\s\S]*需要你处理/);
   assert.match(surface, /查看完整参数（已脱敏）/);
   assert.match(surface, /permissionInputPreview\(/);
@@ -148,7 +151,7 @@ test('原生提问和权限审批使用独立文档流决策面', () => {
 
 test('工具权限文案简洁且升级不会强制覆盖老用户选择', () => {
   const renderer = read('renderer/app.js');
-  const main = read('main.js');
+  const main = mainSources();
 
   const controls = read('renderer/permission-controls.js');
   assert.match(controls, /label:\s*['"]请求批准['"]/);
@@ -180,7 +183,7 @@ test('独立任务中心已移除，审批和后台任务恢复继续保留', ()
   const interactionCss = read('renderer/interaction-surface.css');
   const html = read('renderer/index.html');
   const preload = read('preload.js');
-  const main = read('main.js');
+  const main = mainSources();
   const pkg = read('package.json');
 
 

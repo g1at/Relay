@@ -9,7 +9,7 @@ const { createRequire } = require('node:module');
 
 // Exercise the real SDK adapter with only an in-memory Query. No model, child
 // process, MCP transport, real registry, or user credential is touched.
-const sdkPath = path.join(__dirname, '..', 'claude-sdk.js');
+const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
 const sdkSource = fs.readFileSync(sdkPath, 'utf8');
 const registry = { docs: { type: 'stdio', command: 'fixture-only' } };
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -621,7 +621,7 @@ test('one-shot and live runtime preparation map file hook locations before a WSL
   }
 });
 test('explicit managed runtime paths replace case variants inherited from the host only when configured', () => {
-  const sdk = require('../claude-sdk');
+  const sdk = require('../src/main/sdk/claude-sdk');
   const names = ['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR'];
   const before = Object.fromEntries(Object.entries(process.env).filter(([key]) => names.includes(key.toUpperCase())));
   try {

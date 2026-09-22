@@ -1,6 +1,6 @@
 'use strict';
 // Real locally installed SDK/CLI, synthetic loopback provider, isolated config.
-// Exercises the actual main.js admission/dispatch/finish pipeline in a VM; all
+// Exercises the actual bootstrap admission/dispatch/finish pipeline in a VM; all
 // conversations and ledger state are in memory. No real user task or provider.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -9,18 +9,18 @@ const os = require('node:os');
 const http = require('node:http');
 const vm = require('node:vm');
 const { randomUUID, createHash } = require('node:crypto');
-const relay = require('../claude-sdk');
-const { LiveTurnRouter } = require('../live-turn-router');
-const { LiveTurnControls } = require('../live-turn-control');
-const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../live-async-agent-tracker');
-const supplements = require('../live-supplement-input');
-const { SdkSessionObserver, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../sdk-session-observer');
-const { resourceEntries, mergeResources } = require('../sdk-task-resources');
+const relay = require('../src/main/sdk/claude-sdk');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
+const { LiveTurnControls } = require('../src/main/live/live-turn-control');
+const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../src/main/live/live-async-agent-tracker');
+const supplements = require('../src/main/live/live-supplement-input');
+const { SdkSessionObserver, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../src/main/sdk/sdk-session-observer');
+const { resourceEntries, mergeResources } = require('../src/main/sdk/sdk-task-resources');
 
 const output = path.join(__dirname, '../.codex-tmp/sdk-stopped-supplement');
 fs.mkdirSync(output, { recursive: true });
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-stopped-supplement-'));
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const report = {
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version,
   sdk: require('../node_modules/@anthropic-ai/claude-agent-sdk/package.json').version,
@@ -28,7 +28,7 @@ const report = {
   isolation: { syntheticProvider: true, loopbackOnly: true, isolatedConfigAndWorkspace: true,
     realUserHistoryRead: false, realProviderKeyUsed: false, settingSources: [], strictMcpConfig: true },
   limits: ['Provider responses are deterministic local fixtures, not a real model quality or remote reliability test.',
-    'Electron/UI are not launched; real main.js functions run with in-memory persistence and a synthetic window boundary.',
+    'Electron/UI are not launched; real bootstrap functions run with in-memory persistence and a synthetic window boundary.',
     'The installed SDK can emit started before interrupt. The report records this; result-only missing-receipt fallback is covered separately by unit tests.',
     'The queued negative case uses real LiveTurnControls and strictly fails if later input reaches the provider despite shutdown.',
     'Atomic queued cancellation is checked against the installed 0.3.266 runtime/capability; its declaration may not expose the optional interrupt argument. Older SDK fallback cannot claim the same guarantee.'],
@@ -39,7 +39,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function check(name, condition) { assert.ok(condition, name); report.checks.push(name); }
 function declaration(name) {
   const start = source.indexOf('function ' + name + '(');
-  assert.ok(start >= 0, name + ' exists in main.js');
+  assert.ok(start >= 0, name + ' exists in bootstrap');
   const tail = source.slice(start), next = /\n(?:async )?function \w+\(/.exec(tail);
   return next ? tail.slice(0, next.index) : tail;
 }
@@ -72,7 +72,7 @@ function harness(name, cwd, config) {
     supplementInputs: new Map(), checkpointRunIds: new Set(), keepAliveForAsyncAgents: true };
   sess.turnRouter.begin(ids.run); liveSessions.set(ids.conv, sess);
   const context = {
-    TaskClock: require('../task-clock').TaskClock, ...supplements, observer, resourceEntries, mergeResources,
+    TaskClock: require('../src/main/tasks/task-clock').TaskClock, ...supplements, observer, resourceEntries, mergeResources,
     routeTimingHistory: new RouteTimingHistory(), sess, convId: ids.conv, liveSessions, jobs,
     liveTombstones: new Map(), process: { env: { CLAUDE_CONFIG_DIR: config } },
     path, os: { homedir: () => base },
@@ -82,6 +82,7 @@ function harness(name, cwd, config) {
     isTerminalState: value => ['succeeded', 'failed', 'canceled'].includes(value),
     liveTurnControls: { isStopping: () => sess.turnRouter.interruptRequested },
     interactionBroker: { rejectTask() {} }, checkpointManager: null,
+    applicationWindows: { mainWindow: null }, nativeFork: null,
     loadConversation: id => records.has(id) ? clone(records.get(id)) : null,
     persistConversationRecord: record => { records.set(record.id, clone(record)); state.writes++; },
     fs: { existsSync: id => records.has(id) }, convFilePath: id => id,
@@ -96,13 +97,13 @@ function harness(name, cwd, config) {
   };
   require('./helpers/conversation-permissions-fixture')(context);
   vm.createContext(context);
-  for (const name of ['persistGoalRecovery', 'saveConversation', 'persistLiveSupplementRecord',
+  for (const name of ['compactContextUsage', 'contextRuntimeKey', 'persistGoalRecovery', 'saveConversation', 'persistLiveSupplementRecord',
     'publishLiveSupplement', 'settleLiveSupplements', 'steerLiveTurn', 'finishTurn', 'settleUnsentLiveTurn']) {
     vm.runInContext(declaration(name), context);
   }
   const start = source.indexOf('  const onMessage = (evt) => {', source.indexOf('function spawnLiveSession'));
   const end = source.indexOf('  const canUseTool = ', start);
-  assert.ok(start > 0 && end > start, 'current main.js stream handler boundaries found');
+  assert.ok(start > 0 && end > start, 'current bootstrap stream handler boundaries found');
   vm.runInContext(source.slice(start, end) + '\nglobalThis.ingest=onMessage;globalThis.exit=onExit;', context);
   const withTimeout = (promise, label, timeoutMs) => {
     let timer;

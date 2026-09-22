@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { createPrewarmState, canReuseFreshPrewarm } = require('../live-prewarm-reuse');
+const { createPrewarmState, canReuseFreshPrewarm } = require('../src/main/live/live-prewarm-reuse');
 function fixture() {
   const record = { id: 'conversation', turns: [{ runId: 'earlier', user: 'earlier input' }] };
   const session = { convId: record.id, fingerprint: 'full-runtime-fingerprint', observer: { epoch: 0 },

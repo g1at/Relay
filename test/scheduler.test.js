@@ -7,9 +7,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { _execTool: execCronTool } = require('../cron-mcp');
+const { _execTool: execCronTool } = require('../src/main/scheduling/cron-mcp');
 
-const schedulerModulePath = require.resolve('../scheduler');
+const schedulerModulePath = require.resolve('../src/main/scheduling/scheduler');
 
 function deferred() {
   let resolve;
@@ -23,7 +23,7 @@ function loadFreshScheduler(spawnStub = null) {
   const originalSpawn = childProcess.spawn;
   if (spawnStub) childProcess.spawn = spawnStub;
   delete require.cache[schedulerModulePath];
-  try { return require('../scheduler'); }
+  try { return require('../src/main/scheduling/scheduler'); }
   finally { childProcess.spawn = originalSpawn; }
 }
 

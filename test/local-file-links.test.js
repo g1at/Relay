@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parse } = require('../renderer/local-file-links');
-const marked = require('../renderer/vendor/marked.umd');
+const marked = require('../renderer/vendor/marked.umd.js');
 
 test('actual marked Windows hrefs decode drive separators once without reinterpreting encoded filename punctuation', () => {
   for (const href of [String.raw`C:\Users\Fixture\RelayProjects\calculator.html`, String.raw`D:\项目\报告%23终稿.md`, 'C:%2FUsers%2FFixture%2Freport%3Ffinal.md']) {

@@ -2,7 +2,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const vm = require('node:vm');
-const { attachBrowserPageScrollbars, PAGE_SCRIPT, PAGE_CSS } = require('../browser-page-scrollbars');
+const { attachBrowserPageScrollbars, PAGE_SCRIPT, PAGE_CSS } = require('../src/main/browser/browser-page-scrollbars');
 const tick = () => new Promise(setImmediate);
 
 test('browser scrollbar styles reach the main document and loaded web frames without adding a preload or user gesture', async () => {

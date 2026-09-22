@@ -4,7 +4,7 @@ const { app, BrowserWindow, ipcMain, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { InteractionBroker } = require('../interaction-broker');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
 const root = path.resolve(__dirname, '..');
 const output = path.join(root, '.codex-tmp', 'elicitation-smoke');
 fs.mkdirSync(output, { recursive: true });

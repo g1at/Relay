@@ -2,15 +2,15 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { randomUUID } = require('node:crypto'), { EventEmitter } = require('node:events'), { PassThrough } = require('node:stream');
-const prefs = require('../sdk-runtime-preferences'), { buildRuntimePolicy, summarizeResolvedSettings } = require('../sdk-runtime-policy');
-const { createPluginStore } = require('../sdk-plugin-store');
-const { createUserDialogHandler } = require('../sdk-user-dialog'), { createToolProposalHook } = require('../sdk-tool-proposals');
-const { NativeEventState, sanitizeNativeEvent, safeFindings, stageSkillProposals } = require('../sdk-native-events');
-const { createHistoryManagement, mergeNativeHistory } = require('../sdk-history-management');
-const { withDrainedExit } = require('../sdk-process-adapter'), { createDiagnosticLog } = require('../sdk-diagnostics-log');
-const { configureSdkErrorCategories, errorCategory, annotateError } = require('../sdk-error-categories');
-const { buildNativeAgent } = require('../native-agent-definition'), { resourceEntries } = require('../sdk-task-resources');
-const { createConversationPermissions } = require('../conversation-permissions');
+const prefs = require('../src/main/sdk/sdk-runtime-preferences'), { buildRuntimePolicy, summarizeResolvedSettings } = require('../src/main/sdk/sdk-runtime-policy');
+const { createPluginStore } = require('../src/main/sdk/sdk-plugin-store');
+const { createUserDialogHandler } = require('../src/main/sdk/sdk-user-dialog'), { createToolProposalHook } = require('../src/main/sdk/sdk-tool-proposals');
+const { NativeEventState, sanitizeNativeEvent, safeFindings, stageSkillProposals } = require('../src/main/sdk/sdk-native-events');
+const { createHistoryManagement, mergeNativeHistory } = require('../src/main/sdk/sdk-history-management');
+const { withDrainedExit } = require('../src/main/sdk/sdk-process-adapter'), { createDiagnosticLog } = require('../src/main/sdk/sdk-diagnostics-log');
+const { configureSdkErrorCategories, errorCategory, annotateError } = require('../src/main/sdk/sdk-error-categories');
+const { buildNativeAgent } = require('../src/main/sdk/native-agent-definition'), { resourceEntries } = require('../src/main/sdk/sdk-task-resources');
+const { createConversationPermissions } = require('../src/main/projects/conversation-permissions');
 const tmp = t => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-medium-test-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); return dir; };
 test('advanced defaults preserve SDK defaults and strict validation rejects unsafe overrides', () => {
   const defaults = prefs.sdkPreferenceOptions({}); assert.deepEqual(defaults.options, {}); assert.deepEqual(defaults.settings, {});
@@ -168,7 +168,7 @@ test('accepted native goals update only current host-owned execution metadata an
 });
 
 test('imported native history never invents tool success or leaves a live spinner', () => {
-  const { nativeTurns } = require('../sdk-history-management');
+  const { nativeTurns } = require('../src/main/sdk/sdk-history-management');
   const turns = nativeTurns([{type:'user',uuid:randomUUID(),message:{content:'test'}},
     {type:'assistant',uuid:randomUUID(),message:{content:[{type:'tool_use',id:'missing-result',name:'Read',input:{file_path:'fixture'}}]}}]);
   assert.equal(turns[0].activity.phase,'paused');
@@ -190,7 +190,7 @@ test('real subprocess stderr tail is delivered before the SDK exit listener', as
 });
 
 test('worktree success output updates cwd when this SDK omits CwdChanged, never from child agents', () => {
-  const {nativeWorkingDirectory}=require('../sdk-native-events');
+  const {nativeWorkingDirectory}=require('../src/main/sdk/sdk-native-events');
   const enter={hook_event_name:'PostToolUse',tool_name:'EnterWorktree',tool_response:{worktreePath:'/fixture/worktree'}};
   assert.equal(nativeWorkingDirectory(enter),'/fixture/worktree');assert.equal(nativeWorkingDirectory({...enter,agent_id:'child'}),null);
   assert.equal(nativeWorkingDirectory({...enter,tool_response:{worktreePath:'relative'}}),null);

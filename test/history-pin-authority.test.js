@@ -7,24 +7,15 @@ const vm = require('node:vm');
 
 // Execute only the production IPC handlers with an in-memory history store.
 // No Electron process, user history, provider, or task is started.
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-function region(startText, endText) {
-  const start = source.indexOf(startText), end = source.indexOf(endText, start);
-  assert.ok(start >= 0 && end > start);
-  return source.slice(start, end);
-}
-const handlersSource = [
-  region("ipcMain.handle('history:list'", '// 置顶/取消置顶一条会话'),
-  region("ipcMain.handle('history:setPinned'", '// IPC: 手动重命名会话'),
-  region("ipcMain.handle('history:save'", "ipcMain.handle('history:delete'"),
-].join('\n');
+const moduleFile = path.join(__dirname, '../src/main/app/history-ipc.js');
+const source = fs.readFileSync(moduleFile, 'utf8');
 const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const originalTime = '2020-02-01T00:00:00.000Z';
 function fixture(initial = []) {
   const records = new Map(initial.map(record => [record.id, clone(record)]));
   const handlers = new Map(), writes = [], indexOverrides = new Map();
   const context = {
-    protectSdkMetadata: require('../sdk-session-provenance').protectSdkMetadata,
+    protectSdkMetadata: require('../src/main/sdk/sdk-session-provenance').protectSdkMetadata,
     miniChat: null,
     Date, fs: { existsSync: id => records.has(id) },
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
@@ -36,7 +27,25 @@ function fixture(initial = []) {
     getProjectStore: () => ({ binding: () => 'authoritative-project' }),
     projectConversation: value => ({ ...value, projectId: 'authoritative-project', workingDir: { path: '/synthetic/project' } }),
   };
-  vm.runInNewContext(handlersSource, context, { filename: 'main.js:history-pin-handlers' });
+  const loaded = { exports: {} };
+  vm.runInNewContext(source, {
+    module: loaded, require: name => { assert.equal(name, 'fs'); return context.fs; },
+  }, { filename: moduleFile });
+  loaded.exports.registerHistoryIpc({
+    ipcMain: context.ipcMain,
+    history: {
+      readHistoryIndex: context.readHistoryIndex, loadConversation: context.loadConversation,
+      convFilePath: context.convFilePath, persistConversationRecord: context.saveConversation,
+      forEachConversation: visitor => [...records.values()].forEach(visitor),
+    },
+    projects: {
+      initialize: context.initializeProjectHistory, getStore: context.getProjectStore,
+      projectConversation: context.projectConversation,
+    },
+    nativeHistory: {}, isMiniChatActive: () => false,
+    saveConversation: context.saveConversation, deleteConversation: id => records.delete(id),
+    genId: context.genId, protectSdkMetadata: context.protectSdkMetadata,
+  });
   return { records, writes, indexOverrides, call: (name, ...args) => handlers.get('history:' + name)(null, ...args) };
 }
 function conversation(pinned) {

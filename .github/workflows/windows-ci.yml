@@ -71,3 +71,6 @@ jobs:
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
         run: npm run build:dir -- --x64 --publish never
+
+      - name: Verify actual packaged workers, SDK, preloads and terminal
+        run: npm run test:packaged-app

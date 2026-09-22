@@ -3,7 +3,7 @@
 // mapping/cancellation; does not claim a provider exposes the fallback gate.
 const { EventEmitter } = require('node:events'), { PassThrough, Writable } = require('node:stream');
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
-const { loadSdk } = require('../claude-sdk'), { createUserDialogHandler, SUPPORTED_DIALOG_KINDS } = require('../sdk-user-dialog');
+const { loadSdk } = require('../src/main/sdk/claude-sdk'), { createUserDialogHandler, SUPPORTED_DIALOG_KINDS } = require('../src/main/sdk/sdk-user-dialog');
 const out = path.join(__dirname, '../.codex-tmp/sdk-medium-runtime'); fs.mkdirSync(out, { recursive: true });
 const report = { scope: 'Real sdk.mjs, simulated CLI transport, no provider request', checks: [], errors: [] }; let query;
 (async () => {

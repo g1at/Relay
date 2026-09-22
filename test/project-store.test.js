@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createProjectStore } = require('../project-store');
-const { workspaceKey } = require('../conversation-workspaces');
+const { createProjectStore } = require('../src/main/projects/project-store');
+const { workspaceKey } = require('../src/main/projects/conversation-workspaces');
 const clone = value => JSON.parse(JSON.stringify(value));
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-project-store-'));

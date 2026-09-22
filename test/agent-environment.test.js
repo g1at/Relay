@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createAgentEnvironment, toWslPath, mapMcpServers } = require('../agent-environment');
+const { createAgentEnvironment, toWslPath, mapMcpServers, runtimePath } = require('../src/main/sdk/agent-environment');
 function fixture(t, overrides = {}) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-wsl-fixture-'));
   t.after(() => fs.rmSync(homeDir, { force: true, recursive: true }));
@@ -48,6 +48,20 @@ test('WSL settings diagnostic runs inside Linux with encoded path data and only 
   assert.equal(payload.sdkPath, '/mnt/d/Relay/sdk.mjs');
   assert.equal(payload.configDir, toWslPath(f.configDir));
   assert.deepEqual(payload.settingSources, ['user', 'project']);
+});
+
+test('default WSL runtime and diagnostic paths remain rooted at the application after source relocation', async t => {
+  const root = path.resolve(__dirname, '..');
+  assert.equal(runtimePath(), path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk-linux-x64', 'claude'));
+  let launch;
+  const f = fixture(t, { runFile: async (_file, args) => { launch = args; return JSON.stringify({ ok: true }); } });
+  assert.equal((await f.service.inspectSettings({ cwd: 'D:\\Project outside Relay', settingSources: ['user'] })).ok, true);
+  const script = require.resolve('../src/main/sdk/sdk-settings-probe.cjs');
+  assert.equal(launch[4], toWslPath(script));
+  assert.equal(fs.existsSync(script), true);
+  const payload = JSON.parse(Buffer.from(launch[5], 'base64').toString('utf8'));
+  assert.equal(payload.sdkPath, toWslPath(path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs')));
+  assert.equal(payload.cwd, '/mnt/d/Project outside Relay');
 });
 
 test('a missing WSL diagnostic interpreter cannot cause a Windows config fallback', async t => {
@@ -213,7 +227,7 @@ test('Windows-only or missing MCP dependencies cannot disable WSL and bridge ins
 
 
 test('WSL keeps project cwd while translating scratch, SDK runtime storage and escaped Agent instructions', async t => {
-  const f = fixture(t), sdk = require('../claude-sdk');
+  const f = fixture(t), sdk = require('../src/main/sdk/claude-sdk');
   const cwd = 'D:\\Synthetic Project', scratchDir = 'C:\\Synthetic Relay\\conversation-scratch\\session';
   const input = sdk._buildOptions({ cwd, validWorkingDir: cwd, scratchDir, permissionMode: 'default',
     runtimeEnv: { RELAY_AGENT_ENVIRONMENT: 'wsl', CLAUDE_CODE_TMPDIR: 'C:\\Synthetic Relay\\sdk-runtime\\tmp',
@@ -241,7 +255,7 @@ test('WSL keeps project cwd while translating scratch, SDK runtime storage and e
 
 
 test('WSL translates file policy in custom system prompt blocks without moving the SDK cache boundary', async t => {
-  const f = fixture(t), sdk = require('../claude-sdk'), boundary = '__SYNTHETIC_DYNAMIC_BOUNDARY__';
+  const f = fixture(t), sdk = require('../src/main/sdk/claude-sdk'), boundary = '__SYNTHETIC_DYNAMIC_BOUNDARY__';
   const input = sdk._buildOptions({ cwd: 'D:\\Task', scratchDir: 'C:\\Relay\\Scratch',
     customSystemPrompt: { static: ['Fixed instruction'], dynamic: ['Dynamic instruction'] } },
     { SYSTEM_PROMPT_DYNAMIC_BOUNDARY: boundary });

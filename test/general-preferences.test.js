@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { createGeneralPreferences, normalizePreferences, normalizeParallelLimit, PARALLEL_LIMITS, registerGeneralPreferencesIpc } = require('../general-preferences');
+const { createGeneralPreferences, normalizePreferences, normalizeParallelLimit, PARALLEL_LIMITS, registerGeneralPreferencesIpc } = require('../src/main/app/general-preferences');
 
 function fixture(t, extra = {}) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-preferences-'));

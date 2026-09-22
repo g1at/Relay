@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
-const { createProviderDraftRuntime, runtimeModel } = require('../provider-connectivity');
-const { ProviderStore } = require('../provider-store');
-const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const loadCommonJs = require('./helpers/load-commonjs.cjs');
+const { createProviderDraftRuntime, runtimeModel } = require('../src/main/providers/provider-connectivity');
+const { ProviderStore } = require('../src/main/providers/provider-store');
 const renderer = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const saved = () => ({ id: 'synthetic', revision: 1, defaultModel: 'haiku', authMode: 'auth-token',
@@ -74,13 +74,13 @@ function handlerContext() {
     discoverProviderModels: async runtime => { discovery.push(clone(runtime)); return { ok: true, models: [] }; },
     publishProviderChange: () => mutations.push('publish'),
   };
-  vm.createContext(context);
-  for (const name of ['providers:test', 'providers:testDraft', 'providers:discoverDraftModels']) {
-    const start = main.indexOf(`ipcMain.handle('${name}',`);
-    assert.ok(start > 0, name);
-    const end = main.indexOf('\n});', start) + '\n});'.length;
-    vm.runInContext(main.slice(start, end), context);
-  }
+  const { registerProviderIpc } = loadCommonJs('src/main/providers/provider-ipc.js', {
+    modules: { './provider-connectivity': {
+      createProviderDraftRuntime, testProviderConnection: context.testProviderConnection,
+      discoverProviderModels: context.discoverProviderModels,
+    } },
+  });
+  registerProviderIpc(context);
   return { handlers, probes, discovery, mutations, state };
 }
 test('actual draft test IPC is read-only including auth discovery', async () => {

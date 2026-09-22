@@ -2,10 +2,10 @@
 
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
-const { registerBrowserPanelIpc } = require('../browser-panel-ipc');
+const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
 const { ipcMain } = require('electron');
 const root = path.resolve(__dirname, '..');
-const out = path.join(root, '.codex-tmp', 'browser-panel-ipc-smoke');
+const out = process.env.RELAY_SMOKE_OUTPUT ? path.resolve(process.env.RELAY_SMOKE_OUTPUT) : path.join(root, '.codex-tmp', 'browser-panel-ipc-smoke');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
 app.commandLine.appendSwitch('disable-background-networking');

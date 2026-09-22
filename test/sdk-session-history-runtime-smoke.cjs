@@ -2,7 +2,7 @@
 // Real SDK file APIs against synthetic JSONL only. No model/network/runtime Query.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
-const { executeSessionOperation } = require('../sdk-session-history');
+const { executeSessionOperation } = require('../src/main/sdk/sdk-session-history');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-session-history-'));
 const cwd = path.join(base, 'workspace'), configDir = path.join(base, 'config'); fs.mkdirSync(cwd); fs.mkdirSync(configDir);
 const project = path.join(configDir, 'projects', fs.realpathSync(cwd).replace(/[^a-zA-Z0-9]/g, '-')); fs.mkdirSync(project, { recursive: true });

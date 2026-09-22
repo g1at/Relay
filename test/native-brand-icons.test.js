@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createDefaultLogoAssets, createNativeIconAssets } = require('../build/logo-assets.cjs');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
 const start = source.indexOf('function resolveNativeIcon(');
 const end = source.indexOf('// ── 系统托盘', start);
 const masterFile = path.join(__dirname, '../design/relay-logo/relay-dual-gate-master.svg');
@@ -33,9 +33,9 @@ test('native icon generation retains the local approved design master', {
 
 function fixture({ dark = false, theme = 'system', packaged = false, missingDark = false } = {}) {
   const calls = [], nativeTheme = { themeSource: theme, shouldUseDarkColors: dark, shouldUseDarkColorsForSystemIntegratedUI: dark };
-  const context = vm.createContext({ path, __dirname: '/fixture/relay',
+  const context = vm.createContext({ path, appRoot: '/fixture/relay',
     app: { isPackaged: packaged }, process: { resourcesPath: '/fixture/resources' },
-    require: name => { assert.equal(name, './native-brand-theme'); return require('../native-brand-theme'); },
+    require: name => { assert.equal(name, './native-brand-theme'); return require('../src/main/app/native-brand-theme'); },
     fs: { existsSync: file => !missingDark || !file.endsWith('icon-dark.ico') }, nativeTheme,
     nativeImage: { createFromPath: file => ({ file, isEmpty: () => false }) },
     tray: { isDestroyed: () => false, setImage: image => calls.push(['tray', image.file]) },
@@ -82,10 +82,11 @@ test('packaged icons resolve outside asar, with the light master as a missing-da
 });
 
 test('the packaged native theme listener is removed during shutdown', () => {
-  assert.match(source, /nativeTheme\.on\('updated', updateNativeBrandTheme\)/);
-  assert.match(source, /nativeTheme\.removeListener\('updated', updateNativeBrandTheme\)/);
+  const lifecycle = fs.readFileSync(path.join(__dirname, '../src/main/app/application-lifecycle.js'), 'utf8');
+  assert.match(lifecycle, /nativeTheme\.on\('updated', updateNativeBrandTheme\)/);
+  assert.match(lifecycle, /nativeTheme\.removeListener\('updated', updateNativeBrandTheme\)/);
   assert.match(source, /nativeBrandTheme\.dispose\(\)/);
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
   assert.ok(config.build.extraResources.some(item => item.from === 'build/icon-dark.ico' && item.to === 'icon-dark.ico'));
-  assert.ok(config.build.files.includes('native-brand-theme.js'));
+  assert.ok(config.build.files.includes('src/main/**/*.js') && fs.existsSync(path.join(__dirname, '../src/main/app/native-brand-theme.js')));
 });

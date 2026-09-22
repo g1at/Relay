@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Marked } = require('../renderer/vendor/marked.umd');
+const { Marked } = require('../renderer/vendor/marked.umd.js');
 const Images = require('../renderer/local-markdown-images');
 
 test('marked image renderer emits inert escaped placeholders for native, mounted, UNC and relative local paths', () => {

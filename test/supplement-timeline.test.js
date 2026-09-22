@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Output = require('../renderer/assistant-output');
 const Timeline = require('../renderer/supplement-timeline');
-const marked = require('../renderer/vendor/marked.umd');
+const marked = require('../renderer/vendor/marked.umd.js');
 const stream = (state, type, extra = {}) => Output.ingest(state, { type: 'stream_event', event: { type, ...extra } });
 const text = (state, value, index = 0) => stream(state, 'content_block_delta', { index, delta: { type: 'text_delta', text: value } });
 const input = (state, id) => ({ id, text: 'supplement ' + id, presentation: Timeline.capture(state), status: 'queued' });

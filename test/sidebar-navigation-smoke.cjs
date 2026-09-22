@@ -56,7 +56,7 @@ async function capture(name) {
 
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel:/^https?:/i.test(details.url) }));
-  const fixture = fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8');
+  const fixture = fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8');
   const seed = `(() => {
     if(!sessionStorage.getItem('navigation-fixture-started')) { localStorage.removeItem('relay.sidebar.width.v1'); localStorage.removeItem('relay.sidebar.layout.v2'); localStorage.removeItem('relay.sidebar.features.v1'); sessionStorage.setItem('navigation-fixture-started','1'); }
     const now = new Date(), previous = new Date(now); previous.setDate(previous.getDate()-1);

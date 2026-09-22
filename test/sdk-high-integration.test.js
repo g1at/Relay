@@ -5,11 +5,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
-const { SdkSessionObserver, stopOwnedTask } = require('../sdk-session-observer');
-const { collectStructuredOutput } = require('../sdk-structured-output');
-const { resourceEntries, mergeResources, ownedResource, resourceTarget } = require('../sdk-task-resources');
-const { instructionFingerprint, runtimeContractFingerprint, requiresFreshContract } = require('../sdk-runtime-contract');
-const { _buildOptions } = require('../claude-sdk');
+const { SdkSessionObserver, stopOwnedTask } = require('../src/main/sdk/sdk-session-observer');
+const { collectStructuredOutput } = require('../src/main/sdk/sdk-structured-output');
+const { resourceEntries, mergeResources, ownedResource, resourceTarget } = require('../src/main/sdk/sdk-task-resources');
+const { instructionFingerprint, runtimeContractFingerprint, requiresFreshContract } = require('../src/main/sdk/sdk-runtime-contract');
+const { _buildOptions } = require('../src/main/sdk/claude-sdk');
 
 test('initialize and changing SDK state are scoped, advisory and credential-free', () => {
   let now = 100;
@@ -112,7 +112,7 @@ test('instruction changes invalidate snapshots without rewriting Relay history',
 });
 
 test('plugin reload uses the fresh reload receipt, not supportedAgents initialize cache', async () => {
-  const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const start = source.indexOf('async function refreshLivePluginCatalog(');
   const end = source.indexOf('\nasync function reloadSkillsInLiveSessions(', start);
   let staleCalls = 0;
@@ -128,7 +128,7 @@ test('plugin reload uses the fresh reload receipt, not supportedAgents initializ
 });
 
 test('diagnostics inspect the running environment and source policy after preferences change', async () => {
-  const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const marker = 'getSdkDiagnostics: async input => ';
   const start = source.indexOf(marker), end = source.indexOf('\n  },\n});', start);
   const calls = [];

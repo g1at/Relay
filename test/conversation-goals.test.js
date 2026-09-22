@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { previousConversationGoal, protectGoalRecovery } = require('../conversation-goals');
+const { previousConversationGoal, protectGoalRecovery } = require('../src/main/projects/conversation-goals');
 const goalTurn = (user, phase = 'error') => ({ user, executionMode: { kind: 'goal' }, activity: { phase } });
 
 test('failed legacy goals retain the original condition through repeated continue and ignore the current turn', () => {

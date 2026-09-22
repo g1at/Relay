@@ -4,11 +4,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { normalizePreferences } = require('../general-preferences');
+const { normalizePreferences } = require('../src/main/app/general-preferences');
 
 // Exercise the actual host pool helpers with synthetic sessions; never load Electron.
 function hostPool(initialLimit, sessions) {
-  const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const start = source.indexOf('function evictIfNeeded(');
   const end = source.indexOf('// Claude Code ', start);
   const killed = [], limits = [], pending = [], liveSessions = new Map(sessions.map(sess => [sess.convId, sess]));

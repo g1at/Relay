@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const {
   normalizeMaintenancePolicy, evaluateSkillMaintenance,
   evaluateMaintenanceRun, findExactDuplicateGroups,
-} = require('../skill-maintenance-policy');
+} = require('../src/main/skills/skill-maintenance-policy');
 const DAY = 86400000;
 const NOW = Date.parse('2026-09-12T12:00:00.000Z');
 const at = days => new Date(NOW - days * DAY).toISOString();

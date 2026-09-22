@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
-const { registerWorkspaceTools, TEXT_LIMIT, IMAGE_LIMIT, TERMINAL_LIMIT, relativePath, dimensions } = require('../workspace-tools');
+const { registerWorkspaceTools, TEXT_LIMIT, IMAGE_LIMIT, TERMINAL_LIMIT, relativePath, dimensions } = require('../src/main/workspace/workspace-tools');
 
 function fixture(t, extra = {}) {
   // Match the native realpath used by workspace IPC, including Windows 8.3 TEMP aliases.
@@ -43,7 +43,7 @@ test('file hyperlinks preview verified Windows/WSL/relative destinations without
   const h = fixture(t);
   const file = path.join(h.root, 'report final.md'); fs.writeFileSync(file, '# Final report');
   const hrefs = [file + ':3', pathToFileURL(file).href + ':3', 'report%20final.md:3'];
-  const html = require('../renderer/vendor/marked.umd').parse(`[文件](<${file}:3>)`);
+  const html = require('../renderer/vendor/marked.umd.js').parse(`[文件](<${file}:3>)`);
   hrefs.push(/href="([^"]+)"/.exec(html)[1]);
   if (process.platform === 'win32') hrefs.push('/mnt/' + file[0].toLowerCase() + file.slice(2).replace(/\\/g, '/') + ':3');
   for (const href of hrefs) {
@@ -60,7 +60,7 @@ test('directory hyperlinks return canonical tree locations for project root, nes
   const directory = path.join(h.root, '交付 文件', '安卓报告');
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, 'result.md'), '# Synthetic report');
-  const html = require('../renderer/vendor/marked.umd').parse(`[交付目录](<${directory}>)`);
+  const html = require('../renderer/vendor/marked.umd.js').parse(`[交付目录](<${directory}>)`);
   const hrefs = [directory, pathToFileURL(directory).href, '交付%20文件/安卓报告/', /href="([^"]+)"/.exec(html)[1]];
   if (process.platform === 'win32') hrefs.push('/mnt/' + directory[0].toLowerCase() + directory.slice(2).replace(/\\/g, '/'));
   for (const href of hrefs) {
@@ -218,7 +218,7 @@ test('a desktop delivery previews and opens directly without copying files or ch
   fs.writeFileSync(source, content);
   const context = { conversationId: 'fixture-conversation', workingDir: h.root };
   const hrefFor = file => {
-    const html = require('../renderer/vendor/marked.umd').parse(`[分析报告](<${file}>)`);
+    const html = require('../renderer/vendor/marked.umd.js').parse(`[分析报告](<${file}>)`);
     return /href="([^"]+)"/.exec(html)[1];
   };
   const external = { context, href: hrefFor(source) };

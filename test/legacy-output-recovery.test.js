@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const Output = require('../renderer/assistant-output');
-const { createLegacyOutputRecovery, recoverSupplementReceipts } = require('../legacy-output-recovery');
+const { createLegacyOutputRecovery, recoverSupplementReceipts } = require('../src/main/projects/legacy-output-recovery');
 const ids = { conv: '11111111-1111-4111-8111-111111111111', run: '22222222-2222-4222-8222-222222222222', input: '33333333-3333-4333-8333-333333333333', other: '44444444-4444-4444-8444-444444444444' };
 const copy = value => JSON.parse(JSON.stringify(value));
 const result = (id, text, extra = {}) => ({ type: 'result', subtype: 'success', uuid: `result-${id}`, jobId: ids.run,
@@ -179,15 +179,15 @@ test('running or unsupplemented records never read a recovery journal', t => {
 });
 
 test('main load falls back to the parsed record if optional projection fails and ships the helper', () => {
-  const vm = require('node:vm'), source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-  const start = source.indexOf('function loadConversation(id)'), end = source.indexOf('\n}', start) + 2;
   const record = { id: ids.conv, turns: [], updatedAt: 'unchanged' };
-  const context = { fs: { readFileSync: () => JSON.stringify(record) }, convFilePath: id => id, console,
-    app: { getPath: () => '/synthetic' }, path, recoverLegacyOutput() { throw Error('synthetic optional recovery failure'); } };
-  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
-  assert.deepEqual(copy(context.loadConversation(ids.conv)), record);
+  const { createHistoryStore } = require('./helpers/load-commonjs.cjs')('src/main/app/history-store.js', {
+    modules: { fs: { existsSync: () => true, readFileSync: () => JSON.stringify(record) } },
+  });
+  const history = createHistoryStore({ getUserDataDir: () => '/synthetic',
+    recoverLegacyOutput() { throw Error('synthetic optional recovery failure'); } });
+  assert.deepEqual(copy(history.loadConversation(ids.conv)), record);
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
-  assert.ok(pkg.build.files.includes('legacy-output-recovery.js'));
+  assert.ok(pkg.build.files.includes('src/main/**/*.js') && fs.existsSync(path.join(__dirname, '../src/main/projects/legacy-output-recovery.js')));
 });
 
 const missingFinalNotice = '任务已结束，但未取得最终回复。已保留可恢复的执行过程。';

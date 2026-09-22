@@ -8,7 +8,7 @@ const {
   isAmbientTask,
   isAgentTask,
   liveResultDisposition,
-} = require('../live-async-agent-tracker');
+} = require('../src/main/live/live-async-agent-tracker');
 
 test('后台 Bash 不会被误计为后台 Agent', () => {
   const tracker = new LiveAsyncAgentTracker();

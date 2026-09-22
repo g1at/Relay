@@ -3,8 +3,8 @@
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { executeSessionOperation } = require('../sdk-session-history');
+const relay = require('../src/main/sdk/claude-sdk');
+const { executeSessionOperation } = require('../src/main/sdk/sdk-session-history');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-fork-resume-'));
 const cwd = path.join(base, 'workspace'), config = path.join(base, 'config'); fs.mkdirSync(cwd); fs.mkdirSync(config);
 fs.writeFileSync(path.join(config, 'settings.json'), '{}');

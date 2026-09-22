@@ -5,7 +5,7 @@
 const { app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
 const http = require('node:http'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const assert = require('node:assert/strict');
-const { createBrowserPanelHost } = require('../browser-panel-host');
+const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-browser-smoke-'));
 app.setPath('userData', profile);
 app.commandLine.appendSwitch('disable-background-networking');

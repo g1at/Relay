@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { workspaceKey } = require('../conversation-workspaces');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { workspaceKey } = require('../src/main/projects/conversation-workspaces');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 function declaration(name) {
   const match = new RegExp('function ' + name + '\\(').exec(source);
   assert.ok(match, name);
@@ -19,11 +19,11 @@ function harness() {
   const runtime = { id: 'provider', revision: 1, modelId: 'runtime-model', tier: 'opus' };
   const rejected = new Set();
   let record = null;
-  const context = { TaskClock: require('../task-clock').TaskClock,
-    ...require('../live-prewarm-reuse'),
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
+    ...require('../src/main/live/live-prewarm-reuse'),
     console: { log() {}, warn() {}, error() {} }, liveSessions, liveTombstones, workspaceKey,
     conversationRuntimeContract: () => ({ fingerprint: 'fixture-contract', policy: { settingSources: ['user'], settings: {} } }),
-    requiresFreshContract: require('../sdk-runtime-contract').requiresFreshContract,
+    requiresFreshContract: require('../src/main/sdk/sdk-runtime-contract').requiresFreshContract,
     loadConversation: () => record,
     relayModelTier: () => 'opus', activeRelayProviderRuntime: () => runtime, providerSessionRoute: () => route,
     sessionRouteMatchesProvider: (candidate) => candidate && candidate.providerId === route.providerId,
@@ -147,14 +147,16 @@ test('actual prespawn and both reset IPC paths use the shared resolved conversat
 });
 
 test('workspace IPC registration and shutdown use the owned main-window bridge', () => {
-  assert.match(source, /registerWorkspaceTools\(\{\s*ipcMain, getWindow: \(\) => mainWindow, resolveWorkspace: resolveWorkspaceForTools, resolveLinkWorkspace, shell/);
-  assert.match(source, /app\.on\('before-quit',[\s\S]*?workspaceTools\.dispose\(\)/);
+  assert.match(source, /registerWorkspaceTools\(\{\s*ipcMain, getWindow: \(\) => applicationWindows\.mainWindow, resolveWorkspace: resolveWorkspaceForTools, resolveLinkWorkspace, shell/);
+  const lifecycle = fs.readFileSync(path.join(__dirname, '../src/main/app/application-lifecycle.js'), 'utf8');
+  assert.match(lifecycle, /app\.on\('before-quit',[\s\S]*?integrations\.workspaceTools\.dispose\(\)/);
+  assert.match(source, /integrations: \{ attachmentDialog, browserPanelTools, workspaceTools \}/);
 });
 
 test('file/terminal resolver honors explicit selected path, explicit default, and history only when omitted', () => {
-  const { UUID, directoryValue } = require('../conversation-workspaces');
+  const { UUID, directoryValue } = require('../src/main/projects/conversation-workspaces');
   const id = '10000000-0000-4000-8000-000000000001', calls = [];
-  const context = { TaskClock: require('../task-clock').TaskClock,
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     liveSessions: new Map(), WORKSPACE_UUID: UUID, directoryValue, fs: { existsSync: () => true }, convFilePath: () => 'synthetic',
     loadConversation: () => ({ id, workingDir: { path: 'saved-path' }, mode: 'agent', agent: 'writer' }),
     resolveExecutionWorkspace: (options) => { calls.push(options); return options; },
@@ -169,12 +171,12 @@ test('file/terminal resolver honors explicit selected path, explicit default, an
 
 test('main workspace service rejects a cwd change while a one-shot ledger task is active', (t) => {
   const os = require('node:os');
-  const { createConversationWorkspaces } = require('../conversation-workspaces');
+  const { createConversationWorkspaces } = require('../src/main/projects/conversation-workspaces');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-main-workspace-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const id = '10000000-0000-4000-8000-000000000001';
   let writes = 0;
-  const context = { TaskClock: require('../task-clock').TaskClock,
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     conversationWorkspaceService: null, path, fs, workspaceKey,
     generalPreferences: { workspaceRoot: () => path.join(home, 'RelayProjects') },
     createConversationWorkspaces: (options) => createConversationWorkspaces({ ...options, homeDir: home }),

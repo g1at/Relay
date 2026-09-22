@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createMiniChatController } = require('../mini-chat-controller');
+const { createMiniChatController } = require('../src/main/app/mini-chat-controller');
 
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -616,7 +616,7 @@ test('terminal mini save retains canonical presentation metadata received during
 });
 
 test('a stable-ID mini retry after a lost receipt preserves the first accepted insertion point', async () => {
-  const { normalizeSupplement } = require('../live-supplement-input');
+  const { normalizeSupplement } = require('../src/main/live/live-supplement-input');
   let canonical;
   const f = fixture({ steer: request => {
     f.steers.push(copy(request));
@@ -1336,7 +1336,7 @@ test('idle mini refresh adopts main-window completion but cannot replace an acti
 
 
 test('mini stores the real host TaskClock cumulative duration when the resumed segment is longer', async () => {
-  const { TaskClock } = require('../task-clock');
+  const { TaskClock } = require('../src/main/tasks/task-clock');
   let now = Date.UTC(2026, 8, 12, 6);
   const f = fixture({ now: () => new Date(now).toISOString() });
   const sent = await f.controller.submit({text:'original task'});

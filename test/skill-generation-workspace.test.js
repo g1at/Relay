@@ -8,10 +8,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
-const { prepareSkillGenerationWorkspace } = require('../skill-generation-workspace');
-const { SkillDraftService } = require('../skill-draft-service');
-const { SkillDraftClient } = require('../skill-draft-client');
-const mainSource = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { prepareSkillGenerationWorkspace } = require('../src/main/skills/skill-generation-workspace');
+const { SkillDraftService } = require('../src/main/skills/skill-draft-service');
+const { SkillDraftClient } = require('../src/main/skills/skill-draft-client');
+const { registerSkillDraftIpc } = require('../src/main/skills/skill-draft-ipc');
+const mainSource = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 
 function segment(start, end) {
   const first = mainSource.indexOf(start), last = mainSource.indexOf(end, first);
@@ -253,7 +254,7 @@ test('draft rebase IPC preserves conflict details and never reloads or publishes
       return { draft: { id: 'replacement', status: 'draft' }, previous: { id }, alreadyApplied: false };
     } }, broadcastSkillDraftEvent: (...args) => events.push(args),
   });
-  vm.runInContext(segment('async function skillDraftResult(', "ipcMain.handle('skillDrafts:publish'"), context);
+  registerSkillDraftIpc({ ...context, getSkillDraftService: () => context.skillDraftService });
   const handler = handlers.get('skillDrafts:rebase');
   const conflict = await handler({}, { id: 'original' });
   assert.equal(conflict.ok, false); assert.equal(conflict.code, 'REBASE_CONFLICT');

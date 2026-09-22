@@ -6,11 +6,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
-const { MemoryStore } = require('../memory-store');
-const { memoryEligibility, serializeMemoryFrontmatter } = require('../memory-schema');
+const { MemoryStore } = require('../src/main/memory/memory-store');
+const { registerMemoryIpc } = require('../src/main/memory/memory-ipc');
+const { memoryEligibility, serializeMemoryFrontmatter } = require('../src/main/memory/memory-schema');
 
-const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+const mainSource = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
+const preloadSource = fs.readFileSync(path.join(__dirname, '../preload.js'), 'utf8');
 
 function between(source, start, end) {
   const from = source.indexOf(start), to = source.indexOf(end, from + start.length);
@@ -33,8 +34,8 @@ function harness(t) {
   });
   const indexLine = between(mainSource, 'function memoryIndexLine(', 'function memoryQueryTerms(');
   const index = between(mainSource, 'function rebuildMemoryIndex(', '// 注入预算上限(#2)');
-  const ipc = between(mainSource, '// IPC: 长期记忆库管理', '// IPC: 探测环境');
-  vm.runInContext(`${indexLine}\n${index}\n${ipc}`, context, { filename: 'main-memory-ipc-extract.js' });
+  vm.runInContext(`${indexLine}\n${index}`, context, { filename: 'main-memory-index-extract.js' });
+  registerMemoryIpc(context);
   const memoryStart = preloadSource.indexOf('  memory: {');
   const memoryEnd = preloadSource.indexOf('\n  },', memoryStart) + '\n  },'.length;
   assert.ok(memoryStart >= 0 && memoryEnd > memoryStart);

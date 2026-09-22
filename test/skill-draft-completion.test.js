@@ -7,14 +7,10 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
-const { SkillDraftClient } = require('../skill-draft-client');
+const { SkillDraftClient } = require('../src/main/skills/skill-draft-client');
+const loadCommonJs = require('./helpers/load-commonjs.cjs');
 
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
-function segment(start, end) {
-  const first = source.indexOf(start), last = source.indexOf(end, first);
-  assert.ok(first >= 0 && last > first, start);
-  return source.slice(first, last);
-}
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 function handlerSource(name) {
   const first = source.indexOf(`ipcMain.handle('${name}'`);
   const last = source.indexOf('\n});', first);
@@ -63,10 +59,14 @@ function fixture(t) {
     broadcastSkillDraftEvent: type => order.push(type),
     reloadSkillsInLiveSessions: async reason => { order.push(`reload:${reason}`); return { ok: true }; },
   });
-  vm.runInContext(segment('async function skillDraftResult(', "ipcMain.handle('skillDrafts:list'"), context);
-  for (const name of ['skillDrafts:publish', 'skillDrafts:rollback', 'skills:archive']) {
-    vm.runInContext(handlerSource(name), context);
-  }
+  const { registerSkillDraftIpc } = loadCommonJs('src/main/skills/skill-draft-ipc.js', {
+    globals: { console: context.console },
+  });
+  registerSkillDraftIpc({ ...context, getSkillDraftService: () => client });
+  const libraryWrite = source.match(/^function withSkillLibraryWrite\([^]*?^}/m);
+  assert.ok(libraryWrite, 'bootstrap retains the live library transaction boundary');
+  vm.runInContext(libraryWrite[0], context);
+  vm.runInContext(handlerSource('skills:archive'), context);
   const invoke = (name, args) => {
     const result = handlers.get(name)({}, args);
     pending.push(result);

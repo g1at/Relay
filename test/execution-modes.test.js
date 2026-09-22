@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
-const { prepareExecutionRequest, normalizeExecutionMode, executionToolPolicy, LiveExecutionModes } = require('../execution-modes');
+const { prepareExecutionRequest, normalizeExecutionMode, executionToolPolicy, LiveExecutionModes } = require('../src/main/projects/execution-modes');
 
 const tick = () => new Promise(setImmediate);
 const localResult = result => ({ type: 'result', subtype: 'success', is_error: false, num_turns: 0, duration_api_ms: 0, result });
@@ -366,7 +366,7 @@ test('future local ACKs with UUIDs remain compatible, and SDK-origin permission 
 });
 
 function sdkHarness({ commands = [{ name: 'goal' }] } = {}) {
-  const sdkPath = path.join(__dirname, '..', 'claude-sdk.js');
+  const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
   const source = fs.readFileSync(sdkPath, 'utf8').replace('let sdkPromise = null;', 'let sdkPromise = Promise.resolve(globalThis.fixture);');
   const calls = { inputs: [], permission: [], options: null, events: [] };
   const fixture = { query({ prompt, options }) {

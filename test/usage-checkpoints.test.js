@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createUsageObserver } = require('../usage-capture');
-const { applyUsageRecord, emptyIndex } = require('../usage-stats-worker');
+const { createUsageObserver } = require('../src/main/usage/usage-capture');
+const { applyUsageRecord, emptyIndex } = require('../src/main/usage/usage-stats-worker');
 
 const method = 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));

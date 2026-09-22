@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const rendererSource = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
 
 function declaration(text, name) {
@@ -25,7 +25,7 @@ function harness(initial = {}) {
     writeAppSettings: settings => { writes++; stored = { ...settings }; },
     brandLogoDataUrl: () => null,
     registeredMiniAccel: null,
-    isQuickChatEnabled: require('../mini-window-host').isQuickChatEnabled,
+    isQuickChatEnabled: require('../src/main/app/mini-window-host').isQuickChatEnabled,
     miniBrandCache: null, miniHost: null,
     crypto: require('node:crypto'),
   });

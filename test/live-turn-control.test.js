@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { LiveTurnControls } = require('../live-turn-control');
+const { LiveTurnControls } = require('../src/main/live/live-turn-control');
 
 const deferred = () => {
   let resolve, reject;
@@ -131,7 +131,7 @@ test('one-shot pause waits for its actual terminal and shares duplicate requests
   assert.equal(h.controls.isStopping('conversation'), false);
 });
 
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 function pauseIpc({ session = null, run = null, child = null, controlResult = null } = {}) {
   const handlers = {}, calls = [];
   const context = {
@@ -218,7 +218,7 @@ test('queued run is registered before resource wait and canceled admission retur
   assert.ok(end > admission);
   const wait = deferred();
   const context = { acquireTaskResource: () => wait.promise, runId: 'queued-old-job', taskConversationId: 'old-conversation',
-    taskClock: new (require('../task-clock').TaskClock)({ startedAt: 1000, now: () => 1200 }) };
+    taskClock: new (require('../src/main/tasks/task-clock').TaskClock)({ startedAt: 1000, now: () => 1200 }) };
   const pending = vm.runInNewContext(`(async () => { ${run.slice(admission, end)} })()`, context);
   wait.resolve(null);
   const result = await pending;

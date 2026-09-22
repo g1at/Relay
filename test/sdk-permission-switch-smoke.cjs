@@ -3,9 +3,9 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { InteractionBroker } = require('../interaction-broker');
-const { createConversationPermissions } = require('../conversation-permissions');
+const relay = require('../src/main/sdk/claude-sdk');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
+const { createConversationPermissions } = require('../src/main/projects/conversation-permissions');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-sdk-priority-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
 fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');

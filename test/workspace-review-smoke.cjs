@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
-const { registerWorkspaceTools } = require('../workspace-tools');
+const { registerWorkspaceTools } = require('../src/main/workspace/workspace-tools');
 const root = path.resolve(__dirname, '..');
 const output = path.join(root, '.codex-tmp', 'workspace-review-smoke');
 fs.mkdirSync(output, { recursive: true });
@@ -63,7 +63,7 @@ app.whenReady().then(async () => {
   const fixture = path.join(output, 'fixture.html');
   const fixturePreload = path.join(output, 'preload.cjs');
   fs.writeFileSync(fixturePreload, fs.readFileSync(path.join(root, 'preload.js'), 'utf8').replace("contextBridge.exposeInMainWorld('api',", "contextBridge.exposeInMainWorld('reviewNativeApi',"));
-  const source = fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8');
   const seed = `(()=>{
     const base=window.api, native=window.reviewNative;
     const state=window.reviewFixture={context:{conversationId:'review-demo',projectId:'project-a',workingDir:'project-a',title:'演示项目'},calls:[],pending:[],hold:false,fail:false};

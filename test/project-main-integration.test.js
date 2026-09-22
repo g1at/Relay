@@ -3,12 +3,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), vm = require('node:vm');
-const { createProjectStore } = require('../project-store');
-const workspaces = require('../conversation-workspaces');
-const { mergeSupplementHistory } = require('../live-supplement-input');
-const { createAgentEnvironment } = require('../agent-environment');
-const { createGeneralPreferences, registerGeneralPreferencesIpc, normalizePreferences } = require('../general-preferences');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { createProjectStore } = require('../src/main/projects/project-store');
+const workspaces = require('../src/main/projects/conversation-workspaces');
+const { mergeSupplementHistory } = require('../src/main/live/live-supplement-input');
+const { createAgentEnvironment } = require('../src/main/sdk/agent-environment');
+const { createGeneralPreferences, registerGeneralPreferencesIpc, normalizePreferences } = require('../src/main/app/general-preferences');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const ids = ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002'];
 function declaration(name) { const start=source.indexOf('function '+name+'(');assert.ok(start>=0);const tail=source.slice(start);const next=/\n(?:async )?function \w+\(/.exec(tail);return next?tail.slice(0,next.index):tail; }
@@ -19,8 +19,8 @@ function fixture(t) {
   const records=new Map(),writes=[],handlers=new Map(),liveSessions=new Map(),liveTombstones=new Map(),ledger=[],kills=[];
   const file=id=>path.join(root,id+'.json');
   const persist=value=>{records.set(value.id,clone(value));writes.push(clone(value));fs.writeFileSync(file(value.id),JSON.stringify(value));};
-  const context={miniChat:null,fs,path,createProjectStore,...workspaces,WORKSPACE_UUID:workspaces.UUID,
-    createAgentEnvironment, registerGeneralPreferencesIpc, normalizePreferences, dialog:{},mainWindow:null,
+  const context={miniChat:null,fs,path,appRoot:path.resolve(__dirname,'..'),createProjectStore,...workspaces,WORKSPACE_UUID:workspaces.UUID,
+    createAgentEnvironment, registerGeneralPreferencesIpc, normalizePreferences, dialog:{},applicationWindows:{mainWindow:null},
     createGeneralPreferences:options=>createGeneralPreferences({...options,homeDir:root}),claudeSdk:{configureRuntimeEnvironment(){}},
     createConversationWorkspaces:options=>workspaces.createConversationWorkspaces({...options,homeDir:root}),
     app:{getPath:()=>root},convFilePath:file,loadConversation:id=>records.has(id)?clone(records.get(id)):null,
@@ -35,7 +35,16 @@ function fixture(t) {
   const start=source.indexOf('let projectStore = null;'),end=source.indexOf('const workspaceTools =',start);assert.ok(start>0&&end>start);
   vm.runInContext(source.slice(start,end),context);
   vm.runInContext(declaration('saveConversation'),context);
-  for(const name of ['history:list','history:load','history:save'])vm.runInContext(ipc(name),context);
+  require('../src/main/app/history-ipc').registerHistoryIpc({
+    ipcMain: context.ipcMain,
+    history: { readHistoryIndex: context.readHistoryIndex, loadConversation: context.loadConversation,
+      persistConversationRecord: persist, convFilePath: file },
+    projects: { initialize: () => context.initializeProjectHistory(), getStore: () => context.getProjectStore(),
+      projectConversation: value => context.projectConversation(value) },
+    nativeHistory: {}, isMiniChatActive: () => false,
+    saveConversation: value => context.saveConversation(value), genId: context.genId,
+    protectSdkMetadata: context.protectSdkMetadata,
+  });
   return {root,folders,context,records,writes,handlers,liveSessions,liveTombstones,ledger,kills,persist,
     store:context.getProjectStore(),save:value=>handlers.get('history:save')({},clone(value)),
     conversation:(id=ids[0],folder=folders[0])=>({id,title:'Original title',createdAt:'2020-01-01',updatedAt:'2020-02-01',pinned:true,mode:'plain',sessionId:'old-session',workingDir:folder?{path:folder,name:'Original folder'}:null,turns:[{user:'Original request',assistant:'Original answer'}]})};

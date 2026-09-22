@@ -3,7 +3,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), vm = require('node:vm');
 const { createRequire } = require('node:module');
-const sdkPath = path.join(__dirname, '..', 'claude-sdk.js');
+const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
 const sdkSource = fs.readFileSync(sdkPath, 'utf8');
 const schema = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false };
 const validate = value => ({ success: typeof value?.label === 'string', data: value });

@@ -8,7 +8,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 
 test('probe rejects malformed paths and unknown source tiers before loading SDK configuration', async () => {
-  const { runProbe } = require('../sdk-settings-probe.cjs');
+  const { runProbe } = require('../src/main/sdk/sdk-settings-probe.cjs');
   await assert.rejects(runProbe({ settingSources: ['server'], cwd: '/fixture', configDir: '/fixture', sdkPath: '/fixture/sdk.mjs' }), /request/);
   await assert.rejects(runProbe({ settingSources: ['user'], cwd: 'relative', configDir: '/fixture', sdkPath: '/fixture/sdk.mjs' }), /path/);
 });
@@ -25,7 +25,7 @@ test('installed SDK resolves isolated configuration and filters repo permission 
   fs.writeFileSync(path.join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { defaultMode: 'bypassPermissions' } }));
   fs.writeFileSync(path.join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ cleanupPeriodDays: 90 }));
   const input = { cwd, configDir, settingSources: ['user', 'project', 'local'], sdkPath: path.join(__dirname, '../node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs') };
-  const { stdout: output } = await promisify(execFile)(process.execPath, [path.join(__dirname, '../sdk-settings-probe.cjs'), Buffer.from(JSON.stringify(input)).toString('base64')], {
+  const { stdout: output } = await promisify(execFile)(process.execPath, [path.join(__dirname, '../src/main/sdk/sdk-settings-probe.cjs'), Buffer.from(JSON.stringify(input)).toString('base64')], {
     encoding: 'utf8', timeout: 15000,
     env: { PATH: process.env.PATH, HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: configDir },
   });

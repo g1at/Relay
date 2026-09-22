@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { parseAgentDocument, buildNativeAgent, loadNativeAgent } = require('../native-agent-definition');
+const { parseAgentDocument, buildNativeAgent, loadNativeAgent } = require('../src/main/sdk/native-agent-definition');
 
 const text = `---
 name: test-agent

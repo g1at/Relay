@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createAppSettingsCache, MAX_CACHE_BYTES } = require('../app-settings-cache');
+const { createAppSettingsCache, MAX_CACHE_BYTES } = require('../src/main/app/app-settings-cache');
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-settings-cache-'));

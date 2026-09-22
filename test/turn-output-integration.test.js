@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { consumeOneShotMessages, sanitizeResultPermissionDenials } = require('../claude-sdk');
+const { consumeOneShotMessages, sanitizeResultPermissionDenials } = require('../src/main/sdk/claude-sdk');
 const output = require('../renderer/assistant-output');
 
 async function consume(events, userMessageId) {

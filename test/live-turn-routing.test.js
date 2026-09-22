@@ -5,12 +5,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { LiveTurnRouter } = require('../live-turn-router');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 const {
   LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition,
-} = require('../live-async-agent-tracker');
+} = require('../src/main/live/live-async-agent-tracker');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const start = source.indexOf('  const onMessage = (evt) => {', source.indexOf('function spawnLiveSession'));
 const stop = source.indexOf('  const onExit = ', start);
 const exitStop = source.indexOf('  const canUseTool = ', stop);
@@ -34,14 +34,14 @@ function liveRun(jobId = 'new-user', { keepAlive = true, orchestrate = false } =
     turnRouter: new LiveTurnRouter(), checkpointRunIds: new Set(),
   };
   sess.turnRouter.begin(jobId);
-  const context = { TaskClock: require('../task-clock').TaskClock,
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     sess, convId: sess.convId, liveResultDisposition,
-    ...require('../sdk-session-observer'),
-    observer: new (require('../sdk-session-observer').SdkSessionObserver)(),
-    routeTimingHistory: new (require('../sdk-session-observer').RouteTimingHistory)(),
-    ...require('../sdk-task-resources'),
+    ...require('../src/main/sdk/sdk-session-observer'),
+    observer: new (require('../src/main/sdk/sdk-session-observer').SdkSessionObserver)(),
+    routeTimingHistory: new (require('../src/main/sdk/sdk-session-observer').RouteTimingHistory)(),
+    ...require('../src/main/sdk/sdk-task-resources'),
     loadConversation: () => null,
-    observeSupplement: require('../live-supplement-input').observeSupplement,
+    observeSupplement: require('../src/main/live/live-supplement-input').observeSupplement,
     publishLiveSupplement() {}, settleLiveSupplements() { return []; },
     console: { log() {}, warn() {}, error() {} },
     interactionBroker: { rejectTask() {} }, checkpointManager: null,
@@ -293,14 +293,14 @@ test('interrupt receipt with surviving queued sends recycles before reporting a 
   let killed = false;
   const router = new LiveTurnRouter();
   router.begin('new-user');
-  const context = { TaskClock: require('../task-clock').TaskClock,
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     console: { log() {}, warn() {} },
-    cancelPendingLiveInput: require('../live-mcp-dispatch').cancelPendingLiveInput,
+    cancelPendingLiveInput: require('../src/main/live/live-mcp-dispatch').cancelPendingLiveInput,
     withLiveControlTimeout: (promise) => promise,
     waitForLiveTurnIdle() { throw new Error('must not reuse a session with surviving input'); },
     killLiveSession() { killed = true; },
   };
-  context.liveTurnControls = new (require('../live-turn-control').LiveTurnControls)({
+  context.liveTurnControls = new (require('../src/main/live/live-turn-control').LiveTurnControls)({
     cancelPendingInput: context.cancelPendingLiveInput, settleUnsent() {},
     withTimeout: context.withLiveControlTimeout, waitForIdle: context.waitForLiveTurnIdle, killSession: context.killLiveSession,
   });

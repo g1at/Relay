@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { MemoryStore, guardMemoryToolInput } = require('../memory-store');
-const { parseMemoryDocument, memoryEligibility, serializeMemoryFrontmatter } = require('../memory-schema');
+const { MemoryStore, guardMemoryToolInput } = require('../src/main/memory/memory-store');
+const { parseMemoryDocument, memoryEligibility, serializeMemoryFrontmatter } = require('../src/main/memory/memory-schema');
 
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-memory-test-'));

@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
-const { HostStdioMcpServer, bridgeMcpServers, createRuntimeMcpMapper } = require('../host-stdio-mcp');
+const { HostStdioMcpServer, bridgeMcpServers, createRuntimeMcpMapper } = require('../src/main/sdk/host-stdio-mcp');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 test('routing-only startup stays lightweight and the first local bridge keeps real SDK identity', () => {
@@ -12,9 +12,9 @@ test('routing-only startup stays lightweight and the first local bridge keeps re
   execFileSync(process.execPath, ['-e', `
     const assert = require('node:assert/strict');
     (async () => {
-      const bridge = require('./host-stdio-mcp');
-      require('./agent-environment');
-      require('./claude-sdk');
+      const bridge = require('./src/main/sdk/host-stdio-mcp');
+      require('./src/main/sdk/agent-environment');
+      require('./src/main/sdk/claude-sdk');
       const serverEntry = require.resolve('@modelcontextprotocol/sdk/server/mcp.js');
       const transportEntry = require.resolve('@modelcontextprotocol/sdk/client/stdio.js');
       const remote = { type:'http', url:'https://example.invalid' };

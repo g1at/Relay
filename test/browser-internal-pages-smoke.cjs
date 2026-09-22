@@ -5,7 +5,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const { pathToFileURL } = require('node:url');
-const { registerBrowserPanelIpc } = require('../browser-panel-ipc');
+const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp', 'browser-internal-pages-smoke');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
@@ -88,7 +88,7 @@ app.whenReady().then(async () => {
   app.on('session-created', session => session.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) && !details.url.startsWith(base + '/') })));
   const entry = path.join(out, 'fixture.html'), preload = path.join(out, 'preload.cjs');
   fs.writeFileSync(preload, `const{contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('nativeBrowser',{invoke:input=>ipcRenderer.invoke('browser:invoke',input),onEvent:handler=>{const listener=(_e,p)=>handler(p);ipcRenderer.on('browser:event',listener);return()=>ipcRenderer.removeListener('browser:event',listener);}});`);
-  const fixture = fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8');
+  const fixture = fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8');
   const seed = `(()=>{const original=window.api;const files={'README.md':'# 项目交付说明\\n\\n**已完成**：文件、终端和浏览器。\\n\\n| 内容 | 状态 |\\n| --- | --- |\\n| 页面预览 | 可用 |','app.js':'const ready = true;'};const workspace={resolve:async c=>({ok:true,root:'C:/Synthetic/RelayProject',conversationId:c.conversationId}),list:async()=>({ok:true,entries:Object.keys(files).map(name=>({name,path:name,type:'file',size:200}))}),read:async({path})=>({ok:true,path,content:files[path]}),open:async()=>({ok:true}),onTerminalEvent:()=>()=>{}};window.api=new Proxy(original,{get(o,k){if(k==='browser')return nativeBrowser;if(k==='settings')return{...o[k],read:async()=>({...await o[k].read(),info:{uiVersion:'test'}})};if(k==='workspace')return workspace;if(k==='windowChrome')return{overlay:true,initialTheme:'light',setTheme(){}};return o[k];}});})();`;
   fs.writeFileSync(entry, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + seed + '(' + installManagementFixture.toString() + ')(' + JSON.stringify(base) + ');</script>'));
   win = new BrowserWindow({ width: 1200, height: 820, show: false, titleBarStyle: 'hidden', titleBarOverlay: { color: '#fafafa', symbolColor: '#343436', height: 35 }, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });

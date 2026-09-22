@@ -33,7 +33,7 @@ app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
   const seed = `(() => { localStorage.clear(); const base=window.api; window.modelReview={runtime:[],failNext:false}; window.api=new Proxy(base,{get(target,key){if(key==='setClaudeRuntime')return async(id,model,effort)=>{modelReview.runtime.push({id,model,effort});if(modelReview.failNext){modelReview.failNext=false;return{ok:false,message:'合成切换失败'};}return{ok:true,model,effort};};return target[key];}}); })();`;
   const fixture = path.join(out, 'fixture.html');
-  fs.writeFileSync(fixture, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fs.readFileSync(path.join(__dirname, 'ui-api-fixture.js'), 'utf8') + seed + '</script>'));
+  fs.writeFileSync(fixture, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'), 'utf8') + seed + '</script>'));
   win = new BrowserWindow({ width: 1100, height: 760, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   await win.loadFile(fixture); win.show(); win.focus(); win.webContents.focus();
   await waitFor('providerRoutingLoaded&&!restoringActiveRuns');

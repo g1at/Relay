@@ -2,8 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { taskFileInstructions, outsideLinks, createTaskFilePolicy } = require('../task-file-policy');
-const { _buildOptions: buildOptions } = require('../claude-sdk');
+const { taskFileInstructions, outsideLinks, createTaskFilePolicy } = require('../src/main/tasks/task-file-policy');
+const { _buildOptions: buildOptions } = require('../src/main/sdk/claude-sdk');
 
 const cwd = 'D:\\Cybersecurity\\SRC';
 const scratchDir = 'C:\\Relay Data\\conversation-scratch\\session';

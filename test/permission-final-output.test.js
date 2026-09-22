@@ -5,7 +5,7 @@ const Output = require('../renderer/assistant-output');
 const Activity = require('../renderer/activity-stream');
 const Errors = require('../renderer/conversation-errors');
 const { harness } = require('./renderer-activity-harness.cjs');
-const { createLegacyOutputRecovery } = require('../legacy-output-recovery');
+const { createLegacyOutputRecovery } = require('../src/main/projects/legacy-output-recovery');
 const clone = value => JSON.parse(JSON.stringify(value));
 const ids = { conv: '11111111-1111-4111-8111-111111111111', run: '22222222-2222-4222-8222-222222222222' };
 const denial = [{ tool_name: 'PowerShell' }];

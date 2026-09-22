@@ -2,10 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LiveTurnRouter } = require('../live-turn-router');
-const { dispatchLiveInput } = require('../live-mcp-dispatch');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
+const { dispatchLiveInput } = require('../src/main/live/live-mcp-dispatch');
 const { normalizeSupplement, supplementPrompt, sameSupplement, submitLiveSupplement,
-  observeSupplement, flushSupplementUpdates, mergeSupplementHistory } = require('../live-supplement-input');
+  observeSupplement, flushSupplementUpdates, mergeSupplementHistory } = require('../src/main/live/live-supplement-input');
 
 // All files, messages and APIs are synthetic. No Query, model, disk history or
 // external service is started by these tests.
@@ -496,7 +496,7 @@ test('folder supplements preserve their type and retry identity without changing
   assert.equal(h.session.jobId, JOB);
   assert.equal(h.pushes[0].metadata.priority, 'next');
   assert.deepEqual(h.pushes[0].metadata.files, [folder]);
-  const { prepareAttachmentContent } = require('../attachment-input');
+  const { prepareAttachmentContent } = require('../src/main/sdk/attachment-input');
   const content = await prepareAttachmentContent(h.pushes[0].prompt, h.pushes[0].metadata.files);
   assert.match(content[0].text, /Glob\/Grep/);
   assert.match(content[0].text, /不改变当前工作目录/);

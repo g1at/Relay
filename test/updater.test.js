@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'updater.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/app/updater.js'), 'utf8');
 
 function fixture({ packaged = true, loadError = null, delay = '' } = {}) {
   const calls = { require: 0, check: 0, download: 0, quit: [], marked: 0 };

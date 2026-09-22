@@ -5,8 +5,8 @@ const electron = require('electron');
 const { app, BrowserWindow, ipcMain } = electron;
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http'), vm = require('node:vm');
 const { pathToFileURL } = require('node:url');
-const { registerBrowserPanelIpc } = require('../browser-panel-ipc');
-const root = path.resolve(__dirname, '..'), output = path.join(root, '.codex-tmp/app-link-routing-smoke');
+const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
+const root = path.resolve(__dirname, '..'), output = process.env.RELAY_SMOKE_OUTPUT || path.join(root, '.codex-tmp/app-link-routing-smoke');
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-background-networking'); app.on('window-all-closed', () => {});
 const report = { checks: {}, errors: [], external: [] };
@@ -39,12 +39,15 @@ app.whenReady().then(async () => {
   win = new BrowserWindow({ width: 1200, height: 820, show: false, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   const shell = { ...electron.shell, openExternal: async url => report.external.push(url) };
   registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry, getElectron: () => ({ ...electron, shell }) });
-  const source = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
-  context = vm.createContext({ mainWindow: win, pathToFileURL, Promise, require: require('node:module').createRequire(path.join(root, 'main.js')), browserPanelTools: registry,
+  const source = fs.readFileSync(path.join(root, 'src/main/bootstrap.js'), 'utf8');
+  const windowSource = fs.readFileSync(path.join(root, 'src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
+  context = vm.createContext({ mainWindow: win, pathToFileURL, Promise, require: require('node:module').createRequire(path.join(root, 'src/main/app/application-windows.js')), browserPanelTools: registry,
     showMainWindow: () => win.showInactive(), shell, logger: { warn: (...args) => report.errors.push(args.join(' ')) },
     ipcMain, miniPanelCaller: event => mini && event.sender === mini.webContents && event.senderFrame === event.sender.mainFrame,
   });
-  vm.runInContext(source.slice(source.indexOf('async function openConfiguredWebLink('),source.indexOf('// 创建首次设置向导窗口'))+'\n'+source.slice(source.indexOf("ipcMain.handle('shell:open'"),source.indexOf('// IPC: 文件选择对话框')), context);
+  context.browser = { openLink: url => registry.openLink(url) };
+  context.applicationWindows = { get mainWindow() { return context.mainWindow; }, openConfiguredWebLink: url => context.openConfiguredWebLink(url) };
+  vm.runInContext(windowSource.slice(windowSource.indexOf('async function openConfiguredWebLink('),windowSource.indexOf('// 创建首次设置向导窗口'))+'\n'+source.slice(source.indexOf("ipcMain.handle('shell:open'"),source.indexOf('// IPC: 文件选择对话框')), context);
   context.attachExternalLinkGuard(win, entry);
   win.relayContentReady = win.loadFile(entry); await win.relayContentReady; win.showInactive();
   await until('!!relayWorkspacePanel && providerRoutingLoaded && !restoringActiveRuns');

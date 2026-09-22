@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { memoryEligibility, normalizeMemoryMeta, serializeMemoryFrontmatter } = require('../memory-schema');
+const { memoryEligibility, normalizeMemoryMeta, serializeMemoryFrontmatter } = require('../src/main/memory/memory-schema');
 
 test('旧记忆默认迁移成全局、已确认、活动状态', () => {
   const meta = normalizeMemoryMeta({ name: 'tone', description: '简洁', type: 'feedback' });

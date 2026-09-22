@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createCronMcpServer, CRON_MCP_TOOL_TIMEOUT_MS, _execTool } = require('../cron-mcp');
+const { createCronMcpServer, CRON_MCP_TOOL_TIMEOUT_MS, _execTool } = require('../src/main/scheduling/cron-mcp');
 
 function schedulesFile(t) {
   const tempRoot = process.platform === 'win32' ? os.tmpdir() : '/tmp';

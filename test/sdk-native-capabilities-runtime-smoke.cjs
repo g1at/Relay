@@ -3,9 +3,9 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { buildNativeAgent } = require('../native-agent-definition');
-const { collectStructuredOutput } = require('../sdk-structured-output');
+const relay = require('../src/main/sdk/claude-sdk');
+const { buildNativeAgent } = require('../src/main/sdk/native-agent-definition');
+const { collectStructuredOutput } = require('../src/main/sdk/sdk-structured-output');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-native-capabilities-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
 fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');

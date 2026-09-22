@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { createNativeBrandTheme, parseSystemDark } = require('../native-brand-theme');
+const { createNativeBrandTheme, parseSystemDark } = require('../src/main/app/native-brand-theme');
 
 test('Windows registry parser reads only the documented system color value', () => {
   assert.equal(parseSystemDark('    SystemUsesLightTheme    REG_DWORD    0x0\r\n'), true);

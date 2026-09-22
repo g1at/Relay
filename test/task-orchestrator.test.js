@@ -5,16 +5,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TaskLedger } = require('../task-ledger');
+const { TaskLedger } = require('../src/main/tasks/task-ledger');
 const {
   RUN_STATES,
   RUN_HEALTH,
-} = require('../task-protocol');
+} = require('../src/main/tasks/task-protocol');
 const {
   DEFAULT_RESOURCE_LIMITS,
   TaskOrchestrator,
   inferResource,
-} = require('../task-orchestrator');
+} = require('../src/main/tasks/task-orchestrator');
 
 function makeHarness(t, overrides = {}) {
   let rootDir;

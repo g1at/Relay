@@ -7,11 +7,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { createMiniChatController } = require('../mini-chat-controller');
-const { InteractionBroker, isAppPermissionMode } = require('../interaction-broker');
-const { createGeneralPreferences, normalizePreferences } = require('../general-preferences');
-const { isQuickChatEnabled, normalizeQuickChatPatch } = require('../mini-window-host');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { createRequire } = require('node:module');
+const { createMiniChatController } = require('../src/main/app/mini-chat-controller');
+const { InteractionBroker, isAppPermissionMode } = require('../src/main/tasks/interaction-broker');
+const { createGeneralPreferences, normalizePreferences } = require('../src/main/app/general-preferences');
+const { isQuickChatEnabled, normalizeQuickChatPatch } = require('../src/main/app/mini-window-host');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const waitFor = async predicate => { for (let i = 0; i < 80; i++) { if (predicate()) return; await tick(); } assert.fail('Integration did not settle'); };
@@ -22,16 +23,31 @@ const between = (start, end) => {
 };
 const success = text => ({ type: 'result', subtype: 'success', result: text });
 
+// Load each complete production factory with controlled platform/filesystem
+// adapters. No function-body extraction or production user-data access.
+function loadFactory(relativeFile, overrides = {}, platform = process) {
+  const filename = path.join(__dirname, '..', relativeFile);
+  const loaded = { exports: {} }, nativeRequire = createRequire(filename);
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
+    module: loaded, process: platform, console, setTimeout, clearTimeout,
+    require: name => Object.hasOwn(overrides, name) ? overrides[name] : nativeRequire(name),
+  }, { filename });
+  return loaded.exports;
+}
+
 function harness() {
   const handlers = {}, appEvents = {}, history = new Map(), jobs = new Map(), ledger = new Map(), calls = [];
-  const settingsPath = '/fixture/userData/app-settings.json';
+  const fixtureUserData = path.resolve('/fixture/userData');
+  const settingsPath = path.join(fixtureUserData, 'app-settings.json');
   const disk = new Map([[settingsPath, JSON.stringify({ theme: 'light', miniInputEnabled: true, floatingOrbEnabled: true, miniWindowPinned: true })]]);
   const windowFor = (id, name) => {
     const sent = [], backgrounds = [], overlays = [];
-    const webContents = { mainFrame: { name: name + '-main' }, send: (channel, payload) => sent.push({ channel, payload: copy(payload) }), isLoadingMainFrame: () => false };
+    const webContents = { mainFrame: { name: name + '-main' }, send: (channel, payload) => sent.push({ channel, payload: copy(payload) }), isLoadingMainFrame: () => false,
+      on() {}, setWindowOpenHandler() {} };
     return { id, name, sent, backgrounds, overlays, webContents, maximized: false, fullScreen: false,
       isDestroyed: () => false, isMaximized() { return this.maximized; }, isFullScreen() { return this.fullScreen; },
-      setBackgroundColor: value => backgrounds.push(value), setTitleBarOverlay: value => overlays.push(value) };
+      setBackgroundColor: value => backgrounds.push(value), setTitleBarOverlay: value => overlays.push(value),
+      once() {}, on() {}, loadFile: async () => {}, setMenuBarVisibility() {} };
   };
   const panel = windowFor(2, 'panel'), orb = windowFor(3, 'orb'), main = windowFor(1, 'main');
   const hostCalls = [];
@@ -52,11 +68,11 @@ function harness() {
     destroy: () => { calls.push(['hostDestroy']); },
   };
   const context = {
-    __dirname: '/fixture/relay', path, pathToFileURL: require('node:url').pathToFileURL,
+    __dirname: '/fixture/relay', appRoot: '/fixture/relay', path, pathToFileURL: require('node:url').pathToFileURL,
     Promise, Object, setTimeout, clearTimeout, process: { platform: 'win32' },
     console: { log() {}, warn() {}, error() {} },
     require: name => {
-      if (name === './mini-local-images') return require('../mini-local-images');
+      if (name === './app/mini-local-images') return require('../src/main/app/mini-local-images');
       assert.equal(name, 'electron');
       return { screen: {} };
     },
@@ -66,7 +82,7 @@ function harness() {
     appSettingsPath: () => settingsPath,
     appSettingsCache: { invalidate: () => calls.push(['settingsCacheInvalidated']) },
     fs: {
-      existsSync: filename => filename.startsWith('/history/') ? history.has(filename.slice(9)) : filename === '/fixture/userData' || disk.has(filename),
+      existsSync: filename => filename.startsWith('/history/') ? history.has(filename.slice(9)) : filename === fixtureUserData || disk.has(filename),
       mkdirSync: () => {}, writeFileSync: (filename, data) => { disk.set(filename, data); calls.push(['writeTemp', filename]); },
       renameSync: (from, to) => { disk.set(to, disk.get(from)); disk.delete(from); calls.push(['settingsPersisted', readSettings()]); },
     },
@@ -106,7 +122,7 @@ function harness() {
     isTerminalState: state => ['complete', 'failed', 'canceled', 'succeeded'].includes(state),
     RUN_STATES: { WAITING_USER: 'waiting_user', RUNNING: 'running' },
     cancelTaskByRunId: async () => {},
-    ipcMain: { handle: (channel, callback) => { assert.equal(handlers[channel], undefined, channel); handlers[channel] = callback; } },
+    ipcMain: { on() {}, handle: (channel, callback) => { assert.equal(handlers[channel], undefined, channel); handlers[channel] = callback; } },
     BrowserWindow: { getAllWindows: () => [main, panel, orb], fromWebContents: sender => [main, panel, orb].find(window => window.webContents === sender) },
     MAIN_WINDOW_CHROME_HEIGHT: 36, nativeTheme: { themeSource: 'light', get shouldUseDarkColors() { return this.themeSource === 'dark'; } },
     isAppPermissionMode, applyPermissionModeToLiveSessions: async () => ({}),
@@ -114,7 +130,7 @@ function harness() {
     usageStatsService: null, usageShutdownPending: false, usageShutdownComplete: false,
     skillDraftService: null, skillDraftShutdownPending: false, skillDraftShutdownComplete: false,
     taskProgressStore: null, progressShutdownPending: false, progressShutdownComplete: false,
-    app: { on: (event, callback) => { appEvents[event] = callback; }, quit: () => { calls.push(['quit']); appEvents['before-quit']({ preventDefault: () => calls.push(['preventQuit']) }); } },
+    app: { whenReady: () => ({ then() {} }), on: (event, callback) => { appEvents[event] = callback; }, quit: () => { calls.push(['quit']); appEvents['before-quit']({ preventDefault: () => calls.push(['preventQuit']) }); } },
     attachmentDialog: { dispose: () => calls.push(['attachmentDispose']) }, browserPanelTools: { dispose() {} }, workspaceTools: { dispose() {} },
     flushStreamJournalEvents() {}, flushTaskJournalEvents() {}, scheduler: { shutdown() {} }, taskOrchestrator: null,
     taskResourceLeases: new Map(), interruptActiveShadowRuns() {}, jobs: new Map(), liveSessions: new Map(),
@@ -122,16 +138,71 @@ function harness() {
   };
   require('./helpers/conversation-permissions-fixture')(context);
   vm.createContext(context);
-  vm.runInContext(between('let miniHost = null;', 'const MAIN_WINDOW_CHROME_HEIGHT'), context);
-  vm.runInContext(between('const mainWindowChromeAppearances = new WeakMap();', '// Only the main window can preview'), context);
-  vm.runInContext(between('function writeAppSettings(data)', "ipcMain.handle('settings:read'"), context);
-  vm.runInContext(between("ipcMain.handle('settings:write'", '// IPC: Relay 服务商管理'), context);
+  vm.runInContext(between('let miniHost = null;', 'let cachedRelayGitBashPath;'), context);
+  vm.runInContext('function refreshMiniBrand() { miniBrandCache = null; if (miniHost) publishMiniState(); }', context);
+  const settings = loadFactory('src/main/app/app-settings-service.js', {
+    fs: context.fs, './app-settings-cache': { createAppSettingsCache: () => context.appSettingsCache },
+  }).createAppSettingsService({ getUserDataDir: () => fixtureUserData, providerStore: context.providerStore, onWrite: context.refreshMiniBrand });
+  context.writeAppSettings = settings.writeAppSettings;
+  const MockWindow = Object.assign(function MockWindow() { return main; }, context.BrowserWindow);
+  const windows = loadFactory('src/main/app/application-windows.js', {
+    fs: context.fs, './paths': { appRoot: context.appRoot },
+  }, context.process).createApplicationWindows({
+    electron: {
+      app: context.app, BrowserWindow: MockWindow, ipcMain: context.ipcMain, shell: {},
+      Tray: class { on() {} setContextMenu() {} setToolTip() {} destroy() {} },
+      Menu: { buildFromTemplate: value => value }, nativeTheme: context.nativeTheme,
+      nativeImage: { createEmpty: () => ({ isEmpty: () => true }) },
+    },
+    logger: context.console, settings: { read: readSettings, write: context.writeAppSettings },
+    providers: { store: context.providerStore },
+    tasks: { runningCount: () => 0, waitingInteractions: () => [], nextScheduledHint: () => null,
+      refreshBadge() {}, scheduleRetention() {}, rejectWindow() {} },
+    mini: { shortcut: () => registered, getHost: () => context.getMiniWindowHost(),
+      getExistingHost: () => vm.runInContext('miniHost', context) },
+    browser: {}, startup: {}, HAS_SINGLE_INSTANCE_LOCK: false,
+  });
+  context.applicationWindows = windows;
+  windows.createMainWindow();
+  context.syncMainWindowChromeAppearance = windows.syncMainWindowChromeAppearance;
+  const settingsWindows = { applyTheme: windows.applyTheme, updateNativeBrandTheme: context.updateNativeBrandTheme };
+  loadFactory('src/main/app/settings-ipc.js').registerSettingsIpc({
+    ipcMain: context.ipcMain, app: context.app, providerStore: context.providerStore,
+    readAppSettings: readSettings, writeAppSettings: context.writeAppSettings,
+    generalPreferences: context.generalPreferences, windows: settingsWindows,
+    applyParallelTaskLimit() {}, publishProviderChange() {}, onEnvironmentChanged() {},
+    onQuickChatChanged: () => { context.registerMiniShortcut(); context.getMiniWindowHost().syncSettings(); context.refreshTrayMenu(); },
+    refreshMiniBrand: context.refreshMiniBrand,
+  });
   vm.runInContext(between("ipcMain.handle('mini:brand'", "ipcMain.handle('brand:setName'"), context);
-  vm.runInContext(between("ipcMain.handle('history:save'", "ipcMain.handle('history:delete'"), context);
+  loadFactory('src/main/app/history-ipc.js', { fs: context.fs }).registerHistoryIpc({
+    ipcMain: context.ipcMain,
+    history: { loadConversation: context.loadConversation, convFilePath: context.convFilePath },
+    projects: { projectConversation: context.projectConversation }, nativeHistory: {},
+    isMiniChatActive: id => vm.runInContext('miniChat', context)?.isRunning() && context.getMiniChat().getConversationId() === id,
+    saveConversation: context.saveConversation, protectSdkMetadata: context.protectSdkMetadata,
+    deleteConversation: id => history.delete(id), genId: () => 'synthetic-new-id',
+  });
   vm.runInContext(between('function emitInteractionChange(event)', 'const interactionBroker ='), context);
   const broker = context.interactionBroker = new InteractionBroker({ onChange: event => context.emitInteractionChange(event), logger: context.console });
   vm.runInContext(between('function interactionCallerWindowId(event)', "ipcMain.handle('checkpoints:get'"), context);
-  vm.runInContext(between("app.on('before-quit'", "app.on('activate'"), context);
+  loadFactory('src/main/app/application-lifecycle.js').registerApplicationLifecycle({
+    app: context.app, BrowserWindow: context.BrowserWindow, nativeTheme: context.nativeTheme,
+    powerMonitor: context.powerMonitor, globalShortcut: context.globalShortcut, windows,
+    settings: {}, history: {}, scheduler: context.scheduler,
+    getSkillDraftService: () => context.skillDraftService,
+    getExistingUsageStatsService: () => context.usageStatsService,
+    taskRuntime: {
+      jobs: context.jobs, liveSessions: context.liveSessions, resourceLeases: context.taskResourceLeases,
+      interactions: broker, getProgressStore: () => context.taskProgressStore,
+      getOrchestrator: () => context.taskOrchestrator, getLedger: () => context.taskLedger,
+      killLiveSession: context.killLiveSession, interruptActiveRuns: context.interruptActiveShadowRuns,
+      flushStreams: context.flushStreamJournalEvents, flushEvents: context.flushTaskJournalEvents,
+    },
+    mini: { getChat: () => vm.runInContext('miniChat', context), getHost: () => vm.runInContext('miniHost', context) },
+    memory: { hasPendingUsage: () => !!context._memoryUsageFlushTimer, flushUsage: context.flushMemoryUsage },
+    integrations: { attachmentDialog: context.attachmentDialog, browserPanelTools: context.browserPanelTools, workspaceTools: context.workspaceTools },
+  });
   context.getMiniWindowHost();
   const invoke = (channel, window = panel, payload, frame = window.webContents.mainFrame) => handlers[channel]({ sender: window.webContents, senderFrame: frame }, payload);
   const finish = async (id, text) => {
@@ -386,7 +457,8 @@ test('before-quit waits for a single durable process checkpoint before disposing
   assert.equal(h.calls.some(call => call[0] === 'hostDestroy'), false);
   finish();
   await waitFor(() => h.calls.some(call => call[0] === 'hostDestroy'));
-  assert.equal(h.context.progressShutdownComplete, true);
+  assert.equal(closes, 1);
+  assert.equal(h.calls.filter(call => call[0] === 'hostDestroy').length, 1);
   await h.close();
 });
 

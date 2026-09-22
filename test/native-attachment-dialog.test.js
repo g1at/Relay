@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { registerNativeAttachmentDialog, CHANNEL } = require('../native-attachment-dialog');
+const { registerNativeAttachmentDialog, CHANNEL } = require('../src/main/app/native-attachment-dialog');
 
 function fixture(t, options = {}) {
   const sender = new EventEmitter(), window = new EventEmitter(), requests = [], stats = [], reads = [], removed = [];

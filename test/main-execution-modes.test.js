@@ -5,11 +5,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm'), crypto = require('node:crypto');
-const execution = require('../execution-modes');
-const { dispatchLiveInput, cancelPendingLiveInput } = require('../live-mcp-dispatch');
-const { LiveTurnRouter } = require('../live-turn-router');
-const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker } = require('../live-async-agent-tracker');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const execution = require('../src/main/projects/execution-modes');
+const { dispatchLiveInput, cancelPendingLiveInput } = require('../src/main/live/live-mcp-dispatch');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
+const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker } = require('../src/main/live/live-async-agent-tracker');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function declaration(name) {
@@ -24,20 +24,20 @@ function harness({ liveAvailable = true, prepareMode, prepareMcp, clock = { now:
   const liveSessions = new Map(); let handler; let lastSession;
   const runtime = { id: 'fixture-provider', revision: 1, modelId: 'vendor/fixture-model', routeRevision: 1 };
   const context = {
-    TaskClock: class extends require('../task-clock').TaskClock { constructor(options) { super({ ...options, now: () => clock.now }); } },
+    TaskClock: class extends require('../src/main/tasks/task-clock').TaskClock { constructor(options) { super({ ...options, now: () => clock.now }); } },
     ...execution, crypto, path, dispatchLiveInput, cancelPendingLiveInput,
-    ...require('../live-prewarm-reuse'),
-    ...require('../conversation-goals'), goalConditionValue: require('../conversation-goals').condition,
+    ...require('../src/main/live/live-prewarm-reuse'),
+    ...require('../src/main/projects/conversation-goals'), goalConditionValue: require('../src/main/projects/conversation-goals').condition,
     console: { log() {}, warn() {}, error() {} },
     liveSessions, memoryRequestContexts: new Map(), liveTombstones: new Map(), liveTurnControls: { isStopping: () => false }, miniChat: null,
     workspaceKey: value => value, sessionFingerprint: () => 'same-fixture',
     conversationRuntimeContract: () => ({ fingerprint: 'fixture-contract', policy: { settingSources: ['user'], settings: {} } }),
-    requiresFreshContract: require('../sdk-runtime-contract').requiresFreshContract,
+    requiresFreshContract: require('../src/main/sdk/sdk-runtime-contract').requiresFreshContract,
     relayModelTier: () => 'haiku', activeRelayProviderRuntime: () => runtime,
     providerSessionRoute: () => ({ providerId: runtime.id }), sessionRouteMatchesProvider: () => true,
     getConversationWorkspaces: () => ({ acceptsSession: () => true, markContextCarried() {} }),
     resolveExecutionWorkspace: options => ({ conversationId: options.conversationId, cwd: '/fixture/workspace', validWorkingDir: null, agentProjectRoot: null }),
-    waitForCheckpointUnlock: async () => true, conversationContext: require('../conversation-workspaces').conversationContext,
+    waitForCheckpointUnlock: async () => true, conversationContext: require('../src/main/projects/conversation-workspaces').conversationContext,
     compactText: value => value, loadConversation: () => null,
     RUN_STATES: { QUEUED: 'queued', STARTING: 'starting', CANCELED: 'canceled' }, TASK_EVENT_EPOCH: 'fixture-epoch',
     taskLedger: { get: () => null, update: (id, data) => calls.ledger.push({ id, ...data }) },
@@ -74,7 +74,7 @@ function harness({ liveAvailable = true, prepareMode, prepareMcp, clock = { now:
   const permissions = require('./helpers/conversation-permissions-fixture')(context);
   const record = { id: convId, permissionMode: 'bypassPermissions', permissionRevision: 1, executionMode: { kind: 'default' } };
   context.loadConversation = () => record;
-  context.taskContinuityHost = new (require('../task-continuity-host').TaskContinuityHost)({ loadConversation: id => context.loadConversation(id) });
+  context.taskContinuityHost = new (require('../src/main/tasks/task-continuity-host').TaskContinuityHost)({ loadConversation: id => context.loadConversation(id) });
   context.persistConversationRecord = value => Object.assign(record, clone(value));
   vm.createContext(context); vm.runInContext(declaration('persistGoalRecovery'), context); vm.runInContext(declaration('runLiveTurn'), context);
   const start = source.indexOf("ipcMain.handle('claude:run',"); assert.ok(start >= 0);

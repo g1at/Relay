@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LiveTurnRouter } = require('../live-turn-router');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 const start = id => ({ type: 'stream_event', user_message_uuid: id, event: { type: 'message_start', message: { id: 'reply-' + id } } });
 const delta = text => ({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
 const result = (id, extra = {}) => ({ type: 'result', subtype: 'success', result: 'answer', queued_turn_count: 0, user_message_uuid: id, ...extra });

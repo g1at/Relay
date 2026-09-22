@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto'), vm = require('node:vm');
-const { createMcpPermissions } = require('../sdk-mcp-permissions');
-const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const { createMcpPermissions } = require('../src/main/sdk/sdk-mcp-permissions');
+const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-mcp-host-')), file = path.join(dir, 'claude.json');
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

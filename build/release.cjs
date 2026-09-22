@@ -103,7 +103,7 @@ async function prepareRelease({ root, run = runCommand } = {}) {
   if (!/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error('Cannot identify the Git commit being built.');
   const beforeStatus = await run('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root });
   await run(process.execPath, [path.join(root, 'build/verify-installer-skin.cjs')], { cwd: root, inherit: true });
-  await run(process.execPath, [path.join(root, 'ensure-sdk-linux-runtime.js')], { cwd: root, inherit: true });
+  await run(process.execPath, [path.join(root, 'build/ensure-sdk-linux-runtime.js')], { cwd: root, inherit: true });
   const dist = path.join(root, 'dist');
   await fsp.mkdir(dist, { recursive: true });
   const directory = await fsp.mkdtemp(path.join(dist, `release-${policy.version}-`));

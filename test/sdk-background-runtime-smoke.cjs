@@ -4,9 +4,9 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), http = require('node:http');
 const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
-const relay = require('../claude-sdk');
-const { SdkSessionObserver, backgroundOwnedTask, observeOwnedBackgroundTasks } = require('../sdk-session-observer');
-const { LiveBackgroundTaskTracker } = require('../live-async-agent-tracker');
+const relay = require('../src/main/sdk/claude-sdk');
+const { SdkSessionObserver, backgroundOwnedTask, observeOwnedBackgroundTasks } = require('../src/main/sdk/sdk-session-observer');
+const { LiveBackgroundTaskTracker } = require('../src/main/live/live-async-agent-tracker');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-background-'));
 const cwd = path.join(base, 'workspace'), config = path.join(base, 'config');
 for (const dir of [cwd, config]) fs.mkdirSync(dir);

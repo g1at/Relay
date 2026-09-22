@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const { sessionContext, observeProvenance, applyProvenance, protectSdkMetadata, resolveStoredScope, pendingForkOptions } = require('../sdk-session-provenance');
-const { LiveTurnRouter } = require('../live-turn-router');
+const { sessionContext, observeProvenance, applyProvenance, protectSdkMetadata, resolveStoredScope, pendingForkOptions } = require('../src/main/sdk/sdk-session-provenance');
+const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const clone = value => JSON.parse(JSON.stringify(value));
 function fixture() {

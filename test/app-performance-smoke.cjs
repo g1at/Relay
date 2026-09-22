@@ -73,7 +73,7 @@ Module._load = function(request, parent, isMain) {
   const start = performance.now();
   try { return originalLoad.apply(this, arguments); }
   finally {
-    if (parent?.filename === path.join(root, 'main.js')) loads.push({ request, ms: performance.now() - start });
+    if (parent?.filename === path.join(root, 'src/main/bootstrap.js')) loads.push({ request, ms: performance.now() - start });
   }
 };
 app.on('browser-window-created', (_event, win) => {

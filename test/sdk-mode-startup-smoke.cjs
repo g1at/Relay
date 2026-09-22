@@ -5,8 +5,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { LiveExecutionModes } = require('../execution-modes');
-const relay = require('../claude-sdk');
+const { LiveExecutionModes } = require('../src/main/projects/execution-modes');
+const relay = require('../src/main/sdk/claude-sdk');
 const output = path.join(__dirname, '../.codex-tmp/sdk-mode-startup');
 fs.mkdirSync(output, { recursive: true });
 const base = fs.mkdtempSync(path.join(output, 'fixture-'));

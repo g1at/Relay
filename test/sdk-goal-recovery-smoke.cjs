@@ -7,7 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const { randomUUID } = require('node:crypto');
-const { LiveExecutionModes } = require('../execution-modes');
+const { LiveExecutionModes } = require('../src/main/projects/execution-modes');
 // Optional comparison reproduces the old contract: the local ACK clock starts
 // before the SDK initialization barrier. Production and normal checks keep it.
 if (process.argv.includes('--legacy-deadline')) {
@@ -22,7 +22,7 @@ LiveExecutionModes.prototype.observe = function(event) {
   }
   return observeMode.call(this, event);
 };
-const relay = require('../claude-sdk');
+const relay = require('../src/main/sdk/claude-sdk');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-sdk-goal-'));
 const config = path.join(base, 'config'), cwd = path.join(base, 'workspace');
 fs.mkdirSync(config); fs.mkdirSync(cwd); fs.writeFileSync(path.join(config, 'settings.json'), '{}');

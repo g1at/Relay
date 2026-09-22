@@ -2,7 +2,7 @@
 
 // Frames are drawn separately at every supported physical taskbar size. Keep
 // the runtime selector and generated artwork in sync; 256px is the ICO preview.
-const { TASKBAR_FRAME_SIZES } = require('../taskbar-completion-badge');
+const { TASKBAR_FRAME_SIZES } = require('../src/main/app/taskbar-completion-badge');
 const BADGE_SIZES = Object.freeze([...TASKBAR_FRAME_SIZES, 256]);
 const BADGES = Object.freeze([
   ...Array.from({ length: 9 }, (_, index) => ({ name: String(index + 1), label: String(index + 1) })),

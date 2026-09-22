@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'interaction-surface.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../renderer/interaction-surface.js'), 'utf8');
 const start = source.indexOf('  function onShellKeydown(');
 const end = source.indexOf('  function focusDecision(', start);
 

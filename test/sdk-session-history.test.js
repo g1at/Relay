@@ -1,7 +1,8 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { createSessionHistoryService, invokeSessionOperation, executeSessionOperation } = require('../sdk-session-history');
+const fs = require('node:fs'), path = require('node:path');
+const { createSessionHistoryService, invokeSessionOperation, executeSessionOperation } = require('../src/main/sdk/sdk-session-history');
 const ids = { conversationId: '11111111-1111-4111-8111-111111111111', runId: '22222222-2222-4222-8222-222222222222', sessionId: '33333333-3333-4333-8333-333333333333' };
 const scope = { ...ids, cwd: '/tmp/synthetic-workspace', configDir: '/tmp/synthetic-config', agentEnvironment: 'native', agentIds: ['agent_one'] };
 const input = { convId: ids.conversationId, runId: ids.runId };
@@ -66,6 +67,25 @@ test('WSL bridge pins recorded distribution, sends JSON on stdin and handles mis
   assert.deepEqual(result, ['agent_one']); assert.deepEqual(spawnArgs.args.slice(0, 5), ['--distribution', 'Fixture Linux', '--cd', '/mnt/d/work', '--exec']);
   assert.equal(payload.scope.configDir, '/mnt/c/fixture/claude'); assert.equal(spawnArgs.options.shell, false);
   assert.throws(() => executeSessionOperation({ ...wsl, wslDistribution: null }, 'listSubagents'), { code: 'SESSION_ENVIRONMENT_UNAVAILABLE' });
+});
+
+test('default native history worker keeps source entry and SDK dependency roots separate', async () => {
+  let launch;
+  class CapturingWorker extends EventEmitter {
+    constructor(file, options) {
+      super(); launch = { file, options };
+      setImmediate(() => this.emit('message', { ok: true, value: ['agent_one'] }));
+    }
+    terminate() {}
+  }
+  assert.deepEqual(await executeSessionOperation(scope, 'listSubagents', {}, { Worker: CapturingWorker }), ['agent_one']);
+  assert.equal(launch.file, require.resolve('../src/main/sdk/sdk-session-history-worker.cjs'));
+  assert.equal(fs.existsSync(launch.file), true);
+  const expectedSdk = path.join(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs');
+  assert.equal(launch.options.workerData.sdkPath, expectedSdk);
+  assert.equal(fs.existsSync(expectedSdk), true);
+  assert.equal(launch.options.workerData.scope.cwd, scope.cwd);
+  assert.equal(launch.options.env.CLAUDE_CONFIG_DIR, scope.configDir);
 });
 
 test('rapid detail navigation runs at most two native history readers concurrently', async () => {

@@ -7,10 +7,10 @@ const path = require('node:path');
 
 const relayPackage = require('../package.json');
 const sdkPackage = JSON.parse(fs.readFileSync(
-  path.join(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'),
+  path.join(__dirname, '../node_modules/@anthropic-ai/claude-agent-sdk/package.json'),
   'utf8',
 ));
-const { bundledClaudeVersion, bundledExecutable, _buildOptions } = require('../claude-sdk');
+const { bundledClaudeVersion, bundledExecutable, _buildOptions } = require('../src/main/sdk/claude-sdk');
 
 test('Relay pins Claude Agent SDK and bundled Claude Code to the reviewed release', () => {
   assert.equal(relayPackage.dependencies['@anthropic-ai/claude-agent-sdk'], '0.3.266');
@@ -21,7 +21,7 @@ test('Relay pins Claude Agent SDK and bundled Claude Code to the reviewed releas
 
 test('installed platform runtime resolves to an existing executable', (t) => {
   const nativePackage = path.join(__dirname, '..', 'node_modules', '@anthropic-ai', `claude-agent-sdk-${process.platform}-${process.arch}`);
-  const windowsExecutable = path.join(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe');
+  const windowsExecutable = path.join(__dirname, '../node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe');
   if (process.platform !== 'win32' && !fs.existsSync(nativePackage) && fs.existsSync(windowsExecutable)) {
     t.skip('This is a Windows dependency tree shared with WSL; executable resolution is verified using Windows Node.');
     return;

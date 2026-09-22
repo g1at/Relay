@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
-const { ProviderStore } = require('../provider-store');
+const { ProviderStore } = require('../src/main/providers/provider-store');
 
 const safeStorage = {
   isEncryptionAvailable: () => true,
@@ -82,7 +82,7 @@ test('v4 migration changes only schema and existing runtime revisions, preservin
 
 test('the existing main resume guard rejects pre-isolation sessions and accepts newly recorded routes', t => {
   const f = setup(t);
-  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
   const start = main.indexOf('function sessionRouteMatchesProvider(');
   const end = main.indexOf('\nfunction publishProviderChange(', start);
   assert.ok(start > 0 && end > start);

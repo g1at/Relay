@@ -132,7 +132,7 @@ test('default preparation uses publish never, checks the feed, and never invokes
   assert.equal(f.buildCalls.length, 7);
   assert.ok(f.buildCalls.every(call => [process.execPath, 'git'].includes(call.command)));
   const builderIndex = f.buildCalls.findIndex(call => call.args.includes('--publish'));
-  const runtimeIndex = f.buildCalls.findIndex(call => call.args[0] === path.join(f.root, 'ensure-sdk-linux-runtime.js'));
+  const runtimeIndex = f.buildCalls.findIndex(call => call.args[0] === path.join(f.root, 'build/ensure-sdk-linux-runtime.js'));
   assert.ok(runtimeIndex >= 0 && runtimeIndex < builderIndex, 'prepare the packaged Linux SDK runtime before invoking electron-builder');
   const args = f.buildCalls[builderIndex].args;
   assert.equal(args[args.indexOf('--publish') + 1], 'never');

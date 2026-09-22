@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const permissions = require('../conversation-permissions');
-const { InteractionBroker } = require('../interaction-broker');
-const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+const permissions = require('../src/main/projects/conversation-permissions');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
+const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const copy = value => JSON.parse(JSON.stringify(value));
 function extract(start, end) { const a = source.indexOf(start), b = source.indexOf(end, a); assert.ok(a >= 0 && b > a); return source.slice(a, b); }
 function fixture(t) {
@@ -12,7 +12,7 @@ function fixture(t) {
   const events = [], controls = [], kills = [], records = new Map(), handlers = new Map(), liveSessions = new Map(), ledger = new Map(), jobs = new Map();
   const main = makeWindow(), mini = makeWindow(), orb = makeWindow(); let settings = { permissionMode: 'acceptEdits' };
   const broker = new InteractionBroker({ logger: { warn() {} } }); t.after(() => broker.close());
-  const context = { ...permissions, conversationPermissions: null, mainWindow: main,
+  const context = { ...permissions, conversationPermissions: null, applicationWindows: { mainWindow: main },
     miniHost: { getOrbWindow: () => orb }, BrowserWindow: { getAllWindows: () => [main, mini, orb] },
     miniPanelCaller: event => event.sender === mini.webContents && event.senderFrame === mini.webContents.mainFrame,
     interactionBroker: broker, jobs, taskLedger: { get: id => ledger.get(id) }, liveSessions,
@@ -26,7 +26,7 @@ function fixture(t) {
   };
   vm.createContext(context);
   vm.runInContext(extract('function getConversationPermissions()', 'function saveConversation('), context);
-  vm.runInContext(extract('function permissionCaller(', "ipcMain.handle('settings:read'"), context);
+  vm.runInContext(extract('function permissionCaller(', "require('./app/settings-ipc')"), context);
   const call = (name, input, window = main, frame = window.webContents.mainFrame) => handlers.get('permissions:' + name)({ sender: window.webContents, senderFrame: frame }, input);
   const add = (id, options = {}) => {
     const record = { id, permissionMode: 'acceptEdits', permissionRevision: 1, permissionLegacyPlan: false,

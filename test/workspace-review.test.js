@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
-const { createWorkspaceReview, cleanPath, parseNumstat, commandEnvironment, OUTPUT_LIMIT, FILE_SIZE_LIMIT } = require('../workspace-review');
+const { createWorkspaceReview, cleanPath, parseNumstat, commandEnvironment, OUTPUT_LIMIT, FILE_SIZE_LIMIT } = require('../src/main/workspace/workspace-review');
 
 function fixture(t, options = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-review-'));

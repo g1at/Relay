@@ -176,18 +176,23 @@ npm run build -- --x64 --publish never
 
 | 位置 | 职责 |
 | --- | --- |
-| `main.js` / `preload.js` | 应用生命周期、窗口与 IPC 边界 |
+| `main.js` | 稳定的 Electron 启动入口，加载 `src/main/bootstrap.js` |
+| `preload.js` / `browser-page-preload.js` | 两个完整的沙箱 preload，保留受限 IPC 边界 |
+| `src/main/app/` | 应用路径、窗口、生命周期、设置与历史存储 |
 | `renderer/` | 对话、项目、设置、插件与工作区界面 |
-| `claude-sdk.js` / `sdk-*.js` | SDK 会话、配置、事件与恢复 |
-| `provider-store.js` | 服务商、凭据与模型路由 |
-| `task-*.js` / `live-*.js` | 任务状态、计时、跟进消息及活动流 |
-| `memory-*.js` / `skill-*.js` | 记忆与技能维护 |
-| `workspace-*.js` / `browser-*.js` | 文件、终端、审查与内置浏览器 |
+| `src/main/sdk/` | SDK 会话、配置、事件与恢复 |
+| `src/main/providers/` | 服务商、凭据与模型路由 |
+| `src/main/tasks/` / `src/main/live/` | 任务状态、计时、跟进消息及活动流 |
+| `src/main/memory/` / `src/main/skills/` | 记忆与技能维护 |
+| `src/main/projects/` / `src/main/workspace/` / `src/main/browser/` | 项目与会话目录、文件、终端、审查及内置浏览器 |
+| `src/main/usage/` / `src/main/scheduling/` | 用量汇总与定时任务 |
 | `test/` | 单元、回归与 UI 检查 |
 | `build/` / `distribution/` | 构建、安装器与分发工具 |
 | `assets/readme/` | 可公开的 README 演示图片及来源 |
 
 `docs/` 中的本地排查材料和 `design/` 设计母版保持本地，不随源码提交；开发与常规构建不依赖它们。只有手动重新生成品牌图标时才需要设计母版。
+
+主进程的状态归属、资源路径与后台进程约束见 [主进程结构说明](src/main/README.md)。
 
 </details>
 

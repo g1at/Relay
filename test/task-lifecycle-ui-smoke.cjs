@@ -5,7 +5,7 @@ const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { mergeSupplementHistory } = require('../live-supplement-input');
+const { mergeSupplementHistory } = require('../src/main/live/live-supplement-input');
 const root = path.resolve(__dirname, '..');
 const out = path.join(root, '.codex-tmp/task-lifecycle-ui-smoke');
 fs.mkdirSync(out, { recursive: true });

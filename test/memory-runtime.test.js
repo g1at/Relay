@@ -2,9 +2,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { MemoryStore } = require('../memory-store');
-const { createMemoryRuntime, MEMORY_CONSOLIDATION_PROMPT } = require('../memory-runtime');
-const { serializeMemoryFrontmatter } = require('../memory-schema');
+const { MemoryStore } = require('../src/main/memory/memory-store');
+const { createMemoryRuntime, MEMORY_CONSOLIDATION_PROMPT } = require('../src/main/memory/memory-runtime');
+const { serializeMemoryFrontmatter } = require('../src/main/memory/memory-schema');
 function setup(t, initial = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-memory-runtime-'));
   t.after(() => fs.rmSync(dir, { force: true, recursive: true }));

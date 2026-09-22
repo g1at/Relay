@@ -32,7 +32,7 @@ function installFixture() {
 app.whenReady().then(async()=>{
   session.defaultSession.webRequest.onBeforeRequest((details,done)=>{if(/^https?:/i.test(details.url))requests.push(details.url);done({cancel:/^https?:/i.test(details.url)});});
   const base=pathToFileURL(path.join(root,'renderer')+path.sep).href;
-  const html=fs.readFileSync(path.join(root,'renderer/index.html'),'utf8').replace('<head>','<head><base href="'+base+'"><script>'+fs.readFileSync(path.join(__dirname,'ui-api-fixture.js'),'utf8')+'\n('+installFixture.toString()+')();</script>');
+  const html=fs.readFileSync(path.join(root,'renderer/index.html'),'utf8').replace('<head>','<head><base href="'+base+'"><script>'+fs.readFileSync(path.join(__dirname, './ui-api-fixture.js'),'utf8')+'\n('+installFixture.toString()+')();</script>');
   const page=path.join(output,'fixture.html');fs.writeFileSync(page,html);
   win=new BrowserWindow({width:1450,height:980,show:false,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});
   await win.loadFile(page);win.showInactive();await waitFor('!!relayWorkspacePanel&&providerRoutingLoaded&&!restoringActiveRuns');

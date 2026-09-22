@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 
-const sdkPath = path.join(__dirname, '..', 'claude-sdk.js');
+const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
 const sdkSource = fs.readFileSync(sdkPath, 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 

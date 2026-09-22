@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
-const { InteractionBroker } = require('../interaction-broker');
+const { InteractionBroker } = require('../src/main/tasks/interaction-broker');
 function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-permission-mode-'));
   const cwd = path.join(base, 'workspace'), additional = path.join(base, 'additional'); fs.mkdirSync(cwd); fs.mkdirSync(additional);

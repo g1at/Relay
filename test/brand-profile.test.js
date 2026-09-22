@@ -7,7 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
-const root = path.resolve(__dirname, '..'), source = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
+const root = path.resolve(__dirname, '..'), source = fs.readFileSync(path.join(root, 'src/main/bootstrap.js'), 'utf8');
 function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-brand-profile-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -24,8 +24,8 @@ function fixture(t) {
     return fs.writeFileSync(file, ...args);
   };
   const context = vm.createContext({
-    fs: filesystem, path, crypto, pathToFileURL, __dirname: root,
-    app: { getPath: () => directory }, mainWindow: { isDestroyed: () => false, webContents: sender },
+    fs: filesystem, path, crypto, pathToFileURL, __dirname: root, appRoot: root,
+    app: { getPath: () => directory }, applicationWindows: { mainWindow: { isDestroyed: () => false, webContents: sender } },
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     dialog: { async showOpenDialog() { state.dialogs++; return { canceled: state.canceled, filePaths: [state.selected] }; } },
     readAppSettings: () => JSON.parse(fs.readFileSync(settingsFile, 'utf8')),

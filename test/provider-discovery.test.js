@@ -5,9 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const vm = require('node:vm');
-const { createProviderDraftRuntime, discoverProviderModels } = require('../provider-connectivity');
-const { ProviderStore } = require('../provider-store');
+const loadCommonJs = require('./helpers/load-commonjs.cjs');
+const { createProviderDraftRuntime, discoverProviderModels } = require('../src/main/providers/provider-connectivity');
+const { ProviderStore } = require('../src/main/providers/provider-store');
 
 const catalog = { data: [
   { id: 'allowed-chat', object: 'model', owned_by: 'example', model_type: 'chat' },
@@ -168,7 +168,6 @@ test('an explicit image adapter selection still assigns its discovered route', t
   assert.equal(store.listImageRoutes()[0].providerId, profile.id);
 });
 
-const main = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
 function savedDiscoveryHandler(store, discover) {
   let handler;
   const mutations = [];
@@ -178,15 +177,16 @@ function savedDiscoveryHandler(store, discover) {
     store[name] = (...args) => { mutations.push(name); return original(...args); };
   }
   const context = {
-    ipcMain: { handle(name, callback) { assert.equal(name, 'providers:discoverModels'); handler = callback; } },
+    ipcMain: { handle(name, callback) { if (name === 'providers:discoverModels') handler = callback; } },
     providerStore: store,
     discoverProviderModels: discover,
     publishProviderChange: (...args) => publishes.push(args),
   };
-  const start = main.indexOf("ipcMain.handle('providers:discoverModels',");
-  assert.ok(start > 0);
-  const end = main.indexOf('\n});', start) + '\n});'.length;
-  vm.runInNewContext(main.slice(start, end), context);
+  const { registerProviderIpc } = loadCommonJs('src/main/providers/provider-ipc.js', {
+    modules: { './provider-connectivity': { discoverProviderModels: discover } },
+  });
+  registerProviderIpc(context);
+  assert.equal(typeof handler, 'function');
   return { handler, mutations, publishes };
 }
 const discovered = (patch = {}) => ({

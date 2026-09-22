@@ -20,9 +20,9 @@ async function settle() { await evaluate('new Promise(resolve=>requestAnimationF
 async function check(name, value) { step = name; report.checks[name] = !!(typeof value === 'string' ? await evaluate(value) : value); save(); if (!report.checks[name]) throw Error(name); }
 async function click(selector) { await act(`document.querySelector(${JSON.stringify(selector)}).click()`); await settle(); }
 async function screenshot(name) { await settle(); fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
-const profileSource = fs.readFileSync(path.join(__dirname, 'profile-page-smoke.cjs'), 'utf8');
+const profileSource = fs.readFileSync(path.join(__dirname, './profile-page-smoke.cjs'), 'utf8');
 const profileSeed = profileSource.slice(profileSource.indexOf('function installFixture()'), profileSource.indexOf('\nasync function key('));
-const miniSource = fs.readFileSync(path.join(__dirname, 'mini-chat-smoke.cjs'), 'utf8');
+const miniSource = fs.readFileSync(path.join(__dirname, './mini-chat-smoke.cjs'), 'utf8');
 const miniSeed = miniSource.slice(miniSource.indexOf('function fixture()'), miniSource.indexOf('\nasync function loadRenderer('));
 const mainSeed = ['ui-api-fixture.js', 'workspace-api-fixture.js'].map(name => fs.readFileSync(path.join(__dirname, name), 'utf8')).join('\n');
 function artwork(width, height) {

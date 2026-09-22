@@ -123,10 +123,28 @@ test('Markdown export index retains all 361 exported names and their declaration
 });
 
 test('published implementation evidence resolves locally and retained runtime receipts explicitly pass', () => {
+  // These retained receipts describe the original source layout, not the new
+  // implementation. Preserve their source and line references in a local-only
+  // archive instead of silently redirecting old line numbers to moved code.
+  const baselineRoot = path.join(root, 'docs/sdk-evaluation-source-baseline');
+  const manifestPath = path.join(baselineRoot, 'manifest.json');
+  const baseline = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
+  if (baseline) {
+    assert.equal(baseline.commit, 'c663ec1609b6b9d53846678dca33e6d08b3e2879');
+    assert.match(baseline.scope, /Historical source/);
+    for (const [file, hash] of Object.entries(baseline.files)) {
+      const target = path.resolve(baselineRoot, 'source', file);
+      assert.ok(target.startsWith(path.join(baselineRoot, 'source') + path.sep), `baseline escapes archive: ${file}`);
+      assert.equal(crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex'), hash, file);
+    }
+  }
   const evidence = report.rows.flatMap(row => row.implementation.evidence || []);
   for (const item of evidence) {
-    const target = path.resolve(root, item.path);
-    assert.ok(target.startsWith(root + path.sep), `evidence escapes repository: ${item.path}`);
+    const repositoryTarget = path.resolve(root, item.path);
+    assert.ok(repositoryTarget.startsWith(root + path.sep), `evidence escapes repository: ${item.path}`);
+    const archivedSource = baseline && !item.path.startsWith('docs/');
+    if (archivedSource) assert.ok(Object.hasOwn(baseline.files, item.path), `source missing from historical archive: ${item.path}`);
+    const target = archivedSource ? path.join(baselineRoot, 'source', item.path) : repositoryTarget;
     assert.ok(fs.statSync(target).isFile(), item.path);
     assert.ok(Number.isSafeInteger(item.line) && item.line > 0, `${item.path} needs a positive source line`);
     assert.ok(item.line <= fs.readFileSync(target, 'utf8').split('\n').length, `${item.path}:${item.line} is out of range`);
