@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const yaml = require('js-yaml');
@@ -14,9 +15,9 @@ const FEED_PATH = 'win-unpacked/resources/app-update.yml';
 const PLAN_FILE = 'release-plan.json';
 const CHECKSUM_FILE = 'SHA256SUMS.txt';
 
-function runCommand(command, args, { cwd, inherit = false, timeoutMs = 60000 } = {}) {
+function runCommand(command, args, { cwd, inherit = false, timeoutMs = 60000, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, shell: false, windowsHide: true,
+    const child = spawn(command, args, { cwd, env, shell: false, windowsHide: true,
       stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', bytes = 0;
     const timeout = inherit ? null : setTimeout(() => { child.kill(); reject(new Error(`${command} timed out; publication stopped.`)); }, timeoutMs);
@@ -96,7 +97,38 @@ function parseArguments(args) {
   throw new Error('Usage: node build/release.cjs [--verify <bundle> | --check <bundle> | --publish <bundle> | --finalize <bundle>]');
 }
 
-async function prepareRelease({ root, run = runCommand } = {}) {
+// This opt-in is only for the locked Windows x64 node-pty prebuild. A real
+// Electron PTY session must pass before electron-builder can skip npmRebuild.
+async function verifyNativeRuntime({ root, run = runCommand, env = process.env } = {}) {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'relay-native-probe-'));
+  const locations = { home: path.join(directory, 'home'), appData: path.join(directory, 'appData'),
+    localAppData: path.join(directory, 'localAppData'), temp: path.join(directory, 'temp'), profile: path.join(directory, 'profile') };
+  for (const location of Object.values(locations)) await fsp.mkdir(location, { recursive: true });
+  const childEnv = { ...env, RELAY_NATIVE_PROBE_ROOT: directory, USERPROFILE: locations.home,
+    APPDATA: locations.appData, LOCALAPPDATA: locations.localAppData, TEMP: locations.temp, TMP: locations.temp };
+  // Never inherit Node mode or a debugger injection when testing Electron ABI.
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  delete childEnv.NODE_OPTIONS;
+  delete childEnv.NODE_PATH;
+  try {
+    const output = await run(require('electron'), [path.join(root, 'build/verify-native-runtime.cjs'),
+      `--user-data-dir=${locations.profile}`, '--disable-gpu'], { cwd: root, env: childEnv, timeoutMs: 30000 });
+    const line = output.split(/\r?\n/).find(value => value.startsWith('RELAY_NATIVE_RUNTIME_OK '));
+    if (!line) throw new Error('Native Electron runtime verification did not return a success report.');
+    const result = JSON.parse(line.slice('RELAY_NATIVE_RUNTIME_OK '.length));
+    if (result.platform !== 'win32' || result.arch !== 'x64' || result.nodePtyVersion !== '1.1.0'
+        || result.electronVersion !== require('electron/package.json').version || result.exitCode !== 0
+        || result.markerObserved !== true || !Array.isArray(result.nativeFiles) || result.nativeFiles.length === 0
+        || result.nativeFiles.some(file => !/^[a-f0-9]{64}$/.test(file.sha256 || '') || file.matchesPrebuild !== true)) {
+      throw new Error('Native Electron runtime verification returned an incompatible or incomplete result.');
+    }
+    return result;
+  } finally {
+    await fsp.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}
+
+async function prepareRelease({ root, run = runCommand, env = process.env } = {}) {
   const manifest = JSON.parse(await fsp.readFile(path.join(root, 'package.json'), 'utf8'));
   const policy = policyRules.assertPackagePolicy(manifest);
   const sourceCommit = (await run('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root })).trim();
@@ -104,11 +136,14 @@ async function prepareRelease({ root, run = runCommand } = {}) {
   const beforeStatus = await run('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root });
   await run(process.execPath, [path.join(root, 'build/verify-installer-skin.cjs')], { cwd: root, inherit: true });
   await run(process.execPath, [path.join(root, 'ensure-sdk-linux-runtime.js')], { cwd: root, inherit: true });
+  const nativeRuntime = env.RELAY_USE_PREBUILT_NATIVE === '1' ? await verifyNativeRuntime({ root, run, env }) : null;
   const dist = path.join(root, 'dist');
   await fsp.mkdir(dist, { recursive: true });
   const directory = await fsp.mkdtemp(path.join(dist, `release-${policy.version}-`));
   await run(process.execPath, [require.resolve('electron-builder/out/cli/cli.js'), '--win', 'nsis', '--x64',
-    '--publish', 'never', `--config.directories.output=${directory}`], { cwd: root, inherit: true });
+    '--publish', 'never', `--config.directories.output=${directory}`,
+    ...(nativeRuntime ? ['--config.npmRebuild=false'] : [])], { cwd: root, inherit: true });
+  if (nativeRuntime) await fsp.writeFile(path.join(directory, 'native-runtime-verification.json'), JSON.stringify(nativeRuntime, null, 2) + '\n', { flag: 'wx' });
   const afterCommit = (await run('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root })).trim();
   const afterStatus = await run('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: root });
   const plan = { ...await inspectBundle(directory, policy.version, { createChecksums: true }), sourceCommit,
@@ -252,5 +287,5 @@ async function main(args = process.argv.slice(2)) {
 }
 
 module.exports = { PLAN_FILE, FEED_PATH, CHECKSUM_FILE, parseArguments, inspectBundle, loadVerifiedBundle,
-  prepareRelease, preflight, publishRelease, finalizeRelease, main };
+  prepareRelease, verifyNativeRuntime, preflight, publishRelease, finalizeRelease, main };
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -138,6 +138,7 @@ test('default preparation uses publish never, checks the feed, and never invokes
   const args = f.buildCalls[builderIndex].args;
   assert.equal(args[args.indexOf('--publish') + 1], 'never');
   assert.ok(args.includes('--x64')); assert.ok(args.includes('nsis'));
+  assert.equal(args.includes('--config.npmRebuild=false'), false, 'the normal build retains native rebuilding');
   assert.ok(f.directory.startsWith(path.join(f.root, 'dist', 'release-3.0.1-')));
   assert.deepEqual(await release.loadVerifiedBundle(f.directory), f.plan);
   assert.equal(f.plan.sourceCommit, SOURCE_COMMIT); assert.equal(f.plan.sourceDirty, false);
@@ -349,5 +350,73 @@ test('an existing 3.0.2 tag in either source blocks all publication writes', asy
     const github = fakeGithub(f, { refs: { [repository]: [{ ref: 'refs/tags/v3.0.2' }] } });
     await assert.rejects(release.publishRelease({ ...f, run: github.run }), /already exists/);
     assert.equal(github.writes().length, 0);
+  }
+});
+
+
+function nativeProbeSuccess(changes = {}) {
+  return 'RELAY_NATIVE_RUNTIME_OK ' + JSON.stringify({ schemaVersion: 1, platform: 'win32', arch: 'x64',
+    electronVersion: require('electron/package.json').version, nodePtyVersion: '1.1.0', exitCode: 0, markerObserved: true,
+    nativeFiles: [{ file: 'prebuilds/win32-x64/conpty.node', sha256: 'a'.repeat(64), matchesPrebuild: true }], ...changes }) + '\n';
+}
+
+test('explicit prebuilt mode runs real-Electron probe before skipping rebuild and isolates its entire profile', async t => {
+  const f = await fixture(t, '3.0.2'), calls = [];
+  let probeDirectory;
+  const result = await release.prepareRelease({ root: f.root,
+    env: { RELAY_USE_PREBUILT_NATIVE: '1', ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--inspect', NODE_PATH: 'untrusted' },
+    run: async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === 'git') return args[0] === 'rev-parse' ? SOURCE_COMMIT : '';
+      if (args[0] === path.join(f.root, 'build/verify-native-runtime.cjs')) {
+        assert.equal(command, require('electron'), 'probe must run Electron rather than Node');
+        probeDirectory = options.env.RELAY_NATIVE_PROBE_ROOT;
+        for (const key of ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP']) {
+          assert.ok(options.env[key].startsWith(probeDirectory + path.sep), key);
+          assert.ok((await fs.stat(options.env[key])).isDirectory());
+        }
+        assert.equal(options.env.ELECTRON_RUN_AS_NODE, undefined);
+        assert.equal(options.env.NODE_OPTIONS, undefined); assert.equal(options.env.NODE_PATH, undefined);
+        assert.ok(args.some(arg => arg.startsWith('--user-data-dir=' + probeDirectory)));
+        assert.equal(options.timeoutMs, 30000);
+        return nativeProbeSuccess();
+      }
+      const output = args.find(arg => arg.startsWith('--config.directories.output='));
+      if (output) {
+        assert.ok(probeDirectory, 'probe must finish before building');
+        assert.ok(args.includes('--config.npmRebuild=false'));
+        await buildFiles(output.slice('--config.directories.output='.length), f.version);
+      }
+      return '';
+    } });
+  const probeIndex = calls.findIndex(call => call.command === require('electron'));
+  const builderIndex = calls.findIndex(call => call.args.includes('--publish'));
+  assert.ok(probeIndex >= 0 && probeIndex < builderIndex);
+  await assert.rejects(fs.stat(probeDirectory), { code: 'ENOENT' });
+  const evidence = JSON.parse(await fs.readFile(path.join(result.directory, 'native-runtime-verification.json'), 'utf8'));
+  assert.equal(evidence.markerObserved, true); assert.equal(evidence.exitCode, 0);
+  assert.equal((await release.loadVerifiedBundle(result.directory)).version, '3.0.2');
+});
+
+test('prebuilt mode aborts before builder on probe failure, wrong ABI, missing marker or unknown binary', async t => {
+  for (const response of [new Error('Synthetic native load failed'), '',
+    nativeProbeSuccess({ arch: 'arm64' }), nativeProbeSuccess({ nodePtyVersion: '1.0.0' }),
+    nativeProbeSuccess({ electronVersion: '0.0.0' }), nativeProbeSuccess({ exitCode: 1 }),
+    nativeProbeSuccess({ markerObserved: false }), nativeProbeSuccess({ nativeFiles: [] }),
+    nativeProbeSuccess({ nativeFiles: [{ sha256: 'a'.repeat(64), matchesPrebuild: false }] })]) {
+    const f = await fixture(t, '3.0.2'); let built = false, probeDirectory;
+    await assert.rejects(release.prepareRelease({ root: f.root, env: { RELAY_USE_PREBUILT_NATIVE: '1' },
+      run: async (command, args, options) => {
+        if (command === 'git') return args[0] === 'rev-parse' ? SOURCE_COMMIT : '';
+        if (command === require('electron')) {
+          probeDirectory = options.env.RELAY_NATIVE_PROBE_ROOT;
+          if (response instanceof Error) throw response;
+          return response;
+        }
+        if (args.includes('--publish')) built = true;
+        return '';
+      } }), /native|verification/i);
+    assert.equal(built, false, 'a failed probe must never reach a build with npmRebuild disabled');
+    await assert.rejects(fs.stat(probeDirectory), { code: 'ENOENT' });
   }
 });

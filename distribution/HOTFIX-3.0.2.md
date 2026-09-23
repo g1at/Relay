@@ -30,9 +30,14 @@ npm ci --prefer-offline --no-audit --no-fund
 # 若 npm 的脚本策略阻止安装脚本，显式准备现有锁定依赖：
 node node_modules/electron/install.js
 node node_modules/node-pty/scripts/prebuild.js
+# 本机无 Visual Studio 构建工具时，显式验证并采用现有 node-pty 预编译模块：
+$env:RELAY_USE_PREBUILT_NATIVE = '1'
 npm run release
+Remove-Item Env:RELAY_USE_PREBUILT_NATIVE
 node build/release.cjs --verify '<生成的 dist/release-3.0.2-* 目录>'
 ```
+
+默认 `npm run release` 保留 electron-builder 的原生依赖重编译行为。仅在明确设置 `RELAY_USE_PREBUILT_NATIVE=1` 时，发布脚本先启动锁定的真实 Windows x64 Electron，在临时独立 home、userData、AppData 环境中运行 `build/verify-native-runtime.cjs`：核对 node-pty 1.1.0、加载文件与随包 win32-x64 预编译文件的 SHA-256 一致，并通过真实 PTY 启动 cmd、收到随机标记且退出码为 0。全部通过后才给 electron-builder 传入 `--config.npmRebuild=false`；缺失模块、ABI 错误、超时或校验失败都会阻断构建，不作无条件跳过。验证报告保存为产物目录内的 `native-runtime-verification.json`。
 
 `npm run release` 只在本机构建，使用 `--publish never`。源码须先提交，最终 `release-plan.json` 应记录该提交且 `sourceDirty: false`。`SHA256SUMS.txt`、`latest.yml` 和安装包必须一起保存。
 
