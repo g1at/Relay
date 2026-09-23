@@ -36,6 +36,9 @@ const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;   // 之后每 6 小时一次
 let deps = null;
 let autoUpdater = null;   // 打包版首次检查时才加载，首屏不承担依赖加载成本
 let notified = false;     // 下载就绪通知只发一次（每次检查周期内）
+let activeCheck = null;
+let activeDownload = null;
+let installing = false;
 
 // 用户点过「稍后」的版本号。只存内存：这一轮不再打扰，下次启动重新提醒一次 ——
 // 持久化会导致用户误点一次就永远收不到该版本的提示。
@@ -49,6 +52,8 @@ const status = {
   progress: 0,          // 下载进度 0-100（downloading 时有意义）
   error: '',            // 出错时的提示文案（downloading 失败会退回 available 并保留它）
   checkedAt: 0,         // 最近一次成功检查的时间戳（0=从未；UI 借此区分「未检查」和「已是最新」）
+  checking: false,      // ready 重查时保留可安装状态，另行报告检查进度
+  newerVersion: '',     // ready 时新发现的更高版本；确认下载前保留已有包
   dismissed: false,     // 用户已对该版本点过「稍后」→ 气泡不再冒（设置页仍照常显示）
 };
 
@@ -72,7 +77,7 @@ function init(d) {
 
   // 定时检查:首查延迟 + 周期重查。依赖也等到首次检查才加载，
   // 用户提前点检查会立即初始化，不必等待这个 timer。
-  setTimeout(() => { check(); setInterval(check, CHECK_INTERVAL_MS); }, CHECK_INITIAL_DELAY_MS);
+  setTimeout(() => { check(); setInterval(() => check(), CHECK_INTERVAL_MS); }, CHECK_INITIAL_DELAY_MS);
   console.log('[updater] 已启动,%d 分钟后首次检查', Math.round(CHECK_INITIAL_DELAY_MS / 60000));
 }
 
@@ -93,69 +98,120 @@ function ensureAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
 
-  autoUpdater.on('checking-for-update', () => setState({ state: 'checking', error: '' }));
+  autoUpdater.on('checking-for-update', () => {
+    if (activeCheck) setState({ checking: true, error: '' });
+  });
   autoUpdater.on('update-available', (info) => {
+    if (!activeCheck) return;
     const v = (info && info.version) || '';
-    setState({
-      state: 'available', latest: v, progress: 0, error: '', checkedAt: Date.now(),
-      dismissed: dismissedVersion !== '' && dismissedVersion === v,
-    });
+    if (activeCheck.ready) {
+      setState({ newerVersion: isNewerStable(v, status.latest) ? v : '', error: '', checkedAt: Date.now() });
+    } else {
+      setState({
+        state: 'available', latest: v, newerVersion: '', progress: 0, error: '', checkedAt: Date.now(),
+        dismissed: dismissedVersion !== '' && dismissedVersion === v,
+      });
+    }
   });
   autoUpdater.on('update-not-available', () => {
-    notified = false;
-    setState({ state: 'idle', latest: '', progress: 0, error: '', checkedAt: Date.now(), dismissed: false });
+    if (!activeCheck) return;
+    if (activeCheck.ready) {
+      setState({ newerVersion: '', error: '', checkedAt: Date.now() });
+    } else {
+      notified = false;
+      setState({ state: 'idle', latest: '', newerVersion: '', progress: 0, error: '', checkedAt: Date.now(), dismissed: false });
+    }
   });
   autoUpdater.on('download-progress', (p) => {
-    setState({ state: 'downloading', progress: Math.round((p && p.percent) || 0) });
+    if (activeDownload && !activeDownload.completed) {
+      setState({ state: 'downloading', progress: Math.round((p && p.percent) || 0) });
+    }
   });
   autoUpdater.on('update-downloaded', (info) => {
+    if (!activeDownload || activeDownload.completed) return;
     const v = (info && info.version) || status.latest;
-    // 下载是用户亲自点的,装不装的提示必须让他看见 —— 把之前的「稍后」清掉。
+    if (v !== activeDownload.version) return;
+    activeDownload.completed = true;
     dismissedVersion = '';
-    setState({ state: 'ready', latest: v, progress: 100, error: '', dismissed: false });
+    setState({ state: 'ready', latest: v, newerVersion: '', progress: 100, error: '', dismissed: false });
     if (!notified) {
       notified = true;
       try { deps.notify({ title: 'Relay 新版本已下载完成', body: `v${v} 已就绪，重启 Relay 即可完成更新。` }); } catch (_) {}
     }
   });
+  // electron-updater emits error before rejecting its operation promise. State
+  // transitions belong to that promise so an old rejection cannot clobber a retry.
   autoUpdater.on('error', (e) => {
-    // 网络失败很常见(GitHub 国内访问),只记日志 + 状态,不弹通知打扰
-    const msg = (e && e.message || String(e)).slice(0, 200);
-    console.warn('[updater] 出错: %s', msg);
-    if (status.state === 'downloading') {
-      // 下载中断:退回 available 并保留错误文案,用户可以再点一次重试
-      setState({ state: 'available', progress: 0, error: msg });
-    } else {
-      setState({ state: 'error', error: msg });
-    }
+    console.warn('[updater] 出错: %s', errorMessage(e));
+    if (installing) { installing = false; setState({ error: errorMessage(e) }); }
   });
 
   return true;
 }
 
-// 触发一次检查(定时 + 设置页手动共用)。已发现新版/下载中/已就绪都不重查。
-function check() {
-  if (status.state === 'checking' || status.state === 'downloading' || status.state === 'ready') return;
-  if (!ensureAutoUpdater()) return;
-  autoUpdater.checkForUpdates().catch((e) => {
-    console.warn('[updater] 检查失败: %s', e && e.message);
-  });
+function errorMessage(e) { return (e && e.message || String(e)).slice(0, 200); }
+
+// Published Relay releases are stable X.Y.Z versions (enforced by release-policy).
+function isNewerStable(candidate, downloaded) {
+  if (![candidate, downloaded].every(value => /^\d+\.\d+\.\d+$/.test(value))) return false;
+  const a = candidate.split('.').map(Number), b = downloaded.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i];
+  return false;
 }
 
-// 用户确认更新后才下载。available(含上次下载失败退回来的)才有意义。
+// Timers leave ready alone. Only the explicit UI action may recheck a cached update.
+function check({ manual = false } = {}) {
+  if (installing || activeCheck || activeDownload || status.state === 'downloading'
+      || (status.state === 'ready' && !manual)) return;
+  if (!ensureAutoUpdater()) return;
+  const operation = { ready: status.state === 'ready', snapshot: { ...status } };
+  activeCheck = operation;
+  setState({ state: operation.ready ? 'ready' : 'checking', checking: true, error: '' });
+  const finish = () => {
+    if (activeCheck !== operation) return;
+    activeCheck = null;
+    setState({ checking: false });
+  };
+  const fail = (e) => {
+    if (activeCheck !== operation) return;
+    console.warn('[updater] 检查失败: %s', errorMessage(e));
+    setState(operation.ready
+      ? { ...operation.snapshot, error: errorMessage(e), checking: false }
+      : { state: 'error', error: errorMessage(e) });
+  };
+  try {
+    return Promise.resolve(autoUpdater.checkForUpdates()).then(
+      result => { finish(); return result; },
+      error => { fail(error); finish(); },
+    );
+  } catch (error) { fail(error); finish(); }
+}
+
+// The newer package only replaces the cache after explicit user confirmation.
+// electron-updater may remove the old cache once downloading starts; after a
+// download failure we must show available, never claim the old file is installable.
 function download() {
   if (!deps || !deps.isPackaged || status.state === 'disabled') return { ok: false, error: '开发模式不支持更新' };
   if (!autoUpdater) return { ok: false, error: '当前没有可下载的新版本' };
-  if (status.state === 'ready') return { ok: true };            // 已经下好了,直接当成功
-  if (status.state === 'downloading') return { ok: true };      // 正在下,别重复触发
-  if (status.state !== 'available') return { ok: false, error: '当前没有可下载的新版本' };
+  if (installing || activeCheck) return { ok: false, error: '正在检查或安装更新，请稍后重试' };
+  if (activeDownload) return { ok: true };
+  if (status.state === 'ready' && !status.newerVersion) return { ok: true };
+  if (status.state !== 'available' && status.state !== 'ready') return { ok: false, error: '当前没有可下载的新版本' };
+  const operation = { version: status.newerVersion || status.latest, completed: false };
+  activeDownload = operation;
+  notified = false;
   dismissedVersion = '';
-  setState({ state: 'downloading', progress: 0, error: '', dismissed: false });
-  autoUpdater.downloadUpdate().catch((e) => {
-    const msg = (e && e.message || String(e)).slice(0, 200);
-    console.warn('[updater] 下载失败: %s', msg);
-    setState({ state: 'available', progress: 0, error: msg });
-  });
+  setState({ state: 'downloading', latest: operation.version, newerVersion: '', progress: 0, error: '', dismissed: false });
+  const finish = (error) => {
+    if (activeDownload !== operation) return;
+    activeDownload = null;
+    if (error && !operation.completed) {
+      console.warn('[updater] 下载失败: %s', errorMessage(error));
+      setState({ state: 'available', progress: 0, error: errorMessage(error) });
+    }
+  };
+  try { Promise.resolve(autoUpdater.downloadUpdate()).then(() => finish(), error => finish(error)); }
+  catch (error) { finish(error); }
   return { ok: true };
 }
 
@@ -172,11 +228,13 @@ function getStatus() { return { ...status }; }
 
 // 立即重启安装(仅 ready 状态有效)。先置位 isQuitting 放行主窗口 close。
 function quitAndInstall() {
-  if (!autoUpdater || status.state !== 'ready') return { ok: false, error: '安装包尚未就绪' };
+  if (!autoUpdater || status.state !== 'ready' || activeCheck || activeDownload) return { ok: false, error: '安装包尚未就绪或正在检查更新' };
+  if (installing) return { ok: true };
+  installing = true;
   try { deps.markQuitting(); } catch (_) {}
   // isSilent=true 静默装(NSIS 侧走 /S,见 build/installer.nsh 对静默路径的放行);
   // isForceRunAfter=true 装完自动拉起新版
-  setImmediate(() => { try { autoUpdater.quitAndInstall(true, true); } catch (e) { console.error('[updater] quitAndInstall 失败: %s', e.message); } });
+  setImmediate(() => { try { autoUpdater.quitAndInstall(true, true); } catch (e) { installing = false; setState({ error: errorMessage(e) }); console.error('[updater] quitAndInstall 失败: %s', e.message); } });
   return { ok: true };
 }
 

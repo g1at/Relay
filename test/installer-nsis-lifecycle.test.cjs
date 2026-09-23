@@ -29,12 +29,31 @@ test('postflight returns to the stock silent updater relaunch path', () => {
 
 test('uninstall failure aborts before shortcut and registry cleanup', () => {
   const hook = macro('customRemoveFiles');
-  assert.match(hook, /\$\{If\} \$\{isUpdated\}[\s\S]*Call un\.atomicRMDir[\s\S]*Call un\.restoreFiles[\s\S]*Abort/);
-  assert.match(hook, /ClearErrors\s+RMDir \/r \$INSTDIR\s+\$\{If\} \$\{Errors\}[\s\S]*Call un\.restoreFiles[\s\S]*Call un\.RelayUIFailure[\s\S]*SetErrorLevel 2[\s\S]*Abort/);
+  assert.match(hook, /StrCpy \$RelayTransactionAction "Remove"[\s\S]*Call un\.RelayRunTransaction/);
+  assert.match(hook, /\$RelayTransactionCode != 0[\s\S]*Call un\.RelayRollbackTransactions[\s\S]*Call un\.RelayUIFailure[\s\S]*SetErrorLevel 2[\s\S]*Abort/);
   assert.doesNotMatch(hook, /DeleteRegKey|UninstShortcut|\$APPDATA|\$PROFILE/);
   const removeIndex = uninstall.indexOf('!insertmacro customRemoveFiles');
   assert.ok(removeIndex >= 0 && removeIndex < uninstall.indexOf('WinShell::UninstShortcut'));
   assert.ok(removeIndex < uninstall.indexOf('DeleteRegKey'));
+});
+
+test('uninstall leaves the installation working directory before removing files', () => {
+  const hook = macro('customRemoveFiles');
+  const change = hook.indexOf('SetOutPath "$PLUGINSDIR"');
+  assert.ok(change > hook.indexOf('InitPluginsDir'));
+  assert.ok(change < hook.indexOf('Call un.RelayRunTransaction'));
+  assert.match(hook.slice(change, hook.indexOf('Call un.RelayRunTransaction')), /SetErrorLevel 2[\s\S]*Abort/);
+  assert.doesNotMatch(hook, /Call un\.atomicRMDir|RMDir \/r/);
+});
+
+test('both assisted flows use a null-terminated known-folder copy before mode selection', () => {
+  for (const name of ['customWelcomePage', 'customUnWelcomePage']) {
+    assert.match(macro(name), /installer-safe-user-path\.nsh/);
+  }
+  const safe = fs.readFileSync(path.join(repo, 'build', 'installer-safe-user-path.nsh'), 'utf8');
+  assert.match(safe, /lstrcpynW/);
+  assert.doesNotMatch(safe, /&w\$\{NSIS_MAX_STRLEN\}/);
+  assert.match(safe, /CoTaskMemFree/);
 });
 
 test('uninstall keeps user data by default and preserves explicit upstream opt-in', () => {
@@ -62,8 +81,8 @@ test('skin presentation preserves silent operation and stops animation on failur
   assert.match(failed, /SendMessage \$RelayProgress \$\{RELAY_PBM_SETMARQUEE\} 0 0/);
   assert.match(failed, /GetDlgItem \$0 \$HWNDPARENT 2[\s\S]*EnableWindow \$0 1/);
   assert.doesNotMatch(helper('RelayUIDestroy'), /FreeLibrary/);
-  assert.match(production, /Function \.onGUIEnd\s+Call RelayUIDestroy/);
-  assert.match(production, /Function un\.onGUIEnd\s+Call un\.RelayUIDestroy/);
+  assert.match(production, /Function \.onGUIEnd\s+Call RelayRollbackTransactions\s+Call RelayUIDestroy/);
+  assert.match(production, /Function un\.onGUIEnd\s+Call un\.RelayRollbackTransactions\s+Call un\.RelayUIDestroy/);
 });
 
 test('the bundled skin DLL matches the x86 NSIS host architecture', () => {

@@ -100,9 +100,10 @@ function fakeGithub(f, options = {}) {
   return { run, calls, releases, writes: () => calls.filter(call => call.args[0] === 'release') };
 }
 
-test('only the 3.0.1 migration release targets both repositories; all later versions target Relay', () => {
+test('both immutable 3.0.1 migration and 3.0.2 repair migration target both repositories; later versions target Relay', () => {
   assert.deepEqual(rules.releasePolicy('3.0.1').repositories, ['g1at/Relay', 'g1at/relay-updates']);
-  for (const version of ['3.0.2', '3.1.0', '4.0.0', '10.0.0']) {
+  assert.deepEqual(rules.releasePolicy('3.0.2').repositories, ['g1at/Relay', 'g1at/relay-updates']);
+  for (const version of ['3.0.3', '3.1.0', '4.0.0', '10.0.0']) {
     assert.deepEqual(rules.releasePolicy(version).repositories, ['g1at/Relay']);
   }
   for (const version of ['2.1.0', '3.0.0', '03.0.1', '3.0.1-beta.1', '3.0.1+build', 'v3.0.1', '9007199254740992.0.0']) {
@@ -124,7 +125,7 @@ test('preflight rejects existing drafts/tags and compares every stable version n
   assert.throws(() => rules.assertNewRelease(policy, 'g1at/Relay', [], [{ ref: `refs/tags/${policy.tag}` }]), /already exists/);
   assert.throws(() => rules.assertNewRelease(policy, 'g1at/Relay', [{ tag_name: 'v3.0.10', draft: false, prerelease: false }], []), /newer/);
   assert.doesNotThrow(() => rules.assertNewRelease(policy, 'g1at/Relay', [{ tag_name: 'v3.0.1', draft: false, prerelease: false }], []));
-  assert.throws(() => rules.assertNewRelease(policy, 'g1at/relay-updates', [], []), /invalid repository/);
+  assert.throws(() => rules.assertNewRelease(policy, 'g1at/unknown', [], []), /invalid repository/);
 });
 
 test('default preparation uses publish never, checks the feed, and never invokes gh', async t => {
@@ -237,12 +238,12 @@ test('migration publishes identical assets as drafts, verifies both, then promot
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory, 'releases/v3.0.1.json'), 'utf8')), latest);
   }
   await assert.rejects(fs.stat(path.join(result.materialRoot, 'g1at-Relay/latest.json')), { code: 'ENOENT' });
-  assert.match(await fs.readFile(path.join(legacy, 'README.md'), 'utf8'), /最后一个版本是 \*\*3\.0\.1/);
+  assert.match(await fs.readFile(path.join(legacy, 'README.md'), 'utf8'), /迁移版 \*\*3\.0\.1.*修复迁移版 \*\*3\.0\.2/);
   assert.match(await fs.readFile(path.join(result.materialRoot, 'NEXT-STEPS.md'), 'utf8'), /g1at-Relay\/distribution\//);
 });
 
 test('post-migration publication never queries or writes the legacy repository', async t => {
-  const f = await prepared(t, '3.0.2'), github = fakeGithub(f);
+  const f = await prepared(t, '3.0.3'), github = fakeGithub(f);
   const result = await release.publishRelease({ ...f, run: github.run });
   assert.equal(github.writes().length, 2);
   assert.ok(github.calls.every(call => !call.args.some(arg => arg.includes('relay-updates'))));
@@ -324,5 +325,29 @@ test('CLI requires an explicit verified-bundle path for publishing and offers re
   }
   for (const args of [['--publish'], ['--publish', '--force'], ['--publish', 'bundle', '--clobber'], ['--legacy'], ['--unknown']]) {
     assert.throws(() => release.parseArguments(args), /Usage/);
+  }
+});
+
+
+test('3.0.2 repair bridge verifies the new feed and publishes identical bytes to both sources without replacing 3.0.1', async t => {
+  const f = await prepared(t, '3.0.2');
+  assert.deepEqual(f.plan.repositories, ['g1at/Relay', 'g1at/relay-updates']);
+  const previous = [{ tag_name: 'v3.0.1', draft: false, prerelease: false }];
+  const github = fakeGithub(f, { existing: { 'g1at/Relay': previous, 'g1at/relay-updates': previous } });
+  await release.publishRelease({ ...f, run: github.run });
+  const writes = github.writes();
+  assert.deepEqual(writes.map(call => call.args[1]), ['create', 'create', 'edit', 'edit']);
+  assert.ok(writes.every(call => call.args[2] === 'v3.0.2' && !call.args.includes('--clobber')));
+  const assets = [...github.releases.values()].map(item => item.assets.map(asset => [asset.name, asset.digest]));
+  assert.deepEqual(assets[0], assets[1]);
+  assert.match(await fs.readFile(path.join(f.directory, 'release-notes.md'), 'utf8'), /旧客户端.*手动下载.*完整 Setup/);
+});
+
+test('an existing 3.0.2 tag in either source blocks all publication writes', async t => {
+  for (const repository of ['g1at/Relay', 'g1at/relay-updates']) {
+    const f = await prepared(t, '3.0.2');
+    const github = fakeGithub(f, { refs: { [repository]: [{ ref: 'refs/tags/v3.0.2' }] } });
+    await assert.rejects(release.publishRelease({ ...f, run: github.run }), /already exists/);
+    assert.equal(github.writes().length, 0);
   }
 });

@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Relay - 个人 AI 助手",
   "main": "main.js",
   "author": "g0at",
@@ -76,7 +76,8 @@
     "test:installer": "node --test test/installer-handoff.test.js test/installer-nsis-lifecycle.test.cjs && node test/installer-nsis-ui-smoke.cjs && node test/installer-nsis-pages-smoke.cjs && node test/installer-nsis-pages-smoke.cjs --chrome-close && node test/installer-nsis-build.cjs && electron test/installer-welcome-smoke.cjs",
     "build:taskbar-overlay": "node build/build-taskbar-overlay.cjs",
     "build:taskbar-badges": "electron build/generate-taskbar-badges.cjs",
-    "test:taskbar-badges": "electron test/taskbar-completion-badge-smoke.cjs"
+    "test:taskbar-badges": "electron test/taskbar-completion-badge-smoke.cjs",
+    "test:installer-upgrade": "node test/installer-upgrade-integration.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.266",
@@ -194,12 +195,16 @@
       {
         "from": "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64",
         "to": "node_modules/@anthropic-ai/claude-agent-sdk-win32-x64",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "node_modules/@anthropic-ai/claude-agent-sdk-linux-x64",
         "to": "node_modules/@anthropic-ai/claude-agent-sdk-linux-x64",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       "sdk-session-observer.js",
       "sdk-runtime-contract.js",
@@ -301,6 +306,8 @@
       "installerHeaderIcon": "build/icon.ico"
     },
     "asar": true,
-    "compression": "maximum"
+    "compression": "maximum",
+    "afterPack": "build/generate-installer-manifest.cjs",
+    "afterSign": "build/generate-installer-manifest.cjs"
   }
 }

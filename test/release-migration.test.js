@@ -10,11 +10,12 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const yaml = require('js-yaml');
+const { createHash } = require('node:crypto');
 const { NsisUpdater } = require('electron-updater/out/NsisUpdater');
 const manifest = require('../package.json');
 const source = fs.readFileSync(path.join(__dirname, '../updater.js'), 'utf8');
 
-function client(t, { current, repository, latest, unavailable = false }) {
+function client(t, { current, repository, latest, unavailable = false, allowDownloads = false }) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-feed-migration-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const configPath = path.join(directory, 'app-update.yml');
@@ -29,11 +30,14 @@ function client(t, { current, repository, latest, unavailable = false }) {
   });
   engine._testOnlyOptions = { platform: 'win32' };
   const requests = [];
-  const filename = `Relay-${latest}-Setup.exe`;
+  const downloads = [], notifications = [];
+  let downloadFailure = false;
   const root = `/g1at/${repository}/releases`;
-  const sha512 = Buffer.alloc(64, 42).toString('base64');
+  const installerBytes = version => Buffer.from(`Synthetic installer ${version}; never execute.`);
   engine.httpExecutor = {
     async request(options) {
+      const filename = `Relay-${latest}-Setup.exe`;
+      const sha512 = createHash('sha512').update(installerBytes(latest)).digest('base64');
       assert.equal(options.hostname, 'github.com');
       requests.push(options.path);
       if (unavailable) throw new Error('Synthetic new repository unavailable');
@@ -43,12 +47,19 @@ function client(t, { current, repository, latest, unavailable = false }) {
       if (options.path === `${root}/latest`) return JSON.stringify({ tag_name: `v${latest}` });
       if (options.path === `${root}/download/v${latest}/latest.yml`) return yaml.dump({
         version: latest, path: filename, sha512,
-        files: [{ url: filename, sha512, size: 128 }],
+        files: [{ url: filename, sha512, size: installerBytes(latest).length }],
         releaseDate: '2026-09-21T00:00:00.000Z',
       });
       assert.fail(`Unexpected update request: ${options.path}`);
     },
-    download() { assert.fail('Migration checks must preserve manual downloads'); },
+    async download(url, destination, options) {
+      assert.equal(allowDownloads, true, 'Migration checks must preserve manual downloads');
+      downloads.push(url.href);
+      if (downloadFailure) throw new Error('Synthetic replacement download failed');
+      const version = /Relay-([0-9.]+)-Setup\.exe/.exec(url.pathname)[1];
+      assert.equal(options.sha512, createHash('sha512').update(installerBytes(version)).digest('base64'));
+      await fs.promises.writeFile(destination, installerBytes(version));
+    },
   };
   const quiet = { info() {}, log() {}, warn() {}, error() {} };
   const context = vm.createContext({
@@ -62,13 +73,15 @@ function client(t, { current, repository, latest, unavailable = false }) {
   relay.init({ isPackaged: true, appVersion: current,
     getMainWindow: () => null,
     markQuitting() { assert.fail('Checking for updates must not start shutdown'); },
-    notify() { assert.fail('No installer has been downloaded'); },
+    notify(info) { notifications.push(info); },
   });
-  return { engine, relay, requests, async check() {
-    relay.check();
+  return { engine, relay, requests, downloads, notifications, setLatest(version) { latest = version; },
+    setUnavailable(value) { unavailable = value; }, setDownloadFailure(value) { downloadFailure = value; },
+    async check(options) {
+    const relayPromise = relay.check(options);
     const promise = engine.checkForUpdatesPromise;
     assert.ok(promise, 'the production wrapper must start the actual updater');
-    return promise;
+    try { return await promise; } finally { await relayPromise; }
   } };
 }
 
@@ -111,4 +124,68 @@ test('an unavailable new feed reports the failure instead of falling back to the
   assert.equal(h.relay.getStatus().state, 'error');
   assert.ok(h.requests.length > 0);
   assert.ok(h.requests.every(value => value.startsWith('/g1at/Relay/releases')));
+});
+
+
+test('legacy 3.0.0 discovers the repair bridge directly in the legacy feed', async t => {
+  const h = client(t, { current: '3.0.0', repository: 'relay-updates', latest: '3.0.2' });
+  const result = await h.check();
+  assert.equal(result.updateInfo.version, '3.0.2');
+  assert.equal(h.relay.getStatus().latest, '3.0.2');
+  assert.equal(h.downloads.length, 0);
+  const provider = await h.engine.clientPromise;
+  assert.equal(provider.resolveFiles(result.updateInfo)[0].url.href,
+    'https://github.com/g1at/relay-updates/releases/download/v3.0.2/Relay-3.0.2-Setup.exe');
+});
+
+async function downloadFixture(h) {
+  assert.equal(h.relay.download().ok, true);
+  const pending = h.engine.downloadPromise;
+  assert.ok(pending, 'the production wrapper must invoke the real download implementation');
+  try { return await pending; } finally { await new Promise(setImmediate); }
+}
+
+test('real updater preserves cached bytes and install path through a ready recheck and a network failure', async t => {
+  const h = client(t, { current: '3.0.0', repository: 'Relay', latest: '3.0.1', allowDownloads: true });
+  await h.check(); await downloadFixture(h);
+  const oldPath = h.engine.installerPath, oldBytes = fs.readFileSync(oldPath);
+  assert.equal(h.relay.getStatus().state, 'ready');
+  const requestCount = h.requests.length;
+  h.relay.check(); assert.equal(h.requests.length, requestCount);
+  h.setUnavailable(true);
+  await assert.rejects(h.check({ manual: true }), /Synthetic new repository unavailable/);
+  assert.equal(h.relay.getStatus().state, 'ready');
+  assert.equal(h.relay.getStatus().latest, '3.0.1');
+  assert.equal(h.engine.installerPath, oldPath);
+  assert.deepEqual(fs.readFileSync(oldPath), oldBytes);
+  h.setUnavailable(false); h.setLatest('3.0.2');
+  await h.check({ manual: true });
+  assert.equal(h.relay.getStatus().state, 'ready');
+  assert.equal(h.relay.getStatus().newerVersion, '3.0.2');
+  assert.equal(h.engine.installerPath, oldPath);
+  assert.deepEqual(fs.readFileSync(oldPath), oldBytes);
+  assert.equal(h.downloads.length, 1);
+  await downloadFixture(h);
+  assert.equal(h.relay.getStatus().latest, '3.0.2');
+  assert.equal(h.relay.getStatus().state, 'ready');
+  assert.match(h.engine.installerPath, /Relay-3\.0\.2-Setup\.exe$/);
+  assert.equal(h.downloads.length, 2);
+  assert.match(h.downloads[1], /releases\/download\/v3\.0\.2\/Relay-3\.0\.2-Setup\.exe$/);
+});
+
+test('real replacement download failure cannot leave a false ready state after the library clears its old cache', async t => {
+  const h = client(t, { current: '3.0.0', repository: 'Relay', latest: '3.0.1', allowDownloads: true });
+  await h.check(); await downloadFixture(h);
+  const oldPath = h.engine.installerPath;
+  h.setLatest('3.0.2'); await h.check({ manual: true });
+  h.setDownloadFailure(true);
+  await assert.rejects(downloadFixture(h), /Synthetic replacement download failed/);
+  assert.equal(h.relay.getStatus().state, 'available');
+  assert.equal(h.relay.getStatus().latest, '3.0.2');
+  assert.equal(h.engine.installerPath, null);
+  assert.equal(fs.existsSync(oldPath), false, 'electron-updater clears pending files on failed replacement');
+  assert.equal(h.relay.quitAndInstall().ok, false);
+  h.setDownloadFailure(false); await downloadFixture(h);
+  assert.equal(h.relay.getStatus().state, 'ready');
+  assert.equal(h.relay.getStatus().latest, '3.0.2');
 });

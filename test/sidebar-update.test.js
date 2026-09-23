@@ -176,3 +176,36 @@ test('update dismissal skips hidden Settings and collapsed navigation when resto
   assert.equal(dom.doc.activeElement.id, 'btnToggleSidebar');
   ui.destroy();
 });
+
+
+test('ready exposes a manual recheck and keeps install available after check failure', async () => {
+  const h = updater(snapshot('ready', { latest: '3.0.1' }));
+  const dom = domHarness(), ui = create({ api: h.api, ...dom }); await ui.start();
+  assert.equal(dom.panel.querySelector('.sidebar-update-recheck').hidden, false);
+  dom.clickPanel('.sidebar-update-recheck'); await Promise.resolve();
+  assert.equal(h.calls.filter(call => call === 'check').length, 1);
+  assert.equal(h.calls.includes('install'), false); assert.equal(h.calls.includes('download'), false);
+  h.emit(snapshot('ready', { latest: '3.0.1', checking: true }));
+  assert.equal(dom.panel.querySelector('.sidebar-update-primary').disabled, true);
+  assert.equal(dom.panel.querySelector('.sidebar-update-recheck').disabled, true);
+  assert.equal(await ui.run('install'), false);
+  h.emit(snapshot('ready', { latest: '3.0.1', error: 'offline' }));
+  assert.equal(ui.getView().action, 'install');
+  assert.match(ui.getView().error, /已下载的安装包仍然可用/);
+  ui.destroy();
+});
+
+test('newer ready candidate requires explicit replacement confirmation and retains a separate cached install action', async () => {
+  const h = updater(snapshot('ready', { latest: '3.0.1', newerVersion: '3.0.2' }));
+  const dom = domHarness(), ui = create({ api: h.api, ...dom }); await ui.start();
+  const view = ui.getView();
+  assert.equal(view.action, 'download'); assert.match(view.actionLabel, /3.0.2/);
+  assert.match(view.description, /替换已下载的安装包/);
+  assert.equal(view.cachedAction, 'install'); assert.match(view.cachedLabel, /3.0.1/);
+  assert.equal(dom.panel.querySelector('.sidebar-update-cached').hidden, false);
+  assert.equal(h.calls.includes('download'), false);
+  assert.equal(await ui.run('download'), true);
+  assert.equal(h.calls.filter(call => call === 'download').length, 1);
+  assert.equal(h.calls.includes('install'), false);
+  ui.destroy();
+});

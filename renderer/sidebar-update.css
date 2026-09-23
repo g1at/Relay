@@ -73,3 +73,6 @@
   .sidebar .sidebar-update-button { color: LinkText; }
   .sidebar-update-panel .sidebar-update-primary { color: HighlightText; background: Highlight; }
 }
+
+.sidebar-update-panel .sidebar-update-cached { display: inline-block; margin-top: 10px; padding: 0; border: 0; background: transparent; color: var(--text-dim); font: inherit; text-decoration: underline; cursor: pointer; }
+.sidebar-update-panel .sidebar-update-cached:disabled, .sidebar-update-panel .sidebar-update-recheck:disabled { opacity: .55; cursor: default; }

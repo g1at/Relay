@@ -15,6 +15,7 @@
       progress: Math.max(0, Math.min(100, Math.round(Number(st && st.progress) || 0))),
       error: text(st && st.error), checkedAt: Number(st && st.checkedAt) || 0,
       releaseNotes: text(st && st.releaseNotes),
+      checking: !!(st && st.checking), newerVersion: text(st && st.newerVersion).trim(),
     };
   }
 
@@ -25,8 +26,9 @@
     const target = version(st.latest);
     const view = {
       visible, title: 'Relay 更新', description: '', error: '', action: '', actionLabel: '',
-      note: '', noteKind: '', progress: null, pending: !!pending,
-      versions: `${st.current ? `当前 ${version(st.current)}` : 'Relay'}${st.latest ? ` → ${target}` : ''}`,
+      note: '', noteKind: '', progress: null, pending: !!pending || st.checking,
+      secondaryAction: '', cachedAction: '', cachedLabel: '',
+      versions: `${st.current ? `当前 ${version(st.current)}` : 'Relay'}${st.latest ? ` → ${version(st.newerVersion || st.latest)}` : ''}`,
       releaseNotes: st.releaseNotes,
     };
     switch (st.state) {
@@ -37,7 +39,13 @@
         Object.assign(view, { title: '正在下载更新', description: '下载完成后，你可以选择何时重启安装。', progress: st.progress, actionLabel: '正在下载…', note: `正在下载 ${target} ${st.progress}%`, noteKind: 'accent' });
         break;
       case 'ready':
-        Object.assign(view, { title: `${target} 已准备就绪`, description: '安装会退出并重启 Relay。请先保存当前工作，再选择重启安装。', action: 'install', actionLabel: '重启安装', note: `${target} 已就绪，点击重启安装`, noteKind: 'accent' });
+        Object.assign(view, { title: `${target} 已准备就绪`, description: '安装会退出并重启 Relay。请先保存当前工作，再选择重启安装。', action: 'install', actionLabel: '重启安装', note: `${target} 已就绪，点击重启安装`, noteKind: 'accent', secondaryAction: 'check', error: st.error ? `检查失败：${st.error}。已下载的安装包仍然可用。` : '' });
+        if (st.newerVersion) {
+          Object.assign(view, { title: `发现更新版本 ${version(st.newerVersion)}`,
+            description: `${target} 已下载。下载 ${version(st.newerVersion)} 会替换已下载的安装包；下载完成后，你仍可选择何时重启安装。`,
+            action: 'download', actionLabel: `下载 ${version(st.newerVersion)}`, cachedAction: 'install', cachedLabel: `安装已下载的 ${target}`,
+            note: `${version(st.newerVersion)} 可下载，${target} 已就绪` });
+        }
         break;
       case 'checking':
         Object.assign(view, { title: '正在检查更新', description: knownVersion ? `此前发现 ${target}，正在确认最新更新状态。` : '正在确认最新更新状态。', actionLabel: '正在检查…', note: '检查更新中…' });
@@ -57,6 +65,10 @@
       view.noteKind = 'err';
       if (view.action === 'download') view.actionLabel = '重试下载';
       if (view.action === 'install') view.actionLabel = '重试安装';
+    }
+    if (st.checking && !pending) {
+      view.actionLabel = '正在检查…';
+      view.note = st.state === 'ready' ? '正在重新检查，已下载的安装包保留' : '检查更新中…';
     }
     if (pending) {
       view.actionLabel = { check: '正在检查…', download: '正在开始下载…', install: '正在重启…' }[pending] || '正在读取…';
@@ -100,7 +112,9 @@
       }
     }
     async function run(action) {
-      if (disposed || pending || installAccepted || action !== getView().action || !action) return false;
+      const view = getView();
+      if (disposed || pending || view.pending || installAccepted || !action
+          || ![view.action, view.secondaryAction, view.cachedAction].includes(action)) return false;
       const method = { check: 'check', download: 'download', install: 'quitAndInstall' }[action];
       if (!method) return false;
       pending = action; failure = null; publish();
@@ -146,9 +160,10 @@
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-modal', 'false');
     panel.setAttribute('aria-labelledby', 'sidebarUpdateTitle');
-    panel.innerHTML = `<header class="sidebar-update-heading"><h2 id="sidebarUpdateTitle"></h2><button type="button" class="sidebar-update-close" data-update-close aria-label="关闭更新说明"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header><div class="sidebar-update-body"><p class="sidebar-update-versions"></p><p class="sidebar-update-description"></p><div class="sidebar-update-progress" hidden><div class="sidebar-update-progress-track" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100"><div class="sidebar-update-progress-fill"></div></div><p class="sidebar-update-progress-label"></p></div><div class="sidebar-update-notes" hidden><h3>更新说明</h3><p></p></div><p class="sidebar-update-error" role="status" aria-live="polite" hidden></p></div><footer class="sidebar-update-actions"><button type="button" class="sidebar-update-later" data-update-close>稍后</button><button type="button" class="sidebar-update-primary"></button></footer>`;
+    panel.innerHTML = `<header class="sidebar-update-heading"><h2 id="sidebarUpdateTitle"></h2><button type="button" class="sidebar-update-close" data-update-close aria-label="关闭更新说明"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header><div class="sidebar-update-body"><p class="sidebar-update-versions"></p><p class="sidebar-update-description"></p><div class="sidebar-update-progress" hidden><div class="sidebar-update-progress-track" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100"><div class="sidebar-update-progress-fill"></div></div><p class="sidebar-update-progress-label"></p></div><div class="sidebar-update-notes" hidden><h3>更新说明</h3><p></p></div><p class="sidebar-update-error" role="status" aria-live="polite" hidden></p><button type="button" class="sidebar-update-cached" hidden></button></div><footer class="sidebar-update-actions"><button type="button" class="sidebar-update-later" data-update-close>稍后</button><button type="button" class="sidebar-update-recheck sidebar-update-later" hidden>重新检查</button><button type="button" class="sidebar-update-primary"></button></footer>`;
     const $ = (selector) => panel.querySelector(selector);
     const primary = $('.sidebar-update-primary');
+    const recheck = $('.sidebar-update-recheck'), cached = $('.sidebar-update-cached');
     button.setAttribute('aria-haspopup', 'dialog');
     button.setAttribute('aria-controls', panel.id);
     button.setAttribute('aria-expanded', 'false');
@@ -200,6 +215,8 @@
       primary.disabled = !view.action || view.pending;
       primary.dataset.action = view.action;
       hidden(primary, !view.actionLabel);
+      hidden(recheck, !view.secondaryAction); recheck.disabled = view.pending;
+      cached.textContent = view.cachedLabel; cached.disabled = view.pending; hidden(cached, !view.cachedAction);
       panel.setAttribute('aria-busy', String(view.pending));
       position(); onState(st, view);
     });
@@ -212,6 +229,8 @@
     const onPanelClick = (event) => {
       if (event.target.closest('[data-update-close]')) close(true);
       else if (event.target.closest('.sidebar-update-primary')) store.run(primary.dataset.action);
+      else if (event.target.closest('.sidebar-update-recheck')) store.run('check');
+      else if (event.target.closest('.sidebar-update-cached')) store.run('install');
     };
     const onOutside = (event) => { if (open && !panel.contains(event.target) && !button.contains(event.target)) close(false); };
     const onKey = (event) => { if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); } };

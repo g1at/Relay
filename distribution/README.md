@@ -20,9 +20,11 @@ Relay 是 Windows 本地 AI 助手。[g1at/Relay](https://github.com/g1at/Relay)
 
 安装成功后，从开始菜单打开 Relay。首次使用仍需配置服务商；脚本不安装 WSL，也不会替用户填写密钥。
 
-## 3.0.1 更新源迁移
+## 更新源迁移与 3.0.2 安装修复
 
-3.0.1 是旧 `g1at/relay-updates` 仓库的最后一个版本，也会发布到 `g1at/Relay`。旧版应用通过旧源升级到 3.0.1 后，后续应用内更新使用 `g1at/Relay`。
+3.0.1 是双源迁移版；3.0.2 安装修复版也计划同步发布到 `g1at/Relay` 和 `g1at/relay-updates`，帮助仍在旧源的用户升级。安装这些迁移版本后，后续应用内更新使用 `g1at/Relay`。3.0.3 及后续版本只发布到新仓库。
+
+旧客户端若停留在“已下载，重启安装”且无法重新检查，需要在 3.0.2 正式发布后手动下载完整安装包升级；新版本的重新检查修复无法提前作用于旧客户端。保存工作并退出托盘实例后运行完整包，不删除会话和配置。维护者交付路径及校验步骤见 [发布说明](PUBLISHING.md#已下载旧安装包的客户端)。
 
 新版安装脚本默认从 `g1at/Relay` 下载最新正式版；显式指定低于 3.0.1 的稳定版本（包括 3.0.0 和 2.x）时，使用旧仓库的精确版本，指定 3.0.1 或更高版本时使用新仓库。发布迁移版时会把新版脚本同步到旧仓库根目录，因此已有的旧安装命令仍能使用，并会按同一规则选择下载源。新命令的脚本路径是 `g1at/Relay/main/distribution/install.ps1`。
 
@@ -84,4 +86,6 @@ SHA-256 用于校验下载内容，不替代 Windows 代码签名。当前 3.0.0
 node distribution/create-install-manifest.cjs --release-json release.json --installer Relay-3.0.1-Setup.exe --output distribution/releases/v3.0.1.json
 ```
 
-仅在为旧仓库生成历史或桥接清单时显式添加 `--repository g1at/relay-updates`，版本不得高于 3.0.1。桥接发布的两份清单使用各自仓库的真实 Release 元数据；不能仅替换 URL。`--close-running-app-guard` 只在确认该安装包包含关闭应用保护后使用，不根据版本号推定。
+仅在为旧仓库生成历史或桥接清单时显式添加 `--repository g1at/relay-updates`，版本不得高于 3.0.2。桥接发布的两份清单使用各自仓库的真实 Release 元数据；不能仅替换 URL。`--close-running-app-guard` 只在确认该安装包包含关闭应用保护后使用，不根据版本号推定。
+
+3.0.2 的独立构建、安装事务和异常中断恢复说明见 [HOTFIX-3.0.2.md](HOTFIX-3.0.2.md)。

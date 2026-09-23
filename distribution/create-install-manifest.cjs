@@ -16,7 +16,7 @@ The release JSON must contain the GitHub REST fields tag_name, html_url,
 draft, prerelease, published_at, and assets with name, state, size, digest,
 and browser_download_url. Only published stable releases are accepted.
 The default repository is g1at/Relay. Explicit --repository g1at/relay-updates
-is supported only for legacy versions through 3.0.1. Both release and installer
+is supported only for legacy versions through 3.0.2. Both release and installer
 URLs must belong to the selected repository.
 
 Generate releases/vX.Y.Z.json first, then update latest.json after checking it.
@@ -50,8 +50,8 @@ function validateReleaseMetadata(release, { repository = DEFAULT_REPOSITORY } = 
   const version = match[1], tag = release.tag_name;
   if (repository === LEGACY_REPOSITORY) {
     const [major, minor, patch] = version.split('.').map(value => BigInt(value));
-    if (major > 3n || major === 3n && (minor > 0n || patch > 1n)) {
-      throw new Error('Legacy repository g1at/relay-updates supports versions through 3.0.1 only.');
+    if (major > 3n || major === 3n && (minor > 0n || patch > 2n)) {
+      throw new Error('Legacy repository g1at/relay-updates supports versions through 3.0.2 only.');
     }
   }
   const repositoryUrl = `https://github.com/${repository}`;

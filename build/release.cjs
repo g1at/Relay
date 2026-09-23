@@ -150,7 +150,7 @@ async function preflight(plan, deps) {
 
 function migrationReadme(version) {
   return `# Relay 更新渠道已迁移\n\n正式源码、安装包和后续更新统一位于 [g1at/Relay](https://github.com/g1at/Relay)。\n\n` +
-    `本仓库最后一个版本是 **${version}**。安装此版本后，应用内更新将改用新仓库；后续版本只发布到新仓库。` +
+    `本仓库保留更新渠道迁移版 **3.0.1**，并追加安装修复迁移版 **${policyRules.REPAIR_MIGRATION_VERSION}**。当前材料对应 **${version}**；安装迁移版后，应用内更新改用新仓库。后续版本只发布到新仓库。` +
     `旧版本安装包和版本清单保留。\n\n` +
     `- [下载最新正式版](https://github.com/g1at/Relay/releases/latest)\n` +
     `- [命令行安装与升级说明](https://github.com/g1at/Relay#readme)\n\n` +
@@ -210,8 +210,10 @@ async function publishRelease({ root, directory, run = runCommand } = {}) {
   await loadVerifiedBundle(directory);
   const notes = path.join(directory, 'release-notes.md');
   await fsp.writeFile(notes, plan.version === policyRules.MIGRATION_VERSION
-    ? `Relay ${plan.version}：更新渠道迁移版本。此版本安装后使用 g1at/Relay 获取后续更新；这是 relay-updates 的最后一个版本。\n`
-    : `Relay ${plan.version}。正式安装包与后续更新由 g1at/Relay 提供。\n`);
+    ? `Relay ${plan.version}：更新渠道迁移版本。此版本安装后使用 g1at/Relay 获取后续更新；relay-updates 保留此版本，并追加 3.0.2 安装修复迁移版。\n`
+    : plan.version === policyRules.REPAIR_MIGRATION_VERSION
+      ? `Relay ${plan.version}：安装、卸载及旧版升级修复。同步提供给新旧更新源，安装后统一使用 g1at/Relay。旧客户端已缓存旧包且无法重新检查时，请手动下载本版本完整 Setup.exe；请勿删除会话或配置。\n`
+      : `Relay ${plan.version}。正式安装包与后续更新由 g1at/Relay 提供。\n`);
   for (const repository of plan.repositories) {
     await loadVerifiedBundle(directory);
     await run('gh', ['release', 'create', plan.tag, ...plan.artifacts.map(item => path.join(directory, item.name)),

@@ -5047,7 +5047,7 @@ ipcMain.handle('claude:title', (_e, { text }) => generateConversationTitle(text)
 // IPC: 当前更新状态快照(设置页/气泡打开时拉一次,后续靠 relay:update-event 推送)
 ipcMain.handle('relay:updateStatus', () => updater.getStatus());
 // IPC: 手动触发一次检查(fire-and-forget,结果走事件推送)
-ipcMain.handle('relay:checkUpdate', () => { updater.check(); return updater.getStatus(); });
+ipcMain.handle('relay:checkUpdate', () => { updater.check({ manual: true }); return updater.getStatus(); });
 // IPC: 用户确认更新 → 开始下载(进度走事件推送)
 ipcMain.handle('relay:downloadUpdate', () => updater.download());
 // IPC: 用户点「稍后」→ 压掉气泡(不影响设置页展示,也不取消已在跑的下载)

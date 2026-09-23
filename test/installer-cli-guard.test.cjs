@@ -64,6 +64,9 @@ test('native NSIS CLI guard refuses live fixture processes without closing them 
 !include "${q(path.join(include, 'StdUtils.nsh'))}"
 !addplugindir /x86-unicode "${q(plugins)}"
 ${probe}
+; Only the process guard is exercised here; the migration macro has its own integration test.
+!define BUILD_RESOURCES_DIR "${q(path.join(repo, 'build'))}"
+!define RELAY_LEGACY_UPGRADE_WRAPPED
 !define RELAY_UI_PREFIX ""
 !define APP_EXECUTABLE_FILENAME "${helperName}"
 Var RelayNoCloseMode
