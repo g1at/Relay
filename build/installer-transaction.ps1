@@ -261,7 +261,7 @@ try {
     if ($registeredPath -ine $target) { Assert-NoPendingRecovery $registeredPath $Scope }
   }
   if ($Action -eq 'Begin') {
-    if ($oldVersion -notin @('3.0.0','3.0.1')) { exit 10 }
+    if ($oldVersion -notin @('3.0.0','3.0.1','3.0.2')) { exit 10 }
     if ((Read-Value $UninstallKey 'DisplayName') -notin @($ProductName, ($ProductName + ' ' + $oldVersion))) { throw 'Registered product name does not match.' }
   }
   if ([string]::IsNullOrEmpty($registered)) {
@@ -275,9 +275,10 @@ try {
   if (-not [string]::IsNullOrEmpty($uninstall) -and $uninstall -notmatch ('^"' + [regex]::Escape($uninstaller) + '"(?:\s|$)')) { throw 'The registered uninstaller does not belong to the application directory.' }
   if ($Action -eq 'Begin' -and [IO.File]::Exists($uninstaller)) {
     $digest = (Get-FileHash -LiteralPath $uninstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-    # Published 3.0.0 / 3.0.1. Same-version local Repair builds use the normal
-    # uninstaller path instead of being mistaken for a known affected build.
-    if ($digest -notin @('ecec3c06013ec5e4dce3e396af41ea0c8c4029883d7b84026dc4331f9169fde2', '73b8e77aec6a55cf5458bc04783490432d8f5012f1845d9f1e82ba431ec99e3a')) { exit 10 }
+    # Published 3.0.0 / 3.0.1 plus the initial local 3.0.2 candidate whose
+    # uninstaller showed a console for each transaction. Other local Repair
+    # builds keep the normal uninstaller path unless their exact hash is known.
+    if ($digest -notin @('ecec3c06013ec5e4dce3e396af41ea0c8c4029883d7b84026dc4331f9169fde2', '73b8e77aec6a55cf5458bc04783490432d8f5012f1845d9f1e82ba431ec99e3a', '44baed86633ebfb1d92c2246edc78c9e1c284eee8ac245e667c78bfad22a1bdb')) { exit 10 }
   }
   if ($Action -eq 'Remove' -and $original -ine $target) { throw 'Uninstaller target differs from its registered application directory.' }
   Assert-CanMoveTree $original

@@ -4,6 +4,7 @@ Var RelayTransactionAction
 Var RelayTransactionScope
 Var RelayTransactionState
 Var RelayTransactionCode
+Var RelayTransactionOutput
 !ifndef BUILD_UNINSTALLER
 Var RelayMigrationHandled
 !endif
@@ -29,8 +30,14 @@ Var RelayMigrationHandled
     !endif
     StrCpy $RelayTransactionState "$PLUGINSDIR\relay-transaction-$RelayTransactionScope.json"
     ClearErrors
-    ExecWait '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\relay-installer-transaction.ps1" -Action "$RelayTransactionAction" -StatePath "$RelayTransactionState" -InstallDir "$INSTDIR" -Scope "$RelayTransactionScope" -ProductName "${PRODUCT_FILENAME}" -InstallKey "${INSTALL_REGISTRY_KEY}" -UninstallKey "${UNINSTALL_REGISTRY_KEY}" -Version "${VERSION}" -ShortcutPaths "$oldStartMenuLink|$newStartMenuLink|$oldDesktopLink|$newDesktopLink" -ManifestPath "$PLUGINSDIR\relay-installer-manifest.json"' $RelayTransactionCode
-    ${If} ${Errors}
+    ; nsExec creates the console process hidden and still waits for completion.
+    ; No inactivity timeout: verification may legitimately hash large files.
+    nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -WindowStyle Hidden -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\relay-installer-transaction.ps1" -Action "$RelayTransactionAction" -StatePath "$RelayTransactionState" -InstallDir "$INSTDIR" -Scope "$RelayTransactionScope" -ProductName "${PRODUCT_FILENAME}" -InstallKey "${INSTALL_REGISTRY_KEY}" -UninstallKey "${UNINSTALL_REGISTRY_KEY}" -Version "${VERSION}" -ShortcutPaths "$oldStartMenuLink|$newStartMenuLink|$oldDesktopLink|$newDesktopLink" -ManifestPath "$PLUGINSDIR\relay-installer-manifest.json"'
+    Pop $RelayTransactionCode
+    Pop $RelayTransactionOutput
+    ${If} $RelayTransactionCode == "error"
+    ${OrIf} $RelayTransactionCode == "timeout"
+    ${OrIf} ${Errors}
       StrCpy $RelayTransactionCode "2"
     ${EndIf}
     ${If} $RelayTransactionCode != 0
