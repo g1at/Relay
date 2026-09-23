@@ -36,9 +36,9 @@
 
 当前提供 **Windows x64** 安装包。
 
-**现在可下载：[Relay 3.0.1](https://github.com/g1at/Relay/releases/tag/v3.0.1)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
+**现在可下载：[Relay 3.0.2](https://github.com/g1at/Relay/releases/tag/v3.0.2)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
 
-> **3.0.1 为更新源迁移版本。** 本仓库与 [relay-updates](https://github.com/g1at/relay-updates/releases/tag/v3.0.1) 提供同一份安装包，作为旧仓库最后一个版本；升级后，后续更新转到本仓库。具体改进见 [3.0.1 更新说明](https://github.com/g1at/Relay/releases/tag/v3.0.1)。
+> **3.0.2 修复安装、卸载及旧版升级问题，包括反复弹出 PowerShell 窗口。** 本仓库与 [relay-updates](https://github.com/g1at/relay-updates/releases/tag/v3.0.2) 提供同一份安装包；升级后，后续更新统一使用本仓库。旧客户端若已缓存旧安装包且无法重新检查，请下载 [3.0.2 完整安装包](https://github.com/g1at/Relay/releases/download/v3.0.2/Relay-3.0.2-Setup.exe) 手动升级，无需删除会话或配置。
 
 <details>
 <summary>下载与命令行安装入口</summary>
