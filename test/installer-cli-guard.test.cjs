@@ -34,7 +34,7 @@ test('native NSIS CLI guard refuses live fixture processes without closing them 
   fs.mkdirSync(output, { recursive: true });
   const nsisHome = process.env.RELAY_TEST_NSIS_HOME || path.join(process.env.LOCALAPPDATA, 'electron-builder/cache/nsis/nsis-3.0.4.1');
   const compiler = path.join(nsisHome, 'Bin/makensis.exe');
-  const plugins = path.join(process.env.LOCALAPPDATA, 'electron-builder/cache/nsis/nsis-resources-3.4.1/plugins/x86-unicode');
+  const plugins = path.join(process.env.RELAY_TEST_NSIS_RESOURCES || path.join(process.env.LOCALAPPDATA, 'electron-builder/cache/nsis/nsis-resources-3.4.1'), 'plugins/x86-unicode');
   const include = path.join(repo, 'node_modules/app-builder-lib/templates/nsis/include');
   assert.ok(fs.existsSync(compiler), 'cached NSIS compiler is required; no download');
   assert.ok(fs.existsSync(path.join(plugins, 'nsProcess.dll')));
@@ -64,6 +64,9 @@ test('native NSIS CLI guard refuses live fixture processes without closing them 
 !include "${q(path.join(include, 'StdUtils.nsh'))}"
 !addplugindir /x86-unicode "${q(plugins)}"
 ${probe}
+; Only the process guard is exercised here; the migration macro has its own integration test.
+!define BUILD_RESOURCES_DIR "${q(path.join(repo, 'build'))}"
+!define RELAY_LEGACY_UPGRADE_WRAPPED
 !define RELAY_UI_PREFIX ""
 !define APP_EXECUTABLE_FILENAME "${helperName}"
 Var RelayNoCloseMode

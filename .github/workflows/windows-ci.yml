@@ -55,6 +55,11 @@ jobs:
       - name: Unit and regression tests
         run: node --test --test-timeout=60000 --test-concurrency=2 test/*.test.js
 
+      # Includes native fixtures under random product identities. The visible
+      # positive control must be observable; headless/inconclusive is a failure.
+      - name: Installer and uninstaller regression gate
+        run: npm run test:installer-regression
+
       - name: Renderer smoke test with isolated fixtures
         run: npm run test:ui
 

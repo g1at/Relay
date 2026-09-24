@@ -9,3 +9,6 @@ Thumbs.db
 /docs/
 /website/
 /design/
+
+# Generated from the exact packaged files before NSIS compilation.
+build/installer-payload-manifest.json

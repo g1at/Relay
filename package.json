@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Relay - 个人 AI 助手",
   "main": "main.js",
   "author": "g0at",
@@ -77,7 +77,9 @@
     "build:taskbar-overlay": "node build/build-taskbar-overlay.cjs",
     "build:taskbar-badges": "electron build/generate-taskbar-badges.cjs",
     "test:taskbar-badges": "electron test/taskbar-completion-badge-smoke.cjs",
-    "test:packaged-app": "electron test/packaged-application-smoke.cjs"
+    "test:packaged-app": "electron test/packaged-application-smoke.cjs",
+    "test:installer-upgrade": "node test/installer-upgrade-integration.cjs",
+    "test:installer-regression": "node build/test-installer-regression.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.266",
@@ -218,6 +220,8 @@
       "installerHeaderIcon": "build/icon.ico"
     },
     "asar": true,
-    "compression": "maximum"
+    "compression": "maximum",
+    "afterPack": "build/generate-installer-manifest.cjs",
+    "afterSign": "build/generate-installer-manifest.cjs"
   }
 }
