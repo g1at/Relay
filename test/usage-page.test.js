@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeSnapshot, createController, formatNumber, formatFullNumber, formatPercent, buildActivityHeatmap, buildTrendSeries, buildTrendGeometry, getRecordedTokenPeak } = require('../renderer/usage-page');
+const { normalizeSnapshot, coverageNotice, createController, formatNumber, formatFullNumber, formatPercent, buildActivityHeatmap, buildTrendSeries, buildTrendGeometry, getRecordedTokenPeak } = require('../renderer/usage-page');
 function snapshot(days = 30, messages = 5, extra = {}) {
   return { ok: true, available: true, days, generatedAt: '2026-09-09T00:00:00Z', totals: { messages }, daily: Array.from({ length: days }, (_, index) => ({ date: new Date(Date.UTC(2026, 8, 9 - days + 1 + index)).toISOString().slice(0, 10), count: index === days - 1 ? messages : 0 })), tokens: { available: true, inputTokens: 100, outputTokens: 30, cacheReadTokens: 50, cacheCreationTokens: 20, byModel: [{ key: 'route/model-one', count: 200 }], coverage: 'partial' }, coverage: { history: 'complete' }, ...extra };
 }
@@ -26,6 +26,37 @@ test('only complete numeric token components are summed and invalid model values
   assert.equal(normalizeSnapshot(snapshot(30, 5, { tokens: { available: true, inputTokens: 100 } }), 30).tokenTotal, null);
   const partial = normalizeSnapshot(snapshot(30, 5, { daily: [{ date: '2026-09-09', count: 1 }], tokens: { available: true, totalTokens: 30, byModel: [{ key: 'safe', count: 30 }, { key: 'bad', count: Infinity }, { key: 'unknown', count: null }] } }), 30);
   assert.equal(partial.activeDays, null); assert.deepEqual(partial.models, [{ name: 'safe', count: 30 }]);
+});
+test('usage coverage notices explain missing baselines and incomplete records without changing recorded totals', () => {
+  const raw = snapshot(30, 5, { coverage: { history: 'complete', warningCodes: [
+    'USAGE_BASELINE_UNAVAILABLE', 'USAGE_RECORDS_PARTIAL', 'USAGE_BASELINE_UNAVAILABLE',
+    '<img src=x onerror=alert(1)>', null,
+  ] } });
+  const data = normalizeSnapshot(raw, 30);
+  assert.deepEqual(data.warningCodes, ['USAGE_BASELINE_UNAVAILABLE', 'USAGE_RECORDS_PARTIAL']);
+  assert.equal(data.tokenTotal, 200);
+  const notice = coverageNotice(data);
+  assert.match(notice, /缺少起始用量.*可能偏低/);
+  assert.match(notice, /部分用量记录暂不可用/);
+  assert.doesNotMatch(notice, /Token 仅覆盖|统计覆盖不完整/);
+  assert.doesNotMatch(notice, /onerror|USAGE_/);
+});
+test('ordinary recorded-only coverage stays quiet while missing history remains explicit', () => {
+  assert.equal(coverageNotice(normalizeSnapshot(snapshot(), 30)), '');
+  assert.equal(coverageNotice(null), '');
+  const complete = snapshot(); complete.tokens.coverage = 'complete';
+  assert.equal(coverageNotice(normalizeSnapshot(complete, 30)), '');
+  complete.coverage.history = 'partial';
+  assert.match(coverageNotice(normalizeSnapshot(complete, 30)), /部分对话记录暂不可用/);
+});
+test('refresh failures preserve the coverage warning belonging to the displayed snapshot', async () => {
+  let reply = snapshot(30, 5, { coverage: { history: 'complete', warningCodes: ['USAGE_BASELINE_UNAVAILABLE'] } });
+  const f = fixture(async () => { if (reply instanceof Error) throw reply; return reply; });
+  const c = controller(f); await c.refresh(); const warning = coverageNotice(c.getState().snapshot);
+  reply = new Error('synthetic failure'); await c.refresh();
+  assert.equal(coverageNotice(c.getState().snapshot), warning);
+  reply = snapshot(); reply.tokens.coverage = 'complete'; await c.refresh();
+  assert.equal(coverageNotice(c.getState().snapshot), ''); c.destroy();
 });
 test('reopening uses an in-memory snapshot before making any request', async () => {
   let calls = 0; const f = fixture(async days => { calls++; return snapshot(days); });

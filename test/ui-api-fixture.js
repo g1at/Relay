@@ -34,6 +34,24 @@
     'history.list': () => [...history.values()],
     'history.load': id => copy(history.get(id) || null),
     'history.save': conv => { const next = copy({ ...conv, id: conv.id || 'fixture-conversation', updatedAt: new Date().toISOString() }); history.set(next.id, next); return next; },
+    'history.recoverTurn': () => ({ ok: false, error: 'No synthetic original input was seeded' }),
+    'history.completeTurn': (id, runId, ts, payload) => {
+      const next = copy(history.get(id) || null);
+      const index = next?.turns?.findIndex(turn => turn.runId === runId && turn.ts === ts) ?? -1;
+      if (index < 0) return { ok: false, error: 'Synthetic turn identity mismatch' };
+      if (payload.retryWithoutResume) {
+        if (next.turns[index].assistant) return { ok: false, error: 'Synthetic turn already has an answer' };
+        next.turns.splice(index, 1); next.sessionId = null;
+      } else {
+        Object.assign(next.turns[index], copy(payload.turn));
+        if (payload.session) Object.assign(next, copy(payload.session));
+        if (payload.paused) next.paused = copy(payload.paused);
+        if (payload.clearPausedRunId && next.paused?.runId === payload.clearPausedRunId) delete next.paused;
+        if (payload.clearCarryContextReason && next.carryContextOnNextTurn === payload.clearCarryContextReason) delete next.carryContextOnNextTurn;
+      }
+      next.updatedAt = new Date().toISOString(); history.set(id, next);
+      return { ok: true, id, updatedAt: next.updatedAt, conversation: copy(next) };
+    },
     'brand.get': () => ({ name: 'Relay' }),
     'probeEnv': () => ({ ok: true }),
     'relayUpdate.status': () => ({ state: 'idle' }),

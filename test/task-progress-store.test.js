@@ -325,3 +325,73 @@ test('a historical load already in flight cannot return progress after that run 
   const loaded = store.load('removed'); await entered.promise;
   await store.remove('removed'); release.resolve(); assert.equal(await loaded, null);
 });
+
+
+test('a long replay yields between reductions without losing, reordering or prematurely acknowledging observations', async t => {
+  const h = fixture(t), store = h.store();
+  const frames = [envelope(1, stream('message_start', { message: { id: 'long-stream' } })),
+    envelope(2, stream('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })),
+    ...Array.from({ length: 4096 }, (_, index) => envelope(index + 3,
+      stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: String(index % 10) } })))];
+  let reduced = 0, interleaved = false, queued = false;
+  const apply = store._apply;
+  store._apply = function(entry, event) {
+    apply.call(this, entry, event); reduced++;
+    if (!queued) { queued = true; setImmediate(() => {
+      interleaved = reduced < frames.length;
+      store.observe([envelope(frames.length + 1, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'END' } }))]);
+    }); }
+  };
+  store.observe(frames);
+  const snapshot = await store.load('run_fixture-1');
+  assert.equal(interleaved, true, 'The worker loop remains reachable before the entire backlog is reduced');
+  assert.equal(snapshot.seq, frames.length + 1);
+  assert.equal(Output.textFor(snapshot.output.messages[0]), Array.from({ length: 4096 }, (_, i) => String(i % 10)).join('') + 'END');
+  await store.close(); assert.equal((await h.disk()).seq, frames.length + 1);
+});
+
+test('removal during a replay yield drains the existing reduction and never recreates its file', async t => {
+  const h = fixture(t), store = h.store();
+  let scheduled = false, removal;
+  const apply = store._apply;
+  store._apply = function(entry, event) {
+    apply.call(this, entry, event);
+    if (!scheduled) { scheduled = true; setImmediate(() => { removal = store.remove('removed'); }); }
+  };
+  store.observe(Array.from({ length: 1024 }, (_, index) => envelope(index + 1, assistant('same-message', 'Step ' + index), 'removed')));
+  assert.equal(await store.load('removed'), null);
+  await removal; await store.flush();
+  assert.equal(fs.existsSync(path.join(h.rootDir, 'removed.json')), false);
+});
+
+
+test('terminal state is evicted when its write completes during a yielded backlog of duplicate old receipts', async t => {
+  const h = fixture(t), store = h.store(), entered = deferred(), release = deferred();
+  const write = store._atomicWrite;
+  let writes = 0, duplicates = 0, completedWhileQueued = false;
+  store._atomicWrite = async function(file, content) {
+    writes++; await write.call(this, file, content);
+    entered.resolve(); await release.promise;
+  };
+  const done = envelope(1, { type: 'job-done', exitCode: 0 });
+  store.observe([done]);
+  const flushing = store.flush(); await entered.promise;
+  const entry = store.entries.get('run_fixture-1'), apply = store._apply;
+  store._apply = function(current, receipt) {
+    apply.call(this, current, receipt);
+    if (++duplicates === 256) {
+      release.resolve();
+      // The completed write resumes through microtasks before the reduction's
+      // setImmediate. Verify the exact race, independent of filesystem speed.
+      setImmediate(() => { completedWhileQueued = current.writing === null && current.queue.length > 0; });
+    }
+  };
+  store.observe(Array.from({ length: 1024 }, () => done));
+  await entry.processing; await flushing;
+  assert.equal(completedWhileQueued, true);
+  assert.equal(duplicates, 1024); assert.equal(writes, 1);
+  assert.equal(store.entries.has('run_fixture-1'), false, 'Already durable terminal state must not remain cached after duplicate reduction');
+  const persisted = await h.disk();
+  assert.equal(persisted.seq, 1); assert.equal(persisted.terminal, true);
+  assert.deepEqual(persisted.terminalEvent, done.payload.event);
+});

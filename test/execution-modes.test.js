@@ -60,6 +60,24 @@ test('plan guards both hooks and approval callback, including bypass, MCP and su
   assert.deepEqual(await policy.hooks.PreToolUse[0].hooks[0]({ tool_name: 'Write' }), {});
 });
 
+test('plan allows only readonly browser tools and never delegates browser mutations to bypass approval', async () => {
+  const approved = [];
+  const policy = executionToolPolicy(() => ({ kind: 'plan' }), async name => {
+    approved.push(name); return { behavior: 'allow' };
+  });
+  for (const name of ['tabs', 'observe', 'verify', 'wait', 'diagnostics', 'downloads', 'screenshot']) {
+    const tool = `mcp__relay-browser__${name}`;
+    assert.equal((await policy.canUseTool(tool, {}, {})).behavior, 'allow');
+    assert.deepEqual(await policy.hooks.PreToolUse[0].hooks[0]({ tool_name: tool }), {});
+  }
+  for (const name of ['open', 'act', 'upload', 'download', 'evaluate', 'unknown']) {
+    const tool = `mcp__relay-browser__${name}`;
+    assert.equal((await policy.canUseTool(tool, {}, {})).behavior, 'deny');
+    assert.equal((await policy.hooks.PreToolUse[0].hooks[0]({ tool_name: tool })).hookSpecificOutput.permissionDecision, 'deny');
+    assert.equal(approved.includes(tool), false);
+  }
+});
+
 test('resumed goal is cleared before permission changes; an unrelated uncorrelated result cannot acknowledge the clear', async () => {
   const h = controller({ resumed: true });
   let settled = false;

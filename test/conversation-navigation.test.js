@@ -161,3 +161,14 @@ test('all explicit recovery call sites request a forced reload', () => {
     assert.match(body, /load(?:Conversation|CreateConv)\([^\n]+forceReload: true/, name);
   }
 });
+
+
+test('opening multiple routed history conversations never starts SDK prewarm', async () => {
+  const h = harness(); h.context.providerRoutingLoaded = true;
+  h.context.configuredChatRoute = () => ({ providerId: 'fixture' });
+  h.context.sessionRouteSnapshot = () => ({ routeTier: 'haiku', providerId: 'fixture' });
+  for (const id of ['first', 'second', 'third']) {
+    const pending = h.context.loadConversation(id); h.resolve(id, conversation(id)); assert.equal(await pending, true);
+  }
+  assert.equal(h.calls.prespawn.length, 0);
+});

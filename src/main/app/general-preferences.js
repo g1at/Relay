@@ -10,7 +10,7 @@ const { POLICY_DEFAULTS, normalizeRuntimePolicy } = require('../sdk/sdk-runtime-
 const { normalizeSdkPreferences } = require('../sdk/sdk-runtime-preferences');
 const { normalizeRelayInstructions, validateRelayInstructions } = require('../sdk/relay-instructions');
 
-const DEFAULTS = Object.freeze({ workspaceRoot: '', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', maxParallelTasks: 2, relayInstructions: '', showContextUsage: true, ...POLICY_DEFAULTS });
+const DEFAULTS = Object.freeze({ workspaceRoot: '', scratchRoot: '', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', maxParallelTasks: 2, relayInstructions: '', showContextUsage: true, ...POLICY_DEFAULTS });
 const VALUES = Object.freeze({ fileOpenTarget: ['relay', 'system', 'vscode', 'vscode-insiders', 'cursor'], agentEnvironment: ['native', 'wsl'], terminalShell: ['auto', 'powershell', 'pwsh', 'cmd', 'wsl'], followUpMode: ['steer', 'queue'] });
 const PARALLEL_LIMITS = Object.freeze([2, 6, 9, 0]);
 const error = (code, message) => Object.assign(new Error(message), { code });
@@ -23,6 +23,7 @@ function normalizeParallelLimit(value) {
 function normalizePreferences(settings = {}) {
   const result = { ...DEFAULTS };
   if (typeof settings.workspaceRoot === 'string') result.workspaceRoot = settings.workspaceRoot;
+  if (typeof settings.scratchRoot === 'string') result.scratchRoot = settings.scratchRoot;
   result.maxParallelTasks = normalizeParallelLimit(settings.maxParallelTasks);
   result.relayInstructions = normalizeRelayInstructions(settings.relayInstructions);
   result.showContextUsage = settings.showContextUsage !== false;
@@ -35,11 +36,13 @@ function createGeneralPreferences(options = {}) {
   const paths = platform === 'win32' ? path.win32 : path;
   const homeDir = options.homeDir || os.homedir();
   const defaultWorkspaceRoot = paths.join(homeDir, 'RelayProjects');
+  const defaultScratchRoot = paths.join(options.userDataDir || paths.join(homeDir, '.relay'), 'conversation-scratch');
   const getSettings = options.getSettings || (() => ({}));
   const exists = options.isFile || (file => { try { return fs.statSync(file).isFile(); } catch (_) { return false; } });
   const spawnProcess = options.spawn || spawn;
   let cache = null, cacheAt = 0, pending = null;
-  const preferences = () => ({ ...normalizePreferences(getSettings()), defaultWorkspaceRoot });
+  const preferences = () => ({ ...normalizePreferences(getSettings()), defaultWorkspaceRoot, defaultScratchRoot,
+    scratchMigration: typeof options.getScratchMigrationStatus === 'function' ? options.getScratchMigrationStatus() : null });
   const find = (names, candidates = []) => [...candidates, ...String(env.PATH || env.Path || '').split(platform === 'win32' ? ';' : ':')
     .filter(Boolean).flatMap(dir => names.map(name => paths.join(dir, name)))].find(file => paths.isAbsolute(file) && exists(file)) || null;
   function detectExecutables() {
@@ -131,12 +134,15 @@ function createGeneralPreferences(options = {}) {
         if (!PARALLEL_LIMITS.includes(value)) throw error('INVALID_PARALLEL_LIMIT', '请选择 2、6、9 个并行对话，或不限制。');
         result[key] = value; continue;
       }
-      if (key === 'workspaceRoot') {
-        if (typeof value !== 'string' || value.includes('\0') || (value && !paths.isAbsolute(value))) throw error('INVALID_WORKSPACE_ROOT', '任务文件夹必须是一个绝对路径。');
+      if (key === 'workspaceRoot' || key === 'scratchRoot') {
+        const label = key === 'scratchRoot' ? '会话临时文件夹' : '任务文件夹';
+        const invalid = key === 'scratchRoot' ? 'INVALID_SCRATCH_ROOT' : 'INVALID_WORKSPACE_ROOT';
+        const unavailable = key === 'scratchRoot' ? 'SCRATCH_ROOT_UNAVAILABLE' : 'WORKSPACE_ROOT_UNAVAILABLE';
+        if (typeof value !== 'string' || value.includes('\0') || (value && !paths.isAbsolute(value))) throw error(invalid, label + '必须是一个绝对路径。');
         if (value) {
           let stat; try { stat = await fs.promises.stat(value); await fs.promises.access(value, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK); }
-          catch (_) { throw error('WORKSPACE_ROOT_UNAVAILABLE', '任务文件夹不存在或无法写入，请重新选择。'); }
-          if (!stat.isDirectory()) throw error('INVALID_WORKSPACE_ROOT', '任务文件夹必须是文件夹。');
+          catch (_) { throw error(unavailable, label + '不存在或无法写入，请重新选择。'); }
+          if (!stat.isDirectory()) throw error(invalid, label + '必须是文件夹。');
         }
         result[key] = value ? paths.resolve(value) : ''; continue;
       }
@@ -182,7 +188,17 @@ function createGeneralPreferences(options = {}) {
     if (typeof options.getSdkDiagnostics !== 'function') return { ok: false, error: '当前会话尚无配置诊断。' };
     return options.getSdkDiagnostics(input);
   }
-  return { preferences, get, diagnostics, validatePatch, resolveTerminal, openFile, workspaceRoot: () => preferences().workspaceRoot || defaultWorkspaceRoot };
+  function retryScratchMigration() {
+    if (typeof options.retryScratchMigration !== 'function') return { ok: false, code: 'SCRATCH_MIGRATION_UNAVAILABLE', error: '当前无法重新迁移，请稍后再试。' };
+    // The scheduler may wait for tasks to stop or copy many gigabytes. Only
+    // enqueue here; its status remains available independently through get().
+    const pendingMigration = options.retryScratchMigration();
+    Promise.resolve(pendingMigration).catch(cause => console.warn('[preferences] 临时文件迁移重试失败:', cause?.message || String(cause)));
+    return { ok: true, queued: true, scratchMigration: preferences().scratchMigration };
+  }
+  return { preferences, get, diagnostics, retryScratchMigration, validatePatch, resolveTerminal, openFile,
+    workspaceRoot: () => normalizePreferences(getSettings()).workspaceRoot || defaultWorkspaceRoot,
+    scratchRoot: () => normalizePreferences(getSettings()).scratchRoot || defaultScratchRoot };
 }
 
 function registerGeneralPreferencesIpc({ ipcMain, getWindow, service, dialog, entryFile = resourcePath('renderer', 'index.html') }) {
@@ -195,8 +211,14 @@ function registerGeneralPreferencesIpc({ ipcMain, getWindow, service, dialog, en
   for (const [channel, operation] of [
     ['generalPreferences:get', (_event, input) => service.get(input)],
     ['generalPreferences:diagnostics', (_event, input) => service.diagnostics(input)],
+    ['generalPreferences:retryScratchMigration', () => service.retryScratchMigration()],
     ['generalPreferences:pickWorkspaceRoot', async event => {
       const result = await dialog.showOpenDialog(getWindow(), { title: '选择任务文件夹', defaultPath: service.workspaceRoot(), properties: ['openDirectory', 'createDirectory'] });
+      if (!authorized(event)) throw error('FORBIDDEN', '窗口已改变，请重新操作。');
+      return result.canceled || !result.filePaths[0] ? { ok: false, canceled: true } : { ok: true, path: result.filePaths[0] };
+    }],
+    ['generalPreferences:pickScratchRoot', async event => {
+      const result = await dialog.showOpenDialog(getWindow(), { title: '选择会话临时文件夹', defaultPath: service.scratchRoot(), properties: ['openDirectory', 'createDirectory'] });
       if (!authorized(event)) throw error('FORBIDDEN', '窗口已改变，请重新操作。');
       return result.canceled || !result.filePaths[0] ? { ok: false, canceled: true } : { ok: true, path: result.filePaths[0] };
     }],

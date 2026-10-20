@@ -24,10 +24,11 @@
     const active = ['progressing', 'paused'].includes(item.state);
     return { pause: item.state === 'progressing', resume: ['paused', 'interrupted'].includes(item.state), cancel: active || (item.state === 'interrupted' && !!item.canResume), open: item.state === 'completed', showInFolder: item.state === 'completed', delete: !active };
   }
-  async function routeLink({ api, workspace, url }) {
+  async function routeLink({ api, workspace, url, getContext = () => root.relayConversationWorkspace?.() }) {
     const value = String(url || '').trim();
+    const conversationId = getContext()?.conversationId || null;
     if (/^mailto:/i.test(value)) return api.openExternal(value);
-    const response = result(await api.browser.invoke({ action: 'openLink', url: value }));
+    const response = result(await api.browser.invoke({ action: 'openLink', url: value, conversationId }));
     if (response.tab) {
       if (!workspace?.showBrowserTab) throw new Error('浏览器页面尚未就绪，请重试');
       await workspace.showBrowserTab(response.tab);

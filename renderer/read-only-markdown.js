@@ -29,7 +29,8 @@
       event.stopPropagation();
       const href = externalHref(link.getAttribute('href'));
       if (!href || !root.api || typeof root.api.openExternal !== 'function') return;
-      try { Promise.resolve(root.relayBrowserSettings?.openLink ? root.relayBrowserSettings.openLink(href) : root.api.openExternal(href)).catch(() => {}); } catch (_) {}
+      try { Promise.resolve(root.relayBrowserSettings?.openLink ? root.relayBrowserSettings.openLink(href)
+        : root.api.openExternal(href, { conversationId: root.relayConversationWorkspace?.().conversationId })).catch(() => {}); } catch (_) {}
     };
     container.addEventListener('click', onLink);
     container.addEventListener('auxclick', onLink);

@@ -4,6 +4,7 @@
   'use strict';
 
   const VERSION = 9;
+  const browserActivity = window.RelayBrowserActivity || (typeof module === 'object' && module.exports ? require('./browser-activity') : null);
   const continuity = window.RelayTaskContinuity || (typeof module === 'object' && module.exports ? require('./task-continuity') : null);
   const MAX_INPUT_CHARS = 6000;
   const MAX_RESULT_CHARS = 8000;
@@ -90,6 +91,8 @@
   function friendlyTool(name, input) {
     const data = input || {};
     const tool = String(name || '工具');
+    const browser = browserActivity?.friendly(tool, data);
+    if (browser) return browser;
     if (tool === 'ListMcpResourcesTool') return { title: '查看当前会话的 MCP 服务', detail: '读取已加载的服务与资源' };
     if (tool === 'ReadMcpResourceTool') return { title: '读取 MCP 资源', detail: data.uri || data.server || '' };
     if (tool === 'Glob') return { title: '搜索文件', detail: [data.path, data.pattern].filter(Boolean).join(' · ') };
@@ -178,12 +181,19 @@
     };
     restoreUnconfirmedTools(state, saved);
     for (const item of state.items) {
+      if (item.type === 'tool' && !['running', 'preparing', 'superseded', 'canceled'].includes(item.status) && hasToolResultReceipt(item)) {
+        const browser = browserActivity?.summarize(item.toolName, item.result);
+        if (browser) {
+          item.browser = browser;
+          const friendly = browserActivity.friendly(item.toolName, item.input);
+          if (friendly) { item.title = friendly.title; item.detail = friendly.detail; }
+          if (browser.tone === 'error' || browser.tone === 'warning') item.status = browser.tone === 'error' ? 'error' : 'unconfirmed';
+          if (browser.resources.length && !item.resources?.length) { item.resources = browser.resources; item.resourceTaskId = item.toolUseId; }
+        }
+      }
       if (Number(item.contextEpoch || 0) !== state.contextEpoch) continue;
       if (item.type === 'tool' && item.toolUseId) state._tools.set(item.toolUseId, item);
-      if (item.type === 'task') {
-        if (item.taskId) state._tasks.set(item.taskId, item);
-        if (item.toolUseId) state._tasks.set(item.toolUseId, item);
-      }
+      if (item.type === 'task' && !item.outputOwned) rememberTask(state, item);
     }
     const cursor = saved.streamCursor;
     if (cursor && typeof cursor === 'object') {
@@ -221,6 +231,8 @@
         const clean = clone(item);
         if (clean.input) clean.input = compactValue(clean.input);
         if (clean.result) clean.result = trimText(clean.result, MAX_RESULT_CHARS);
+        // Recomputed from the lossless output messages when this turn is shown.
+        delete clean.childOutput;
         delete clean.structuredResult;
         delete clean.inputJson;
         return clean;
@@ -283,6 +295,13 @@
     return item;
   }
 
+  function clearBrowserResult(item) {
+    if (!item.browser) return;
+    const paths = new Set((item.browser.resources || []).map(resource => resource.uri));
+    item.resources = (item.resources || []).filter(resource => !paths.has(resource.uri));
+    delete item.browser;
+  }
+
   function retractMessages(state, event) {
     const ids = event.type === 'assistant' ? event.supersedes
       : event.type === 'system' && event.subtype === 'model_refusal_fallback' ? event.retracted_message_uuids : null;
@@ -302,6 +321,7 @@
         item.resultMessageUuids = item.resultMessageUuids.filter(id => !removed.has(id));
         if (!item.resultMessageUuids.length) {
           item.result = ''; item.error = ''; item.resultConfirmed = false; delete item.structuredResult;
+          clearBrowserResult(item);
           item.status = 'superseded'; item.detail = '本次结果已被后续响应替换';
           item.endedAt = Date.now();
         }
@@ -337,28 +357,71 @@
     });
   }
 
+  const itemIndexes = new WeakMap();
+  function itemIndex(state) {
+    let index = itemIndexes.get(state);
+    // Reducers replace the array for removals; presentation adapters may also
+    // supply a new array. The common append path updates its index in place.
+    if (!index || index.items !== state.items || index.length !== state.items.length) {
+      index = { items: state.items, length: state.items.length, byId: new Map(state.items.map(item => [item.id, item])) };
+      itemIndexes.set(state, index);
+    }
+    return index;
+  }
+
   function itemFor(state, id, patch) {
     state.hasWork = true;
-    let item = state.items.find((candidate) => candidate.id === id);
+    const index = itemIndex(state);
+    let item = index.byId.get(id);
     if (!item) {
       item = { id, type: 'status', status: 'running', title: '', detail: '', startedAt: Date.now(), order: state._currentOrder, contextEpoch: state.contextEpoch };
-      state.items.push(item);
+      state.items.push(item); index.byId.set(id, item); index.length = state.items.length;
     }
     if (patch) Object.assign(item, patch);
     return item;
   }
 
+  function coalesceTaskItems(state, item, other) {
+    if (!other || item === other || Number(item.contextEpoch || 0) !== Number(other.contextEpoch || 0)) return item;
+    const agent = value => /^(Agent|Task)$/.test(value.toolName || '');
+    // Merge the lifecycle placeholder into the actual Agent row. Never consume
+    // a distinct SendMessage/tool receipt merely because it refers to this task.
+    if (!agent(item) && !agent(other) || item.toolName && other.toolName) return item;
+    if (!agent(item)) [item, other] = [other, item];
+    for (const [key, value] of Object.entries(other)) {
+      if (item[key] == null || item[key] === '') item[key] = clone(value);
+    }
+    item.taskToolUseIds = [...new Set([...(item.taskToolUseIds || []), ...(other.taskToolUseIds || []), item.toolUseId, other.toolUseId].filter(Boolean))];
+    if (other.result && !String(item.result || '').includes(other.result)) item.result = trimText([item.result, other.result].filter(Boolean).join('\n\n'), MAX_RESULT_CHARS);
+    if (other.childResults?.length) {
+      item.childResults = item.childResults || [];
+      for (const frame of other.childResults) if (!item.childResults.some(existing => frame.uuid ? existing.uuid === frame.uuid : existing.text === frame.text)) item.childResults.push(clone(frame));
+    }
+    state.items = state.items.filter(candidate => candidate !== other);
+    for (const map of [state._tasks, state._tools]) for (const [key, value] of map) if (value === other) map.set(key, item);
+    return item;
+  }
+
   function rememberTask(state, item, event) {
     const taskId = (event && event.task_id) || item.taskId || null;
+    if (taskId) item = coalesceTaskItems(state, item, state._tasks.get(taskId));
     const toolUseId = (event && event.tool_use_id) || item.toolUseId || null;
     if (taskId) {
       item.taskId = taskId;
       state._tasks.set(taskId, item);
     }
-    if (toolUseId) {
-      item.toolUseId = toolUseId;
-      state._tasks.set(toolUseId, item);
+    // A resumed Agent keeps its task ID but SendMessage creates a new tool ID.
+    // Preserve every owner alias across live updates and history hydration. The
+    // original Agent item ID recovers the first alias in older saved records.
+    const originalId = /^(Agent|Task)$/.test(item.toolName || '') && item.id && !item.id.startsWith('task:') ? item.id : null;
+    const aliases = new Set([...(item.taskToolUseIds || []), originalId, item.toolUseId, toolUseId].filter(Boolean));
+    if (toolUseId) item.toolUseId = toolUseId;
+    if (aliases.size > 1 || item.taskToolUseIds || originalId) item.taskToolUseIds = [...aliases];
+    if (event?.run_id && event.run_id !== item.sdkTaskRunId && (!item.sdkTaskRunId || event.subtype === 'task_started')) {
+      if (item.sdkTaskRunId) item.retiredSdkTaskRunIds = [...new Set([...(item.retiredSdkTaskRunIds || []), item.sdkTaskRunId])];
+      item.sdkTaskRunId = event.run_id;
     }
+    for (const alias of aliases) state._tasks.set(alias, item);
     return item;
   }
 
@@ -464,10 +527,62 @@
 
   function streamMessageId(state, wrapper, raw) {
     if (raw.type === 'message_start' && raw.message && raw.message.id) {
+      // Only the current message can receive further deltas. Keeping every
+      // old record retained duplicate, sometimes megabyte-sized JSON/text
+      // buffers throughout a multi-hour goal even after its tool had finished.
+      if (state._currentMessageId !== raw.message.id) state._blocks.clear();
       state._currentMessageId = raw.message.id;
       state._messageSequence += 1;
     }
     return state._currentMessageId || (wrapper && wrapper.uuid) || `message-${state._messageSequence}`;
+  }
+
+  const jsonProgress = new WeakMap();
+  function scanJsonProgress(progress, chunk) {
+    for (let index = 0; index < chunk.length; index += 1) {
+      const char = chunk[index];
+      if (progress.invalid) return;
+      if (progress.inString) {
+        if (progress.escaped) progress.escaped = false;
+        else if (char === '\\') progress.escaped = true;
+        else if (char === '"') progress.inString = false;
+        continue;
+      }
+      if (/\s/.test(char)) continue;
+      if (progress.complete) { progress.invalid = true; return; }
+      if (!progress.started) {
+        if (char !== '{' && char !== '[') { progress.invalid = true; return; }
+        progress.started = true;
+      }
+      if (char === '"') progress.inString = true;
+      else if (char === '{' || char === '[') progress.depth += 1;
+      else if (char === '}' || char === ']') {
+        progress.depth -= 1;
+        if (progress.depth === 0) progress.complete = true;
+      }
+    }
+  }
+
+  function appendToolJson(record, chunk) {
+    let progress = jsonProgress.get(record);
+    if (!progress) {
+      progress = { depth: 0, started: false, inString: false, escaped: false, complete: false, invalid: false, parsedLength: -1 };
+      // A crash checkpoint may resume partway through a string or escape.
+      scanJsonProgress(progress, record.json); jsonProgress.set(record, progress);
+    }
+    scanJsonProgress(progress, chunk);
+    record.json += chunk; record.item.inputJson = record.json;
+    if (progress.complete && !progress.invalid) {
+      try {
+        if (progress.parsedLength < 0) record.item.input = JSON.parse(record.json);
+        progress.parsedLength = record.json.length;
+        Object.assign(record.item, friendlyTool(record.item.toolName, record.item.input));
+      } catch (_) {
+        // An already closed, malformed JSON root cannot become valid by
+        // appending more text; block_stop still records inputParseError.
+        progress.invalid = true;
+      }
+    }
   }
 
   function ingestStream(state, wrapper) {
@@ -506,12 +621,7 @@
         record.text += delta.thinking || '';
         if (record.item) Object.assign(record.item, { title: record.text || '正在思考…', status: 'running' });
       } else if (delta.type === 'input_json_delta' && record.item) {
-        record.json += delta.partial_json || '';
-        record.item.inputJson = record.json;
-        try {
-          record.item.input = JSON.parse(record.json);
-          Object.assign(record.item, friendlyTool(record.item.toolName, record.item.input));
-        } catch (_) { /* partial JSON is intentionally invalid until block_stop */ }
+        appendToolJson(record, delta.partial_json || '');
       }
       return;
     }
@@ -523,8 +633,11 @@
       if (record.type === 'thinking' && record.item) {
         Object.assign(record.item, { title: record.text || '完成思考', status: 'success', endedAt: Date.now() });
       } else if (record.type === 'tool_use' && record.item) {
+        delete record.item.inputJson;
         if (!/^(running|preparing)$/.test(record.item.status)) return;
-        try { record.item.input = JSON.parse(record.json || '{}'); }
+        try {
+          if (jsonProgress.get(record)?.parsedLength !== record.json.length) record.item.input = JSON.parse(record.json || '{}');
+        }
         catch (_) { record.item.inputParseError = true; }
         Object.assign(record.item, friendlyTool(record.item.toolName, record.item.input), { status: 'running' });
       }
@@ -682,19 +795,35 @@
         state.endedAt = null;
         continue;
       }
+      clearBrowserResult(item);
       item.result = trimText(inspectorResultText(resultText(block)), MAX_RESULT_CHARS);
       item.status = block.is_error ? 'error' : 'success';
       item.error = block.is_error ? item.result : '';
+      const browser = browserActivity?.summarize(item.toolName, resultText(block));
+      if (browser) {
+        item.browser = browser;
+        if (browser.tone === 'error' || browser.tone === 'warning') {
+          item.status = browser.tone === 'error' ? 'error' : 'unconfirmed';
+          item.error = browser.tone === 'error' ? item.result : '';
+        }
+        if (browser.resources.length) {
+          item.resources = [...(item.resources || []), ...browser.resources.filter(resource => !(item.resources || []).some(old => old.uri === resource.uri))];
+          item.resourceTaskId = block.tool_use_id;
+        }
+      }
       item.endedAt = Date.now();
       if (!item.elapsedMs) item.elapsedMs = Math.max(1, item.endedAt - item.startedAt);
     }
   }
 
   function ingestSystem(state, event) {
+    const knownTask = event.task_id && state._tasks.get(event.task_id);
+    if (event.run_id && knownTask?.sdkTaskRunId && event.run_id !== knownTask.sdkTaskRunId
+        && (event.subtype !== 'task_started' || knownTask.retiredSdkTaskRunIds?.includes(event.run_id))) return;
     if (event.subtype === 'thinking_tokens') {
       if (!Number.isFinite(event.estimated_tokens) || event.estimated_tokens < 0) return;
       if (!isChildEvent(event)) state.startupPhase = null;
-      const existing = [...state.items].reverse().find(item => item.type === 'thinking' && item.status === 'running');
+      const existing = state.items.findLast(item => item.type === 'thinking' && item.status === 'running');
       const target = existing || itemFor(state, 'sdk-thinking-progress', {type:'status',status:'running',title:'正在思考',detail:'',ambient:true});
       target.detail = `约 ${Math.round(event.estimated_tokens).toLocaleString()} Token`; target.estimatedTokens = event.estimated_tokens;
       return;
@@ -744,7 +873,7 @@
     if (event.subtype === 'relay_mcp_status') {
       const preparing = event.phase === 'preparing';
       const items = Array.isArray(event.items) ? event.items : [];
-      const labels = { connected: '已连接', pending: '连接中', failed: '连接失败', disabled: '已停用', missing: '未加载', 'needs-auth': '需要认证' };
+      const labels = { connected: '已连接', deferred: '按需连接', pending: '连接中', failed: '连接失败', disabled: '已停用', missing: '未加载', 'needs-auth': '需要认证' };
       if (state.startupPhase) state.startupPhase = preparing ? 'preparing' : 'waiting';
       // Successful preflight is not a user-facing milestone. Actual connection
       // problems remain inspectable while the model's reply is still pending.
@@ -763,7 +892,7 @@
       const maximum = Math.max(attempt, Math.floor(Number(event.max_retries)) || attempt);
       const status = Number(event.error_status);
       const persistent = event.relay_retry_policy === 'persistent';
-      const previous = state.items.find(item => item.id === 'relay-api-retry');
+      const previous = itemIndex(state).byId.get('relay-api-retry');
       const retry = itemFor(state, 'relay-api-retry', {
         type: 'status', status: 'running',
         title: status === 429 ? '服务商限流，等待重试'
@@ -1002,6 +1131,69 @@
     return `工具权限被拒绝（${denied.count} 次）${denied.tools.length ? `：${denied.tools.join('、')}` : ''}`;
   }
 
+  // Host-normalized diagnostics are display information only. Do not infer a
+  // task outcome, retry a command, or expose raw SDK plugin errors here.
+  function ingestDiagnostics(state, value) {
+    if (!state || !value || value.version !== 1) return false;
+    const text = (input, max = 600) => typeof input === 'string'
+      ? input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, max).trim() : '';
+    const duration = input => typeof input === 'number' && Number.isFinite(input) && input >= 0 ? input : null;
+    const milliseconds = input => `${Math.round(input).toLocaleString('zh-CN')} 毫秒`;
+    const id = name => state.contextEpoch ? `${name}:${state.contextEpoch}` : name;
+    const startup = value.startupFailure;
+    if (startup && text(startup.message)) itemFor(state, id('relay-sdk-startup-failure'), {
+      type: 'diagnostic', status: 'error', outputOwned: true,
+      title: text(startup.title, 120) || '会话未能启动', detail: text(startup.message),
+      result: [text(startup.message), text(startup.suggestion) ? `建议：${text(startup.suggestion)}` : ''].filter(Boolean).join('\n\n'),
+      endedAt: Date.now(),
+    });
+    const plugins = value.pluginErrors;
+    if (plugins && Number.isSafeInteger(plugins.count) && plugins.count > 0) {
+      const entries = (Array.isArray(plugins.entries) ? plugins.entries : []).slice(0, 12);
+      const lines = entries.map(entry => [text(entry?.plugin, 160) || '未识别插件', text(entry?.label, 120), text(entry?.message)].filter(Boolean).join(' · '));
+      if (!lines.length) for (const category of (Array.isArray(plugins.categories) ? plugins.categories : []).slice(0, 12)) {
+        if (text(category?.label, 120) && Number.isSafeInteger(category.count) && category.count > 0) lines.push(`${text(category.label, 120)}：${category.count} 项`);
+      }
+      if (plugins.truncated) lines.push('仅显示部分插件问题。');
+      itemFor(state, id('relay-sdk-plugin-errors'), { type: 'diagnostic', status: 'error', outputOwned: true,
+        title: `插件加载存在问题（${plugins.count} 项）`, detail: '展开查看受影响的插件与原因',
+        result: lines.join('\n') || '部分插件或组件未能加载。', endedAt: Date.now() });
+    }
+    const previous = itemIndex(state).byId.get(id('relay-sdk-runtime'))?.diagnostics || {};
+    const timingLabels = { hostStartupMs: '会话启动准备', hostModeMs: '模式准备', hostMcpMs: '工具连接准备',
+      hostPreparationMs: '准备总耗时', hostFirstTextMs: '本地首正文到达',
+      first_text_post_ms: 'SDK 首次文本投递', first_stream_post_queue_wait_ms: 'SDK 首帧投递排队' };
+    const runtime = {};
+    for (const key of ['recovery', 'workerRestart', 'queuedBehind']) if (text(previous[key])) runtime[key] = text(previous[key]);
+    for (const key of Object.keys(timingLabels)) if (duration(previous[key]) !== null) runtime[key] = previous[key];
+    for (const key of ['recovery', 'workerRestart']) {
+      if (text(value[key]?.message)) runtime[key] = text(value[key].message);
+    }
+    const timing = value.timing || {};
+    for (const key of Object.keys(timingLabels)) {
+      if (duration(timing[key]) !== null) runtime[key] = timing[key];
+    }
+    const queuedBehind = { durable_post: '持久消息投递', ephemeral_post: '即时消息投递', retry_backoff: '重试等待', hold: '暂缓投递', none: '无等待项', unknown: '未明确' };
+    if (typeof timing.first_stream_post_queued_behind === 'string') {
+      runtime.queuedBehind = Object.hasOwn(queuedBehind, timing.first_stream_post_queued_behind)
+        ? queuedBehind[timing.first_stream_post_queued_behind] : '未明确';
+    }
+    const lines = [runtime.recovery, runtime.workerRestart].filter(Boolean);
+    for (const [key, label] of Object.entries(timingLabels)) if (duration(runtime[key]) !== null) lines.push(`${label}：${milliseconds(runtime[key])}`);
+    if (duration(runtime.hostModeMs) !== null || duration(runtime.hostMcpMs) !== null) lines.push('模式准备与工具连接可能并行，以上耗时不相加。');
+    if (runtime.queuedBehind) lines.push(`投递等待项：${runtime.queuedBehind}`);
+    if (lines.length) itemFor(state, id('relay-sdk-runtime'), { type: 'diagnostic', status: 'success', outputOwned: true,
+      title: '运行信息', detail: runtime.recovery || runtime.workerRestart ? '执行恢复与响应耗时' : '响应耗时',
+      result: lines.join('\n'), diagnostics: runtime, endedAt: Date.now() });
+    return Boolean(startup && text(startup.message) || plugins && Number.isSafeInteger(plugins.count) && plugins.count > 0 || lines.length);
+  }
+
+  function ingestEventDiagnostics(state, event) {
+    if (!event || isChildEvent(event) || state.session?.id && event.session_id && state.session.id !== event.session_id) return;
+    if (Number.isSafeInteger(event.context_epoch) && event.context_epoch !== state.contextEpoch) return;
+    ingestDiagnostics(state, event.relay_diagnostics);
+  }
+
   function ingest(state, event) {
     if (!state || !event) return state;
     if (event.uuid && state.retractedMessageUuids.includes(event.uuid)) return state;
@@ -1014,6 +1206,7 @@
     rememberKind(state, event.type);
     retractMessages(state, event);
     if (event.type === 'conversation_reset') { resetContext(state, event); return state; }
+    ingestEventDiagnostics(state, event);
 
     if (!isChildEvent(event)) {
       const raw = event.type === 'stream_event' ? event.event || {} : {};
@@ -1030,7 +1223,7 @@
 
     if (!event.parent_tool_use_id && !event.agent_id &&
         (event.type === 'stream_event' && event.event?.type === 'message_start' || event.type === 'assistant' && !event.error)) {
-      const retry = state.items.find(item => item.id === 'relay-api-retry' && item.status === 'running');
+      const retry = (itemIndex(state).byId.get('relay-api-retry')?.status === 'running' ? itemIndex(state).byId.get('relay-api-retry') : null);
       if (retry) Object.assign(retry, { status: 'success', title: '服务商已恢复响应', detail: '', endedAt: Date.now() });
     }
     if (event.type === 'system') ingestSystem(state, event);
@@ -1041,8 +1234,8 @@
     }
     else if (event.type === 'stream_event') ingestStream(state, event);
     else if (event.type === 'assistant') {
-      const estimate = state.items.find(item => item.id === 'sdk-thinking-progress');
-      if (estimate && !event.parent_tool_use_id) { estimate.status = 'success'; estimate.title = '已完成思考'; estimate.endedAt = Date.now(); }
+      const estimate = itemIndex(state).byId.get('sdk-thinking-progress');
+      if (estimate && !isChildEvent(event)) { estimate.status = 'success'; estimate.title = '已完成思考'; estimate.endedAt = Date.now(); }
       reconcileAssistant(state, event);
     }
     else if (event.type === 'tool_progress') ingestToolProgress(state, event);
@@ -1073,7 +1266,9 @@
     state.startupPhase = null;
     taskTiming(state, doneEvent, true);
     const finalResult = doneEvent && doneEvent.finalResult;
+    ingestEventDiagnostics(state, doneEvent);
     if (finalResult && finalResult.type === 'result' && !isChildEvent(finalResult)) {
+      ingestEventDiagnostics(state, finalResult);
       state.result = compactResult(finalResult);
       const denied = permissionDenialError(finalResult);
       state.error = finalResult.is_error || finalResult.subtype && finalResult.subtype !== 'success'
@@ -1323,12 +1518,16 @@
   function renderInspector(item) {
     if (item.type !== 'tool' && item.type !== 'task') return '';
     const blocks = [];
+    if (item.browser?.detail) {
+      blocks.push(inspectSection('网页状态', [item.browser.label, item.browser.detail].filter(Boolean).join('\n'), 'browser', item));
+    }
     if (item.type === 'tool' && hasInspectorValue(item.input)) {
       blocks.push(inspectSection('输入', inspectorInputText(item), 'input', item));
     }
     if (item.result || item.error) {
       blocks.push(inspectSection(item.status === 'error' ? '错误' : '结果', trimText(inspectorResultText(item.error || item.result), MAX_RESULT_CHARS), item.status === 'error' ? 'error' : 'result', item));
     }
+    if (item.childOutput) blocks.push(inspectSection('子 Agent 输出', trimText(item.childOutput, MAX_RESULT_CHARS), 'result', item));
     if (item.usage) blocks.push(inspectSection('用量', safeJson(item.usage, 2000), 'usage', item));
     if (!blocks.length) return '';
     return `<div class="process-inspector"><div class="process-inspect-panel"><div class="process-inspect-heading"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-12-2 14"/></svg><span title="${escapeHtml(item.toolName || '子任务')}">${escapeHtml(item.toolName || '子任务')}</span></div>${blocks.join('')}</div></div>`;
@@ -1355,14 +1554,14 @@
       const text = item.displayText == null ? item.result || '' : item.displayText;
       return `<div class="process-item is-narration" data-process-id="${escapeHtml(item.id)}"><div class="conversation-narration body">${escapeHtml(text)}</div></div>`;
     }
-    const hasDetails = item.type === 'thinking' || hasInspectorValue(item.input) || Boolean(item.result || item.error || item.usage);
+    const hasDetails = item.type === 'thinking' || hasInspectorValue(item.input) || Boolean(item.result || item.childOutput || item.error || item.usage || item.browser?.detail);
     const inspectable = (item.type === 'tool' || item.type === 'task' || item.type === 'thinking' || item.type === 'narration' || item.type === 'diagnostic') && hasDetails;
     const className = ['process-item', `is-${item.type || 'status'}`, `is-${item.status || 'success'}`, inspectable ? 'is-inspectable' : '', expanded ? 'is-expanded' : ''].filter(Boolean).join(' ');
     const titleText = item.type === 'thinking'
       ? (item.status === 'running' || item.status === 'preparing' ? '正在思考' : '已完成思考')
       : item.title || '处理中';
     const badge = item.toolName ? `<span class="process-tool-name">${escapeHtml(item.toolName)}</span>` : (item.type === 'task' ? '<span class="process-tool-name">Task</span>' : '');
-    const detailText = [item.status === 'unconfirmed' ? '结果未确认' : '', item.detail].filter(Boolean).join(' · ');
+    const detailText = [item.status === 'unconfirmed' && !item.browser?.label ? '结果未确认' : '', item.detail].filter(Boolean).join(' · ');
     const detail = detailText ? `<span class="process-item-detail">${escapeHtml(detailText)}</span>` : '';
     const title = `<span class="process-item-label">${escapeHtml(titleText)}</span>${badge}`;
     const stop = item.type === 'task' && item.taskId && /^(?:running|preparing)$/.test(item.status)
@@ -1373,14 +1572,31 @@
     // restoration too, preserving original indexes for real resource actions.
     const resources = (item.resources || []).map((resource, index) => resource.name === '查看任务输出' ? '' :
       `<button class="process-task-resource" type="button" data-resource-index="${index}" title="${escapeHtml(resource.uri)}"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 2h5l4 4v12H5V2Z"/><path d="M11 2v5h4M8 11h4M8 14h4"/></svg><span>${escapeHtml(resource.name)}</span></button>`).join('');
+    const browser = item.browser;
+    const screenshotPreview = browser?.imagePath ? '<div class="process-browser-preview"><button class="process-browser-preview-toggle" type="button" aria-expanded="false">预览截图</button><img class="process-browser-evidence" alt="工具保存的网页截图" hidden></div>' : '';
+    const browserStatus = browser?.label ? `<span class="process-browser-result is-${escapeHtml(browser.tone)}" role="status" title="${escapeHtml(browser.label)}">${escapeHtml(browser.label)}</span>` : '';
     const inspector = item.type === 'thinking'
       ? `<div class="process-inspector"><pre class="process-output-text">${escapeHtml(item.title || '')}</pre></div>`
       : item.outputOwned ? `<div class="process-inspector"><pre class="process-output-text">${escapeHtml(item.result || '')}</pre></div>` : renderInspector(item);
     return `<div class="${className}" data-process-id="${escapeHtml(item.id)}"${inspectable ? ` role="button" tabindex="0" aria-expanded="${Boolean(expanded)}"` : ''}>
       <span class="process-item-icon">${iconFor(item)}</span>
-      <div class="process-item-main"><div class="process-item-title">${title}${background}${stop}</div>${detail}${resources ? `<div class="process-task-resources">${resources}</div>` : ''}</div>
+      <div class="process-item-main"><div class="process-item-title">${title}${browserStatus}${background}${stop}</div>${detail}${screenshotPreview}${resources ? `<div class="process-task-resources">${resources}</div>` : ''}</div>
       ${inspector}
     </div>`;
+  }
+
+  async function previewBrowserEvidence(button, item) {
+    const image = button.parentElement?.querySelector('.process-browser-evidence'), path = item?.browser?.imagePath;
+    if (!image || !path || !browserActivity.localPath(path) || !/\.png$/i.test(path)) return;
+    if (!image.hidden) { image.hidden = true; button.textContent = '预览截图'; button.setAttribute('aria-expanded', 'false'); return; }
+    button.disabled = true; button.textContent = '正在读取截图…';
+    try {
+      const result = await window.api?.image?.toDataUrl(path);
+      if (!button.isConnected || button.closest('.process-item')?._processItem?.browser?.imagePath !== path) return;
+      if (!result?.ok || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(result.dataUrl || '')) throw Error('截图暂时无法预览');
+      image.src = result.dataUrl; image.hidden = false; button.textContent = '收起截图'; button.setAttribute('aria-expanded', 'true');
+    } catch (_) { if (button.isConnected) button.textContent = '预览失败，点击重试'; }
+    finally { if (button.isConnected) button.disabled = false; }
   }
 
   function canBackground(item) {
@@ -1414,7 +1630,7 @@
     if (state.phase === 'error' && state.error === '已暂停') return { title: '已暂停', meta, paused: true };
     if (state.phase === 'error') return { title: '处理未完成', meta };
     if (state.phase === 'complete') return { title: '已结束', meta };
-    const retry = state.items.find(item => item.id === 'relay-api-retry' && item.status === 'running');
+    const retry = (itemIndex(state).byId.get('relay-api-retry')?.status === 'running' ? itemIndex(state).byId.get('relay-api-retry') : null);
     if (retry) return { title: retry.title || '等待服务商重试', meta };
     if (state.result && state.result.queuedTurnCount > 0) {
       return { title: '正在处理排队消息', meta: [meta, `· 还有 ${state.result.queuedTurnCount} 条`].filter(Boolean).join(' ') };
@@ -1441,12 +1657,12 @@
   }
 
   function itemSignature(item, expanded) {
-    // Compare visible strings by identity/value; do not serialize large result
-    // bodies, raw structuredResult or provenance on every unrelated heartbeat.
-    let fields = '';
-    try { fields = JSON.stringify([item.input, item.usage, item.resources]); } catch (_) {}
+    // The reducers replace input/usage/resources when they change; they never
+    // mutate their children. Compare those references instead of serializing
+    // every historical tool's potentially huge input on each streamed token.
     return [item.id, item.type, item.status, item.title, item.detail, item.toolName,
-      item.result, item.error, item.displayText, item.outputOwned, item.taskId, item.toolUseId, item.isBackgrounded, fields, Boolean(expanded)];
+      item.result, item.childOutput, item.error, item.displayText, item.outputOwned, item.taskId, item.toolUseId, item.isBackgrounded,
+      item.input, item.usage, item.resources, item.browser, Boolean(expanded)];
   }
 
   function sameSignature(previous, next) {
@@ -1509,6 +1725,89 @@
   }
 
   let groupSequence = 0;
+  const scrollableDetails = 'pre, .process-inspect-markdown, .process-inspect-fields';
+  const hiddenDetails = '.process-item:not(.is-expanded) > .process-inspector, .process-tool-group:not(.is-expanded) > .process-tool-group-body, .process-stream.is-collapsed > .process-items';
+  const rememberedScroll = new WeakMap();
+  function rememberScrollPositions(rows, moving = false) {
+    const captured = new Set();
+    for (const row of rows) for (const node of row.querySelectorAll(scrollableDetails)) {
+      if (captured.has(node)) continue;
+      captured.add(node);
+      if (node.closest(hiddenDetails)) {
+        const position = rememberedScroll.get(node);
+        if (moving && position) position.pending = true;
+        continue;
+      }
+      const top = node.scrollTop, left = node.scrollLeft;
+      if (top || left) rememberedScroll.set(node, { top, left, pending: true });
+      else rememberedScroll.delete(node);
+    }
+  }
+  function restoreScrollPositions(rows) {
+    for (const row of rows) for (const node of row.querySelectorAll(scrollableDetails)) {
+      const position = rememberedScroll.get(node);
+      if (!position?.pending || !node.isConnected || node.closest(hiddenDetails)) continue;
+      node.scrollTop = position.top; node.scrollLeft = position.left;
+      position.pending = false;
+    }
+  }
+
+  // Work out which existing rows/groups move without touching the live DOM.
+  // New rows are only placeholders here; stable appends never inspect old scroll.
+  function movedItemElements(container, groups, existing, existingGroups) {
+    const moved = new Set(), children = new Map(), links = new Map(), rows = new Map(existing);
+    const childrenOf = parent => {
+      if (!children.has(parent)) {
+        const list = { first: null, last: null };
+        for (const row of Array.from(parent?.children || [])) {
+          links.set(row, { parent, previous: list.last, next: null });
+          if (list.last) links.get(list.last).next = row;
+          else list.first = row;
+          list.last = row;
+        }
+        children.set(parent, list);
+      }
+      return children.get(parent);
+    };
+    const rowFor = item => {
+      if (!rows.has(item.id)) rows.set(item.id, {});
+      return rows.get(item.id);
+    };
+    const place = (parent, row, previous) => {
+      const siblings = childrenOf(parent);
+      const before = previous ? links.get(previous).next : siblings.first;
+      if (row !== before) {
+        if (row.isConnected) moved.add(row);
+        if (!links.has(row) && row.parentElement) childrenOf(row.parentElement);
+        const old = links.get(row);
+        if (old) {
+          const oldSiblings = childrenOf(old.parent);
+          if (old.previous) links.get(old.previous).next = old.next;
+          else oldSiblings.first = old.next;
+          if (old.next) links.get(old.next).previous = old.previous;
+          else oldSiblings.last = old.previous;
+        }
+        const prior = before ? links.get(before).previous : siblings.last;
+        links.set(row, { parent, previous: prior, next: before });
+        if (prior) links.get(prior).next = row;
+        else siblings.first = row;
+        if (before) links.get(before).previous = row;
+        else siblings.last = row;
+      }
+      return row;
+    };
+    let previous = null;
+    for (const group of groups) {
+      if (group.items.length < 2) { previous = place(container, rowFor(group.items[0]), previous); continue; }
+      const row = existingGroups.get(group.id) || {};
+      const body = row.querySelector?.('.process-tool-group-content') || {};
+      let previousCall = null;
+      for (const item of group.items) previousCall = place(body, rowFor(item), previousCall);
+      previous = place(container, row, previous);
+    }
+    return moved;
+  }
+
   function setGroupExpanded(group, expanded) {
     group.classList.toggle('is-expanded', expanded);
     group.querySelector('.process-tool-group-summary').setAttribute('aria-expanded', String(expanded));
@@ -1521,19 +1820,16 @@
     const existing = new Map(Array.from(container.querySelectorAll('.process-item[data-process-id]'), row => [row.dataset.processId, row]));
     const existingGroups = new Map(Array.from(container.querySelectorAll('.process-tool-group'), row => [row.dataset.processGroupId, row]));
     const seen = new Set(), seenGroups = new Set(), active = document.activeElement;
-    // Reparenting a previously standalone call into its first group can reset
-    // native scroll offsets even though the exact same element is retained.
-    // Reading every historical <pre>.scrollTop forces layout after each streamed
-    // update, particularly while a sidebar changes the available width. Capture
-    // offsets only for a row that is actually about to move in the DOM.
-    const scrollPositions = [];
+    // Capture before any move: interleaved insertBefore/scrollTop reads force a
+    // layout per row. Hidden content-visibility subtrees must stay unmeasured;
+    // their last open offsets are remembered when the user folds the details.
+    const groups = groupToolItems(items);
+    const moved = movedItemElements(container, groups, existing, existingGroups);
+    rememberScrollPositions(moved, true);
     let previousRow = null;
     const place = (parent, row, previous) => {
       const before = previous ? previous.nextElementSibling : parent.firstElementChild;
       if (row !== before) {
-        if (row.isConnected) for (const node of row.querySelectorAll('pre, .process-inspect-markdown, .process-inspect-fields')) {
-          if (node.scrollTop || node.scrollLeft) scrollPositions.push({ node, top: node.scrollTop, left: node.scrollLeft });
-        }
         parent.insertBefore(row, before);
       }
       return row;
@@ -1543,7 +1839,11 @@
       let row = existing.get(item.id);
       seen.add(item.id);
       if (!row || !sameSignature(row._processSignature, signature)) {
-        if (!row || item.type !== 'narration' || !row.classList.contains('is-narration')) {
+        const thinkingTextOnly = row && item.type === 'thinking' && row._processSignature
+          && signature.every((value, index) => index === 3 || value === row._processSignature[index]);
+        if (thinkingTextOnly) {
+          row.querySelector('.process-output-text').textContent = item.title || '';
+        } else if (!row || item.type !== 'narration' || !row.classList.contains('is-narration')) {
           const template = document.createElement('template');
           template.innerHTML = renderItem(item, isExpanded).trim();
           const next = template.content.firstElementChild;
@@ -1569,7 +1869,7 @@
       if (inspector) inspector.inert = !isExpanded;
       return row;
     };
-    for (const group of groupToolItems(items)) {
+    for (const group of groups) {
       if (group.items.length < 2) {
         previousRow = place(container, syncCall(group.items[0]), previousRow);
         continue;
@@ -1605,9 +1905,7 @@
     for (const [id, row] of existing) if (!seen.has(id)) row.remove();
     for (const [id, row] of existingGroups) if (!seenGroups.has(id)) row.remove();
     if (active && active.isConnected && container.contains(active) && !active.closest('[inert]') && document.activeElement !== active) active.focus({ preventScroll: true });
-    for (const position of scrollPositions) {
-      if (position.node.isConnected) { position.node.scrollTop = position.top; position.node.scrollLeft = position.left; }
-    }
+    restoreScrollPositions(moved);
   }
 
   // A quiet SDK/tool stream must not freeze the visible task clock. Keep one
@@ -1675,6 +1973,13 @@
       scheduleSummaryClock();
     }
   }
+  function mountDeferredItems(element) {
+    if (!element._processItemsDeferred) return;
+    element._processItemsDeferred = false;
+    syncItemElements(element.querySelector('.process-items'), visibleItems(element._processState, element._processOptions),
+      element._processExpanded, element._processGroupExpanded);
+  }
+
   function syncTaskSummary(element, taskKey, expanded) {
     const host = element?.parentElement;
     const key = taskKey || element?._processOptions?.taskKey || element?._processState?.taskRun?.taskId;
@@ -1712,6 +2017,8 @@
       group.collapsed = true; group.autoCollapsed = true;
     }
     group.phase = state.phase;
+    const changing = members.filter(member => member.classList.contains('is-collapsed') !== group.collapsed);
+    if (group.collapsed) rememberScrollPositions(changing);
     for (const member of members) {
       updateSummary(member, member === first ? state : member._processState,
         { summaryMode: member === first ? 'task' : 'hidden' });
@@ -1722,6 +2029,10 @@
       if (group.autoCollapsed) member.dataset.autoCollapsed = '1';
       else delete member.dataset.autoCollapsed;
     }
+    if (!group.collapsed) {
+      for (const member of members) mountDeferredItems(member);
+      restoreScrollPositions(changing);
+    }
   }
 
   function updateElement(element, state, options) {
@@ -1731,6 +2042,10 @@
     element._processState = state;
     element._processCwd = state.session && state.session.cwd || null;
     const previousPhase = element.dataset.phase;
+    const autoCollapse = !element.dataset.userToggled && /^(complete|error)$/.test(state.phase) && previousPhase === 'running'
+      && opts.segment !== 'previous' && opts.collapseOnComplete !== false;
+    const wasCollapsed = element.classList.contains('is-collapsed');
+    if (autoCollapse && !wasCollapsed) rememberScrollPositions([element]);
     const items = visibleItems(state, opts);
     const expanded = element._processExpanded || new Set();
     element._processExpanded = expanded;
@@ -1742,20 +2057,33 @@
     updateSummary(element, state, opts);
     const groupPreferences = element._processGroupExpanded || new Map();
     element._processGroupExpanded = groupPreferences;
-    syncItemElements(element.querySelector('.process-items'), items, expanded, groupPreferences);
+    // Restored completed processes open collapsed. Keep their full state and
+    // summary, but avoid constructing thousands of invisible rows on navigation.
+    // Once mounted, retain the existing DOM and its expansion/scroll state.
+    const body = element.querySelector('.process-items');
+    const deferItems = opts.deferCollapsed && wasCollapsed && /^(complete|error|canceled)$/.test(state.phase)
+      && !body.firstChild;
+    if (deferItems) element._processItemsDeferred = true;
+    else {
+      element._processItemsDeferred = false;
+      syncItemElements(body, items, expanded, groupPreferences);
+    }
     if (!element.dataset.userToggled && element.dataset.autoCollapsed && (state.phase === 'running' || opts.segment === 'previous')) {
       element.classList.remove('is-collapsed');
       delete element.dataset.autoCollapsed;
       element.querySelector('.process-summary').setAttribute('aria-expanded', 'true');
     }
-    if (!element.dataset.userToggled && /^(complete|error)$/.test(state.phase) && previousPhase === 'running'
-        && opts.segment !== 'previous' && opts.collapseOnComplete !== false) {
+    if (autoCollapse) {
       element.classList.add('is-collapsed');
       element.dataset.autoCollapsed = '1';
       element.querySelector('.process-summary').setAttribute('aria-expanded', 'false');
     }
     element.querySelector('.process-items').inert = element.classList.contains('is-collapsed');
     syncTaskSummary(element);
+    if (wasCollapsed && !element.classList.contains('is-collapsed')) {
+      mountDeferredItems(element);
+      restoreScrollPositions([element]);
+    }
     return element;
   }
 
@@ -1774,6 +2102,8 @@
       <div class="process-items"></div>`;
     element._processExpanded = new Set();
     element.addEventListener('click', (event) => {
+      const preview = event.target.closest('.process-browser-preview-toggle');
+      if (preview) { event.preventDefault(); event.stopPropagation(); void previewBrowserEvidence(preview, preview.closest('.process-item')?._processItem); return; }
       const action = event.target.closest('.process-task-resource, .process-task-stop, .process-task-background');
       if (action) {
         event.preventDefault(); event.stopPropagation();
@@ -1799,20 +2129,27 @@
       }
       const summaryButton = event.target.closest('.process-summary');
       if (summaryButton) {
+        if (!element.classList.contains('is-collapsed')) rememberScrollPositions([element]);
         element.classList.toggle('is-collapsed');
         element.dataset.userToggled = '1';
         summaryButton.setAttribute('aria-expanded', String(!element.classList.contains('is-collapsed')));
         element.querySelector('.process-items').inert = element.classList.contains('is-collapsed');
         syncTaskSummary(element, null, !element.classList.contains('is-collapsed'));
+        if (!element.classList.contains('is-collapsed')) {
+          mountDeferredItems(element);
+          restoreScrollPositions([element]);
+        }
         return;
       }
       const groupButton = event.target.closest('.process-tool-group-summary');
       if (groupButton) {
         const group = groupButton.closest('.process-tool-group');
         const expanded = !group.classList.contains('is-expanded');
+        if (!expanded) rememberScrollPositions([group]);
         element.dataset.userToggled = '1';
         element._processGroupExpanded.set(group.dataset.processGroupId, expanded);
         setGroupExpanded(group, expanded);
+        if (expanded) restoreScrollPositions([group]);
         return;
       }
       const row = event.target.closest('.is-inspectable');
@@ -1820,12 +2157,14 @@
       if (event.target.closest('.process-inspector') || (window.getSelection && String(window.getSelection()))) return;
       element.dataset.userToggled = '1';
       const id = row.dataset.processId;
+      if (element._processExpanded.has(id)) rememberScrollPositions([row]);
       if (element._processExpanded.has(id)) element._processExpanded.delete(id);
       else element._processExpanded.add(id);
       row.classList.toggle('is-expanded', element._processExpanded.has(id));
       row.setAttribute('aria-expanded', String(element._processExpanded.has(id)));
       const inspector = row.querySelector('.process-inspector');
       if (inspector) inspector.inert = !element._processExpanded.has(id);
+      if (element._processExpanded.has(id)) restoreScrollPositions([row]);
     });
     element.addEventListener('keydown', (event) => {
       const row = event.target.closest('.is-inspectable');
@@ -1840,6 +2179,7 @@
     VERSION,
     createState,
     ingest,
+    ingestDiagnostics,
     finish,
     serialize: publicSnapshot,
     hydrate: createState,
@@ -1849,6 +2189,7 @@
     syncTaskSummary,
     clearTaskSummaries,
     renderItem,
+    previewBrowserEvidence,
     renderError,
     groupToolItems,
     formatDuration,

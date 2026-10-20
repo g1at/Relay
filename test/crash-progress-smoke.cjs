@@ -50,6 +50,19 @@ function seed(data) {
         const next = clone({ ...value, id: value.id || 'crash-conversation', updatedAt: new Date().toISOString() });
         records.set(next.id, next); return clone(next);
       };
+      if (method === 'completeTurn') return async (id, runId, ts, payload) => {
+        const next = clone(records.get(id) || null);
+        const index = next?.turns?.findIndex(turn => turn.runId === runId && turn.ts === ts) ?? -1;
+        if (index < 0) return { ok: false, error: 'Synthetic crash recovery identity mismatch' };
+        f.saves++;
+        Object.assign(next.turns[index], clone(payload.turn));
+        if (payload.session) Object.assign(next, clone(payload.session));
+        if (payload.paused) next.paused = clone(payload.paused);
+        if (payload.clearPausedRunId && next.paused?.runId === payload.clearPausedRunId) delete next.paused;
+        if (payload.clearCarryContextReason && next.carryContextOnNextTurn === payload.clearCarryContextReason) delete next.carryContextOnNextTurn;
+        next.updatedAt = new Date().toISOString(); records.set(id, next);
+        return { ok: true, id, updatedAt: next.updatedAt, conversation: clone(next) };
+      };
       return original[method];
     } });
     if (key === 'tasks') return new Proxy(target.tasks, { get(original, method) {

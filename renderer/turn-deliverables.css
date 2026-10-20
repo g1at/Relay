@@ -1,0 +1,11 @@
+/* Inherit the shared answer column's width and inline margins. The viewport and
+   workspace panel already size .message; overriding those values breaks alignment. */
+.turn-deliverables { margin-top: 14px; min-width: 0; }
+.message.assistant.turn-deliverables { margin-top: 10px; margin-bottom: 20px; min-width: 0; }
+.turn-deliverables-heading { display: flex; align-items: center; gap: 7px; margin: 0 0 9px; color: var(--text-dim, #666); font-size: 12px; font-weight: 500; line-height: 1.5; }
+.turn-deliverables-count { color: var(--text-muted, #888); font-variant-numeric: tabular-nums; font-weight: 400; }
+.turn-deliverables-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+.turn-deliverables-list > p { min-width: 0; margin: 0; }
+.turn-deliverables-list a.relay-file-card { display: grid; }
+.turn-deliverables-note { margin-top: 8px; color: var(--text-muted, #888); font-size: 12px; line-height: 1.5; }
+.turn-deliverables-note[hidden] { display: none; }

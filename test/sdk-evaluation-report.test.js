@@ -31,7 +31,7 @@ const rows = new Map(report.rows.map(row => [row.id, row]));
 const high = report.rows.filter(row => row.priority === '高');
 const markdownCells = line => line.split(/(?<!\\)\|/).slice(1, -1).map(cell => cell.trim());
 
-test('SDK evaluation retains all 673 unique rows and 361 declared exports against the installed declaration baseline', () => {
+test('historical SDK evaluation retains its reviewed rows and exact declaration baseline', () => {
   assert.equal(report.sdkVersion, '0.3.266'); assert.equal(report.rows.length, 673); assert.equal(rows.size, 673);
   assert.equal(report.exportIndex.length, 361);
   assert.equal(new Set(report.exportIndex.map(item => `${item.file}:${item.name}`)).size, 361);
@@ -41,9 +41,15 @@ test('SDK evaluation retains all 673 unique rows and 361 declared exports agains
     assert.ok(item.ownerRows.length > 0, `${item.name} must have an evaluated owner`);
     for (const owner of item.ownerRows) assert.ok(rows.has(owner), `${item.name} maps to missing row ${owner}`);
   }
+  const installed = JSON.parse(read('node_modules/@anthropic-ai/claude-agent-sdk/package.json'));
+  // The 266 report remains historical evidence after a version upgrade. Check
+  // its original declarations, never relabel the old audit as current coverage.
+  const declarationRoot = installed.version === report.sdkVersion
+    ? 'node_modules/@anthropic-ai/claude-agent-sdk'
+    : `docs/sdk-evaluation-source-baseline/sdk-${report.sdkVersion}`;
   for (const [file, expected] of Object.entries(report.declarationSha256)) {
-    const actual = crypto.createHash('sha256').update(read(`node_modules/@anthropic-ai/claude-agent-sdk/${file}`)).digest('hex');
-    assert.equal(actual, expected, `${file} changed; update the audit rather than carrying stale coverage forward`);
+    const actual = crypto.createHash('sha256').update(read(`${declarationRoot}/${file}`)).digest('hex');
+    assert.equal(actual, expected, `${file} changed in the preserved historical declaration baseline`);
   }
 });
 

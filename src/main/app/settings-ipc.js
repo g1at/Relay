@@ -1,13 +1,20 @@
 'use strict';
 
+const path = require('node:path');
 const { normalizePreferences } = require('./general-preferences');
 const { isQuickChatEnabled, normalizeQuickChatPatch } = require('./mini-window-host');
 const { isAppPermissionMode } = require('../tasks/interaction-broker');
 
+function scratchRootIdentity(root) {
+  const windows = process.platform === 'win32' || path.win32.isAbsolute(root) && !path.posix.isAbsolute(root);
+  const resolved = (windows ? path.win32 : path).resolve(root);
+  return windows ? resolved.toLowerCase() : resolved;
+}
+
 function registerSettingsIpc({
   ipcMain, app, providerStore, readAppSettings, writeAppSettings, generalPreferences,
   windows, applyParallelTaskLimit, publishProviderChange,
-  onEnvironmentChanged, onQuickChatChanged, refreshMiniBrand,
+  onEnvironmentChanged, onQuickChatChanged, onScratchRootChanged, refreshMiniBrand,
 }) {
   ipcMain.handle('settings:read', () => {
     const provider = providerStore.getSettingsView();
@@ -52,6 +59,8 @@ function registerSettingsIpc({
     catch (error) { return { ok: false, code: error.code, message: error.message }; }
     const a = readAppSettings();
     const previousEnvironment = normalizePreferences(a).agentEnvironment;
+    const previousScratchRoot = Object.hasOwn(preferencePatch, 'scratchRoot') && typeof onScratchRootChanged === 'function'
+      ? generalPreferences.scratchRoot() : null;
     if (payload.app && Object.hasOwn(payload.app, 'permissionMode')
         && !isAppPermissionMode(payload.app.permissionMode)) {
       return { ok: false, message: '权限模式无效' };
@@ -78,6 +87,17 @@ function registerSettingsIpc({
         ? '默认档位已保存，其他本地偏好保存失败：'
         : '本地偏好保存失败：';
       return { ok: false, message: prefix + error.message };
+    }
+    if (previousScratchRoot !== null) {
+      const root = generalPreferences.scratchRoot();
+      if (scratchRootIdentity(previousScratchRoot) !== scratchRootIdentity(root)) {
+        // Directory migration can be large or wait for active conversations.
+        // Persistence completes first; the migration service owns its status.
+        setImmediate(() => {
+          Promise.resolve().then(() => onScratchRootChanged({ previousRoot: previousScratchRoot, root }))
+            .catch(error => console.warn('[settings] 会话临时文件夹迁移启动失败:', error?.message || String(error)));
+        });
+      }
     }
     if (payload.app?.theme) windows.updateNativeBrandTheme();
     if (Object.hasOwn(preferencePatch, 'maxParallelTasks')) applyParallelTaskLimit(preferencePatch.maxParallelTasks);

@@ -9,7 +9,7 @@
     ['pinned', '置顶'], ['today', '今天'], ['yesterday', '昨天'],
     ['week', '最近 7 天'], ['month', '最近 30 天'], ['earlier', '更早'],
   ];
-  function groupItems(items, now = new Date(), projects = []) {
+  function groupItems(items, now = new Date(), projects = [], { isRunning = () => false } = {}) {
     const today = new Date(now);
     today.setHours(0, 0, 0, 0);
     const daysAgo = (days) => { const date = new Date(today); date.setDate(date.getDate() - days); return date.getTime(); };
@@ -26,16 +26,21 @@
           : updated >= daysAgo(29) ? 'month' : 'earlier';
       groups.get(key).items.push(item);
     }
-    const pinnedProjects = [], regularProjects = [];
+    const pinnedProjects = [], regularProjects = [], firstPins = new Map();
     for (const group of projectGroups.values()) {
-      group.pinned = group.items.some(item => item.pinned);
-      // Pinning changes presentation only; keep the supplied activity order
-      // within each partition and never modify the conversation or project.
-      group.items = [...group.items.filter(item => item.pinned), ...group.items.filter(item => !item.pinned)];
+      const firstPin = group.items.find(item => item.pinned);
+      group.pinned = !!firstPin;
+      if (firstPin) firstPins.set(group, firstPin.id);
+      // Live work stays visible even when another conversation was saved more
+      // recently. Within each state, retain pins and the supplied activity order.
+      // This only reorders our group array; records and timestamps stay untouched.
+      group.items.sort((a, b) => Number(isRunning(b.id)) - Number(isRunning(a.id))
+        || Number(!!b.pinned) - Number(!!a.pinned));
       (group.pinned ? pinnedProjects : regularProjects).push(group);
     }
     const pinRank = new Map([...seen].map((id, index) => [id, index]));
-    pinnedProjects.sort((a, b) => pinRank.get(a.items[0].id) - pinRank.get(b.items[0].id));
+    // Running rows must not change the directory order established by pins.
+    pinnedProjects.sort((a, b) => pinRank.get(firstPins.get(a)) - pinRank.get(firstPins.get(b)));
     const pinned = groups.get('pinned');
     return [
       ...(pinned.items.length || pinnedProjects.length ? [pinned] : []),
@@ -104,14 +109,14 @@
 
   // Reuse existing rows, including running indicators and focused controls.
   // Grouping and expansion never save or retimestamp history records.
-  function reconcile(container, items, { buildRow, updateRow, now, projects = [], projectHeader } = {}) {
+  function reconcile(container, items, { buildRow, updateRow, now, projects = [], projectHeader, isRunning } = {}) {
     const doc = container.ownerDocument;
     const scrollTop = container.parentElement.scrollTop;
     const active = doc.activeElement;
     const restoreFocus = active && container.contains(active);
     const rows = new Map([...container.querySelectorAll('.history-item')].map(row => [row.dataset.id, row]));
     const sections = new Map([...container.querySelectorAll('.history-group')].map(section => [section.dataset.historyGroup, section]));
-    const groups = groupItems(items, now, projects), view = viewFor(container);
+    const groups = groupItems(items, now, projects, { isRunning }), view = viewFor(container);
     const keepRows = new Set(), keepSections = new Set();
     const pinnedProjects = [], regularProjects = [];
     const anchors = new Map();

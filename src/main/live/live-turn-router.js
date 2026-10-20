@@ -24,12 +24,15 @@ function notificationIds(event) {
 }
 
 function isNotificationOnlyResult(event) {
-  // Resuming an orphaned shell appends a shouldQuery:false notification, then
-  // emits a zero-turn success even though no user request has been answered.
-  // An actual Agent continuation also has this origin, but performs model turns.
-  return event.type === 'result' && event.subtype === 'success' && !isErrorResult(event)
-    && event.origin && event.origin.kind === 'task-notification'
-    && event.num_turns === 0 && event.duration_api_ms === 0
+  // SDK 0.3.274+ coalesces queued task completions into one model call. The
+  // earlier notifications still produce empty, zero-turn receipts; API duration
+  // is not guaranteed to be zero. Resumed orphan notifications have the same shape.
+  // Only this explicit origin is excluded: ordinary empty results and commands
+  // can be real completions, as can an explicit failure, abort or deferred tool.
+  return !!event && event.type === 'result' && event.subtype === 'success' && !isErrorResult(event)
+    && event.origin?.kind === 'task-notification' && event.num_turns === 0
+    && !event.local_command && !event.deferred_tool_use
+    && (!event.terminal_reason || event.terminal_reason === 'completed')
     && !String(event.result || '').trim() && event.structured_output == null;
 }
 
@@ -105,6 +108,7 @@ class LiveTurnRouter {
     this.toolIds = new Set();
     this.agentToolIds = new Set();
     this.taskIds = new Set();
+    this.taskRuns = new Map();
     this.agentTaskIds = new Set();
     this.hasReply = false;
     this.userAccepted = false;
@@ -123,6 +127,7 @@ class LiveTurnRouter {
     this.replyOwner = null;
     this.seenReplyUuid = false;
     this.foreignTaskIds.clear();
+    this.taskRuns.clear();
     for (const key of ['toolIds', 'agentToolIds', 'taskIds', 'agentTaskIds']) this[key].clear();
     this.hasReply = false;
     this.userAccepted = false;
@@ -160,14 +165,70 @@ class LiveTurnRouter {
     }
   }
 
+  // SDK 0.3.292+ keeps task_id when an agent resumes, while run_id increases
+  // lexicographically. Filter before publishing to any tracker, ledger or UI.
+  // Keep only task-row metadata so late snapshots can retain the current run
+  // without retaining transcripts, tool results or notification bodies.
+  rememberTaskRun(task, { active = true } = {}) {
+    if (!task?.task_id) return;
+    const previous = this.taskRuns.get(task.task_id);
+    const runId = typeof task.run_id === 'string' && task.run_id ? task.run_id : previous?.runId;
+    if (!runId) return;
+    const row = { ...(previous?.row || {}), task_id: task.task_id, run_id: runId };
+    if (previous && runId > previous.runId) delete row.tool_use_id;
+    for (const key of ['tool_use_id', 'task_type', 'subagent_type', 'description', 'parent_task_id', 'ambient', 'is_backgrounded']) {
+      if (task[key] !== undefined) row[key] = task[key];
+    }
+    this.taskRuns.set(task.task_id, { runId, row, active: active && task.ambient !== true });
+  }
+
   accept(event) {
     if (!event || typeof event !== 'object') return null;
+    const notification = notificationIds(event);
+    const taskEvent = event.type === 'system' && /^task_(started|progress|updated|notification)$/.test(event.subtype || '');
+    const taskId = taskEvent ? event.task_id : notification?.taskId;
+    const runId = taskEvent ? event.run_id : notification && event.origin?.kind === 'task-notification' ? event.origin.runId : null;
+    const previous = taskId && this.taskRuns.get(taskId);
+    if (typeof runId === 'string' && previous && runId < previous.runId) return null;
+    if (event.type === 'system' && event.subtype === 'background_tasks_changed') {
+      // This is a full snapshot. Replace only explicitly stale rows; unrelated
+      // rows and genuine omissions retain their authoritative snapshot meaning.
+      const tasks = (Array.isArray(event.tasks) ? event.tasks : []).flatMap(task => {
+        const current = task?.task_id && this.taskRuns.get(task.task_id);
+        if (typeof task?.run_id === 'string' && current && task.run_id < current.runId) {
+          return current.active ? [{ ...current.row }] : [];
+        }
+        return [task];
+      });
+      event = { ...event, tasks };
+    }
+    const accepted = this.routeEvent(event);
+    if (!accepted) return null;
+    if (accepted.type === 'system' && accepted.subtype === 'background_tasks_changed') {
+      const activeIds = new Set();
+      for (const task of accepted.tasks) {
+        if (task?.task_id) activeIds.add(task.task_id);
+        this.rememberTaskRun(task);
+      }
+      for (const [id, current] of this.taskRuns) if (!activeIds.has(id)) current.active = false;
+    } else if (taskId) {
+      const status = taskEvent ? event.patch?.status || event.status
+        : ((event.message?.content?.match?.(/<status>([^<]*)<\/status>/i) || [])[1] || '').trim();
+      const active = !/^(completed|failed|stopped|killed|canceled|cancelled)$/i.test(status || '');
+      this.rememberTaskRun({ ...event, ...(event.patch || {}), task_id: taskId, run_id: runId }, { active });
+    }
+    return accepted;
+  }
+
+  routeEvent(event) {
+    if (!event || typeof event !== 'object') return null;
     const ids = notificationIds(event);
+    const child = !!(event.parent_tool_use_id || event.parentToolUseId || event.agent_id || event.subagent_type);
     if (!this.active) {
       if (ids && ids.taskId) this.foreignTaskIds.add(ids.taskId);
       if (ids || ((event.type === 'assistant' || event.type === 'stream_event')
-          && !event.parent_tool_use_id && !event.subagent_type)) this.replyOwner = UNATTRIBUTED_TURN;
-      if (event.user_message_uuid) {
+          && !child)) this.replyOwner = UNATTRIBUTED_TURN;
+      if (!child && event.user_message_uuid) {
         this.seenReplyUuid = true;
         this.replyOwner = event.user_message_uuid;
       }
@@ -175,7 +236,6 @@ class LiveTurnRouter {
     }
 
     const reply = event.type === 'assistant' || event.type === 'stream_event';
-    const child = !!(event.parent_tool_use_id || event.parentToolUseId || event.agent_id || event.subagent_type);
     const consumedIds = !child && Array.isArray(event.user_message_uuids)
       ? event.user_message_uuids.filter(id => typeof id === 'string' && this.sentIds.has(id)) : [];
     // New SDKs report every merged input, while the singular stamp names the
@@ -267,7 +327,7 @@ class LiveTurnRouter {
       return event;
     }
 
-    if (event.type === 'user' && event.uuid && this.sentIds.has(event.uuid)) {
+    if (event.type === 'user' && !child && event.uuid && this.sentIds.has(event.uuid)) {
       this.userAccepted = true;
       // Older emitters may acknowledge the submitted user message but omit
       // reply stamps. Its replay acknowledgement is also a valid turn boundary.

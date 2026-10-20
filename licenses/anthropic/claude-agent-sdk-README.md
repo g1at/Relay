@@ -16,6 +16,10 @@ Install the Claude Agent SDK:
 npm install @anthropic-ai/claude-agent-sdk
 ```
 
+## The `/core` entry (for apps that bundle the SDK)
+
+`@anthropic-ai/claude-agent-sdk/core` exports the same `query()`, `startup()`, `tool()`, `createSdkMcpServer()`, `renameSession()`/`tagSession()`/`deleteSession()`, `resolveSettings()`/`filterEscalatingDefaultMode()` and runtime constants as the root entry, and nothing else — no session listing/reading/import helpers — so its eagerly loaded code is about a fifth of the root's; the settings resolver behind `resolveSettings()` loads on first call. Unlike the root entry it does **not** inline the SDK's peer dependencies: `zod` (^4, as declared in this package's `peerDependencies`) and `@modelcontextprotocol/sdk` (^1.29) are imported from your install — specifically the `zod/v4` subpath, plus `zod/v3` when the settings resolver loads — which is what you want when your bundler already carries them. (zod 3.25+, which carries the v4 engine under `zod/v4`, also works in practice, but ^4 is the supported range.) Import from **either** the root **or** `/core` in a given process, not both — they are separate bundles, and mixing them loads two copies of the SDK's classes and state. Its types require TypeScript 5.0+.
+
 ## Compiled binaries (`bun build --compile`)
 
 When bundling your application into a single executable with `bun build --compile`, the SDK cannot resolve the native CLI binary at runtime — `require.resolve` doesn't work from inside the compiled `$bunfs` (or `B:\~BUN\...` on Windows) virtual filesystem.

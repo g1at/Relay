@@ -21,6 +21,15 @@ contextBridge.exposeInMainWorld('api', {
   runClaude: (prompt, sessionId, mode, files, model, effort, agentName, workingDir, orchestrateAgents, convId, forceFreshSession, runId, sourceConvId, taskContext, sessionRoute, executionMode) =>
     ipcRenderer.invoke('claude:run', { prompt, sessionId, sessionRoute, mode, files, model, effort, agentName, workingDir, orchestrateAgents, convId, forceFreshSession, runId, sourceConvId, taskContext, executionMode }),
 
+  deliverables: {
+    get: input => ipcRenderer.invoke('deliverables:get', input),
+    onChanged: handler => {
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on('deliverables:changed', listener);
+      return () => ipcRenderer.removeListener('deliverables:changed', listener);
+    },
+  },
+
   // Add user context to the current live task without interrupting its work.
   steerClaude: (input) => ipcRenderer.invoke('claude:steer', input),
 
@@ -89,7 +98,7 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   // 打开链接（网页遵循浏览器设置；保留旧 API 名称供已有界面使用）
-  openExternal: (url) => ipcRenderer.invoke('shell:open', url),
+  openExternal: (url, options) => ipcRenderer.invoke('shell:open', url, options),
 
   // Browser controls are available only to Relay's trusted main document.
   browser: {
@@ -104,6 +113,8 @@ contextBridge.exposeInMainWorld('api', {
   generalPreferences: {
     get: (options) => ipcRenderer.invoke('generalPreferences:get', options || {}),
     pickWorkspaceRoot: () => ipcRenderer.invoke('generalPreferences:pickWorkspaceRoot'),
+    pickScratchRoot: () => ipcRenderer.invoke('generalPreferences:pickScratchRoot'),
+    retryScratchMigration: () => ipcRenderer.invoke('generalPreferences:retryScratchMigration'),
     diagnostics: input => ipcRenderer.invoke('generalPreferences:diagnostics', input || {}),
   },
 
@@ -211,8 +222,11 @@ contextBridge.exposeInMainWorld('api', {
     subagentMessages: input => ipcRenderer.invoke('history:subagentMessages', input),
     list:     ()    => ipcRenderer.invoke('history:list'),
     search:   (query, limit) => ipcRenderer.invoke('history:search', { query, limit }),
+    cancelSearch: () => ipcRenderer.invoke('history:search:cancel'),
     load:     (id)  => ipcRenderer.invoke('history:load', id),
     save:     (conv)=> ipcRenderer.invoke('history:save', conv),
+    recoverTurn: (id, runId) => ipcRenderer.invoke('history:recoverTurn', { id, runId }),
+    completeTurn: (id, runId, turnTs, payload) => ipcRenderer.invoke('history:completeTurn', { id, runId, turnTs, payload }),
     invalidateSessionForProvider: (id, routeTier) => ipcRenderer.invoke(
       'history:invalidateSessionForProvider', { id, routeTier },
     ),

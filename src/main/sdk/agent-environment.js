@@ -5,9 +5,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { appRoot, resourcePath, unpackPath } = require('../app/paths');
 const { spawn, execFile } = require('node:child_process');
-const { bridgeMcpServers } = require('./host-stdio-mcp');
+const { bridgeMcpServers, isHostStdioMcpServer } = require('./host-stdio-mcp');
+const { exposeHostMcpLoopback, getHostMcpLoopbackOwner } = require('./host-mcp-loopback');
 const { mcpConfigKey } = require('../live/live-mcp-readiness');
 const { validDistribution } = require('./sdk-task-resources');
+const { bundledClaudeVersion } = require('./sdk-runtime-version');
 
 const fail = (code, message) => Object.assign(new Error(message), { code });
 const WINDOWS_PATH = /^[a-z]:[\\/]/i;
@@ -43,21 +45,38 @@ function createAgentEnvironment(options = {}) {
   }));
   const probeStates = new Map();
   const mcpContexts = new WeakMap();
-  function mapForContext(servers, context) {
+  async function mapForContext(servers, context) {
     const previous = context.bridges || new Map();
     const next = new Map();
-    const result = {};
+    const result = {}, created = [];
+    try {
     for (const [name, config] of Object.entries(servers || {})) {
-      if (!config || config.type === 'sdk' || config.type === 'http' || config.type === 'sse' || config.url) {
+      if (!config || (config.type === 'sdk' && !isHostStdioMcpServer(config.instance)) || config.type === 'http' || config.type === 'sse' || config.url) {
         result[name] = config; continue;
       }
-      const key = mcpConfigKey({ [name]: config });
+      const key = config.type === 'sdk' ? config.instance : mcpConfigKey({ [name]: config });
       const cached = previous.get(name);
-      const mapped = cached && cached.key === key ? cached.mapped : mapMcpServers({ [name]: config }, { cwd: context.cwd, env: context.env })[name];
+      let mapped = cached && cached.key === key ? cached.mapped : mapMcpServers({ [name]: config }, { cwd: context.cwd, env: context.env,
+          deferConnect: options.deferMcpConnections !== false })[name];
+      if (context.loopback && mapped.type === 'sdk' && mapped.instance) {
+        mapped = await exposeHostMcpLoopback(name, mapped, { signal: context.signal });
+        const owner = getHostMcpLoopbackOwner(mapped); created.push(owner);
+        if (context.wslFacade) mapped = owner.registerAlias({ type: 'stdio', command: toWslPath(process.execPath),
+          args: [unpackPath(path.join(__dirname, 'host-mcp-stdio-relay.cjs')), mapped.url],
+          env: { ELECTRON_RUN_AS_NODE: '1', RELAY_MCP_LOOPBACK_AUTH: mapped.headers.Authorization,
+            WSLENV: 'ELECTRON_RUN_AS_NODE:RELAY_MCP_LOOPBACK_AUTH' },
+          ...(mapped.timeout !== undefined ? { timeout: mapped.timeout } : {}),
+          ...(mapped.alwaysLoad !== undefined ? { alwaysLoad: mapped.alwaysLoad } : {}),
+        });
+      }
       next.set(name, { key, mapped }); result[name] = mapped;
     }
     context.bridges = next;
     return result;
+    } catch (error) {
+      await Promise.allSettled(created.map(owner => owner.close()));
+      throw error;
+    }
   }
   async function run(args) { return String(await runFile(wslExecutable, args)).replace(/\0/g, '').trim(); }
   async function checkResources(servers = {}, resourceDir = configDir) {
@@ -108,8 +127,13 @@ function createAgentEnvironment(options = {}) {
         if (!fs.existsSync(linuxExecutable)) throw fail('WSL_RUNTIME_MISSING', 'Relay 的 Linux 运行时未安装，请重新安装当前版本。');
         const executable = toWslPath(linuxExecutable);
         const version = await run(['--distribution', wslDistribution, '--exec', executable, '--version']);
-        const expected = options.expectedVersion || '2.1.266';
-        if (!version.includes(expected)) throw fail('WSL_RUNTIME_VERSION', 'Relay 的 Linux 运行时版本不匹配，请重新安装当前版本。');
+        const expected = options.expectedVersion === undefined ? bundledClaudeVersion() : options.expectedVersion;
+        if (typeof expected !== 'string' || !/^\d+\.\d+\.\d+$/.test(expected)) {
+          throw fail('WSL_RUNTIME_VERSION_METADATA', 'Relay 的 SDK 版本信息无法读取，请重新安装当前版本。');
+        }
+        if (version.match(/^(\d+\.\d+\.\d+)(?:\s|$)/)?.[1] !== expected) {
+          throw fail('WSL_RUNTIME_VERSION', 'Relay 的 Linux 运行时版本不匹配，请重新安装当前版本。');
+        }
         if (!runtimeOnly) await checkResources(typeof options.getMcpServers === 'function' ? options.getMcpServers() : {});
         return { available: true, terminalAvailable, executable, wslExecutable, wslDistribution, version: expected };
       } catch (cause) {
@@ -125,19 +149,29 @@ function createAgentEnvironment(options = {}) {
     // queueing. A preference change must not mutate the launched task.
     const environment = input.env && input.env.RELAY_AGENT_ENVIRONMENT || getEnvironment();
     if (environment !== 'wsl') {
-      try { if (onPrepared) onPrepared(Object.freeze({ agentEnvironment: 'native', cwd: input.cwd || process.cwd() })); } catch (_) {}
-      return input;
+      // Use the same host bridge for local MCPs in both runtimes. Its input
+      // schema projection is exactly equivalent and stays valid when a live
+      // conversation switches models; no provider/model exceptions are needed.
+      const context = { cwd: input.cwd || process.cwd(), env: input.env,
+        loopback: options.loopbackMcp !== false, signal: input.abortController?.signal };
+      const mcpServers = await mapForContext(input.mcpServers, context);
+      const changed = Object.keys(mcpServers).some(name => mcpServers[name] !== input.mcpServers?.[name]);
+      const prepared = changed ? { ...input, mcpServers } : input;
+      mcpContexts.set(prepared, context);
+      try { if (onPrepared) onPrepared(Object.freeze({ agentEnvironment: 'native', cwd: context.cwd })); } catch (_) {}
+      return prepared;
     }
     const info = await probe({ runtimeOnly: true });
     if (!info.available) throw fail(info.code || 'WSL_UNAVAILABLE', info.reason);
     if (input.abortController && input.abortController.signal.aborted) throw fail('ABORT_ERR', '任务已取消。');
     const resourceDir = input.env && input.env.CLAUDE_CONFIG_DIR || configDir;
     await checkResources({}, resourceDir);
-    const mcpContext = { cwd: input.cwd || process.cwd(), env: input.env };
-    const mcpServers = mapForContext(input.mcpServers, mcpContext);
+    const mcpContext = { cwd: input.cwd || process.cwd(), env: input.env, loopback: options.loopbackMcp !== false,
+      wslFacade: true, signal: input.abortController?.signal };
+    const mcpServers = await mapForContext(input.mcpServers, mcpContext);
     const env = { ...input.env, RELAY_AGENT_ENVIRONMENT: 'wsl', CLAUDE_CONFIG_DIR: toWslPath(resourceDir) };
     for (const key of ['HOME', 'USERPROFILE', 'PATH', 'Path', 'TEMP', 'TMP', 'SHELL', 'COMSPEC', 'ComSpec', 'CLAUDE_CODE_GIT_BASH_PATH', 'NODE_OPTIONS', 'ELECTRON_RUN_AS_NODE']) delete env[key];
-    for (const key of ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'RELAY_SCRATCH_DIR']) if (env[key]) env[key] = translateValue(env[key]);
+    for (const key of ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'RELAY_SCRATCH_DIR', 'RELAY_OUTPUT_DIR']) if (env[key]) env[key] = translateValue(env[key]);
     // Tool subprocesses inherit the per-conversation scratch on Linux too.
     // Windows stdio MCP bridges keep mcpContext.env with native paths instead.
     if (env.RELAY_SCRATCH_DIR) env.TEMP = env.TMP = env.TMPDIR = env.RELAY_SCRATCH_DIR;
@@ -162,7 +196,7 @@ function createAgentEnvironment(options = {}) {
     }
     // The native Agent owns its prompt instead of a parent delegation message.
     // Translate the same authorized resource roots in either prompt surface.
-    const replacements = [...new Set([input.cwd, ...(input.additionalDirectories || []), resourceDir].filter(directory => typeof directory === 'string' && WINDOWS_PATH.test(directory)))].sort((a, b) => b.length - a.length);
+    const replacements = [...new Set([input.cwd, input.env?.RELAY_OUTPUT_DIR, ...(input.additionalDirectories || []), resourceDir].filter(directory => typeof directory === 'string' && WINDOWS_PATH.test(directory)))].sort((a, b) => b.length - a.length);
     function translatePrompt(value) {
       if (typeof value !== 'string') return value;
       for (const directory of replacements) {
@@ -194,7 +228,18 @@ function createAgentEnvironment(options = {}) {
       // WSL; the verified Linux runtime is the sole executable.
       if (args[0] === input.pathToClaudeCodeExecutable || args[0] === info.executable) args.shift();
       const pathFlags = new Set(['--add-dir', '--plugin-dir', '--plugin-dir-no-mcp', '--debug-file', '--settings', '--resume', '--session-debug-file']);
-      for (let index = 1; index < args.length; index++) if (pathFlags.has(args[index - 1]) && WINDOWS_PATH.test(args[index])) args[index] = toWslPath(args[index]);
+      // SDK 0.3.295+ emits named options as --flag=value. Keep the legacy
+      // split form too; only known path options may be translated, since
+      // prompts, model IDs and inline JSON settings can contain Windows paths.
+      for (let index = 0; index < args.length; index++) {
+        const separator = args[index].indexOf('=');
+        if (separator > 0 && pathFlags.has(args[index].slice(0, separator))) {
+          const value = args[index].slice(separator + 1);
+          if (WINDOWS_PATH.test(value)) args[index] = args[index].slice(0, separator + 1) + toWslPath(value);
+        } else if (index > 0 && pathFlags.has(args[index - 1]) && WINDOWS_PATH.test(args[index])) {
+          args[index] = toWslPath(args[index]);
+        }
+      }
       const launchEnv = { ...spawnOptions.env, ...env };
       // Only the OS loader's basic variables may be supplied outside SDK env.
       for (const key of ['SystemRoot', 'WINDIR']) if (!launchEnv[key] && hostEnv[key]) launchEnv[key] = hostEnv[key];
@@ -229,9 +274,8 @@ function createAgentEnvironment(options = {}) {
   }
   return { probe, prepareOptions, inspectSettings,
     async prepareMcpServers(servers, { environment, resourceDir, prepared } = {}) {
-      if (environment !== 'wsl') return servers;
-      await checkResources({}, resourceDir || configDir);
-      return mapForContext(servers, mcpContexts.get(prepared) || {});
+      if (environment === 'wsl') await checkResources({}, resourceDir || configDir);
+      return mapForContext(servers, mcpContexts.get(prepared) || { loopback: options.loopbackMcp !== false, wslFacade: environment === 'wsl' });
     },
   };
 }

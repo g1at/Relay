@@ -51,23 +51,26 @@ test('first paint work does not wait for settings and one settings snapshot init
 });
 
 test('switching conversation releases old transcript views without deleting live task data', () => {
-  const maps = [];
-  class TrackedWeakMap extends WeakMap { constructor() { super(); maps.push(this); } }
   const state = { items: [{ text: 'background work retained' }] };
   const turn = { user: 'original request', assistant: 'retained answer', activityEl: {} };
   const run = { turn, activityState: state, activityEl: {}, outputBubble: {}, errorEl: {}, supplementTimeline: { segments: new Map([['start', {}]]) } };
   let clears = 0, timerCleared = false;
   const host = { replaceChildren() { clears++; } };
   const context = vm.createContext({
-    window: {}, WeakMap: TrackedWeakMap, messagesEl: host, runs: new Map([['active', run]]),
+    window: {}, messagesEl: host, runs: new Map([['active', run]]),
     streamRenderTimer: 12, streamRenderBubble: {}, currentAssistantBubble: {},
     clearTimeout(id) { timerCleared = id === 12; },
   });
-  vm.runInContext(fs.readFileSync(path.join(renderer, 'activity-stream.js'), 'utf8'), context);
-  maps[0].set(host, new Map([['old-task', { elements: new Set([run.activityEl]) }]]));
+  // Expose the named registry in this fixture, independent of other WeakMap caches.
+  const activity = fs.readFileSync(path.join(renderer, 'activity-stream.js'), 'utf8');
+  assert.ok(activity.includes('const taskSummaryGroups = new WeakMap();'));
+  vm.runInContext(activity.replace('const taskSummaryGroups = new WeakMap();',
+    'const taskSummaryGroups = window.testSummaryGroups = new WeakMap();'), context);
+  const groups = context.window.testSummaryGroups;
+  groups.set(host, new Map([['old-task', { elements: new Set([run.activityEl]) }]]));
   vm.runInContext(between(source, 'function clearConversationMessages()', '// 渲染流式中的气泡:'), context);
   context.clearConversationMessages();
-  assert.equal(maps[0].has(host), false, 'permanent transcript host no longer retains detached groups');
+  assert.equal(groups.has(host), false, 'permanent transcript host no longer retains detached groups');
   assert.equal(clears, 1); assert.equal(timerCleared, true);
   assert.equal(context.runs.get('active'), run);
   assert.equal(run.activityState, state);

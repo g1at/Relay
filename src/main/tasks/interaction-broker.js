@@ -6,7 +6,7 @@ const path = require('node:path');
 const { normalizeElicitationSchema, validateElicitationContent, normalizeElicitationUrl } = require('./elicitation-schema');
 const { requiresMcpApproval } = require('../sdk/sdk-mcp-permissions');
 
-// SDK 0.3.250 contract notes (sdk.d.ts + sdk.mjs):
+// SDK 0.3.283 contract notes (sdk.d.ts + sdk.mjs):
 // - canUseTool may park without a deadline, and returning null means the host already replied
 //   out-of-band. Relay never returns null; every path resolves to an allow/deny PermissionResult.
 // - requestId can be redelivered after reconnect, so it is the idempotency key. toolUseID identifies
@@ -112,6 +112,16 @@ function nonEmptyString(value) {
 
 function optionalString(value) {
   return typeof value === 'string' && value ? value : null;
+}
+
+function copyMcpServer(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const field = (text, max) => typeof text === 'string' && text.trim()
+    && text.length <= max && !/[\x00-\x1f\x7f]/.test(text) ? text : null;
+  const name = field(value.name, 200), source = field(value.source, 100);
+  // These are SDK provenance metadata, not an authorization grant. Keep only
+  // the documented fields and never infer trusted provenance from a tool name.
+  return name && source ? { name, source } : null;
 }
 
 function isoTime(value) {
@@ -321,7 +331,8 @@ function independentMcpApproval(entry, options = {}) {
 }
 function modeAllowsPendingPermission(entry, options) {
   if (entry.kind !== INTERACTION_KINDS.PERMISSION || entry.matchedAskRule
-      || entry.decisionReason || independentMcpApproval(entry, options)
+      || entry.decisionReason || entry.defaultToNo || entry.suppressAlwaysAllowRule
+      || independentMcpApproval(entry, options)
       || ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode'].includes(entry.toolName)) return false;
   // blockedPath identifies a requested path, not a permanent deny rule. The
   // native SDK also sets it for ordinary Bash redirects inside the workspace.
@@ -551,6 +562,9 @@ class InteractionBroker {
       displayName: optionalString(sdkOptions && sdkOptions.displayName),
       description: optionalString(sdkOptions && sdkOptions.description),
       decisionReason: optionalString(sdkOptions && sdkOptions.decisionReason),
+      defaultToNo: sdkOptions.defaultToNo === true,
+      suppressAlwaysAllowRule: sdkOptions.suppressAlwaysAllowRule === true,
+      mcpServer: copyMcpServer(sdkOptions.mcpServer),
       blockedPath: optionalString(sdkOptions && sdkOptions.blockedPath),
       matchedAskRule: sanitizeForRenderer(sdkOptions && sdkOptions.matchedAskRule),
       mcpApprovalRequired: sdkOptions.relayMcpApprovalRequired === true,
@@ -714,6 +728,9 @@ class InteractionBroker {
     }
     if (independentMcpApproval(entry) && [PERMISSION_ACTIONS.ALLOW_SESSION, PERMISSION_ACTIONS.ALLOW_SUGGESTED].includes(action)) {
       throw new InteractionBrokerError('MCP_APPROVAL_REQUIRED', '此 MCP 始终逐项请求批准，请选择仅允许一次');
+    }
+    if (entry.suppressAlwaysAllowRule && [PERMISSION_ACTIONS.ALLOW_SESSION, PERMISSION_ACTIONS.ALLOW_SUGGESTED].includes(action)) {
+      throw new InteractionBrokerError('PERSISTENT_PERMISSION_SUPPRESSED', '此操作需要单独确认，请选择仅允许一次');
     }
     if (action === PERMISSION_ACTIONS.ALLOW_SESSION) {
       if (!entry.sessionSuggestions.length) {
@@ -880,6 +897,7 @@ class InteractionBroker {
     }
 
     const destinations = [...new Set(entry.suggestions.map((item) => item.destination))];
+    const canRemember = !entry.suppressAlwaysAllowRule && !independentMcpApproval(entry);
     return {
       ...common,
       permission: {
@@ -887,12 +905,15 @@ class InteractionBroker {
         displayName: entry.displayName || entry.toolName,
         description: entry.description || null,
         decisionReason: entry.decisionReason || null,
+        defaultToNo: entry.defaultToNo,
+        suppressAlwaysAllowRule: entry.suppressAlwaysAllowRule,
+        mcpServer: copyMcpServer(entry.mcpServer),
         blockedPath: entry.blockedPath || null,
         matchedAskRule: sanitizeForRenderer(entry.matchedAskRule),
         input: sanitizeForRenderer(entry.input),
-        canAllowForSession: !independentMcpApproval(entry) && entry.sessionSuggestions.length > 0,
-        canApplySuggestedPermissions: !independentMcpApproval(entry) && entry.suggestions.length > 0,
-        suggestedDestinations: independentMcpApproval(entry) ? [] : destinations,
+        canAllowForSession: canRemember && entry.sessionSuggestions.length > 0,
+        canApplySuggestedPermissions: canRemember && entry.suggestions.length > 0,
+        suggestedDestinations: canRemember ? destinations : [],
       },
     };
   }

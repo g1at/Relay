@@ -6,11 +6,32 @@
 })(typeof window === 'object' ? window : globalThis, function () {
   'use strict';
 
-  // Keep lexing the complete document: the next characters can close a fence,
-  // alter list/table boundaries, or define a reference used much earlier. Only
-  // parsing/highlighting and DOM creation are incremental, at lexer boundaries.
+  // Re-lex the unsettled tail of an append-only stream. Keep two complete
+  // non-space blocks in that tail: lists, tables, fences and setext headings can
+  // still change at its end. Reference definitions have document-wide meaning;
+  // any definition or non-append edit deliberately takes the complete lexer.
   function create({ marked, normalize = text => String(text || ''), fallback, prepareFragment }) {
     const states = new WeakMap();
+    // Callers may edit marked.defaults in place. Identity alone must not reuse
+    // a frozen prefix after breaks/gfm or a renderer method changes. Keep a
+    // small shallow snapshot of options and the configurable parser helpers.
+    const optionSnapshot = options => {
+      const fields = [marked.lexer, marked.parser];
+      for (const key of Object.keys(options || {}).sort()) {
+        const value = options[key]; fields.push(key, value);
+        if ((key === 'renderer' || key === 'tokenizer') && value && typeof value === 'object') {
+          for (const child of Object.keys(value).sort()) {
+            // Marked writes a fresh parser/lexer and generated rules here on
+            // every invocation; these are runtime cursors, not configuration.
+            if (['options', 'parser', 'lexer', 'rules'].includes(child)) continue;
+            fields.push(child, value[child]);
+          }
+        }
+      }
+      return fields;
+    };
+    const sameOptions = (previous, next) => previous?.length === next.length
+      && next.every((value, index) => previous[index] === value);
     const escape = text => String(text).replace(/[&<>"']/g, value => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[value]));
     const full = text => fallback ? fallback(text) : `<pre>${escape(text)}</pre>`;
     function fragment(body, html) {
@@ -46,12 +67,38 @@
         if (options?.hooks || options?.walkTokens || options?.extensions) {
           replaceFull(body, text); return;
         }
-        const tokens = marked.lexer(normalize(text), options);
-        const links = JSON.stringify(Object.entries(tokens.links || {}).sort(([a], [b]) => a.localeCompare(b)));
+        const source = normalize(text).replace(/\r\n|\r/g, '\n');
         const previous = states.get(body);
+        const optionsMatch = previous && previous.options === options && sameOptions(previous.optionSnapshot, optionSnapshot(options));
+        const customTokenizer = options?.tokenizer && (options.tokenizer.constructor !== marked.Tokenizer
+          || Object.keys(options.tokenizer).some(key => typeof options.tokenizer[key] === 'function'));
+        let prefixCount = 0, prefixLength = 0;
+        if (optionsMatch && !customTokenizer && previous.boundary > 0
+            && !previous.hasLinks && source.startsWith(previous.source)) {
+          prefixCount = previous.prefixCount; prefixLength = previous.boundary;
+        }
+        let tail = marked.lexer(source.slice(prefixLength), options);
+        if (prefixCount && Object.keys(tail.links || {}).length) {
+          prefixCount = 0; prefixLength = 0; tail = marked.lexer(source, options);
+        }
+        const tokens = prefixCount ? previous.tokens.slice(0, prefixCount).concat(tail) : tail;
+        tokens.links = tail.links;
+        // Lexer preprocessing/extension changes must never invalidate offsets.
+        // A definition consumes raw source without a visible token, for example.
+        const exactTail = tail.map(token => token.raw || '').join('') === source.slice(prefixLength);
+        let boundary = 0, nextPrefixCount = 0;
+        if (exactTail && !Object.keys(tokens.links || {}).length) {
+          let unsettledLength = 0, blocks = 0;
+          for (let index = tokens.length - 1; index >= 0; index -= 1) {
+            unsettledLength += tokens[index].raw.length;
+            if (tokens[index].type !== 'space') blocks += 1;
+            if (blocks === 2) { boundary = source.length - unsettledLength; nextPrefixCount = index; break; }
+          }
+        }
+        const links = JSON.stringify(Object.entries(tokens.links || {}).sort(([a], [b]) => a.localeCompare(b)));
         const reusable = new Map();
-        if (previous && previous.options === options && previous.links === links) {
-          for (const entry of previous.entries) {
+        if (optionsMatch && previous.links === links) {
+          for (const entry of previous.entries.slice(prefixCount)) {
             // Code-block enhancement or another owner may have wrapped nodes.
             // Such nodes must never be moved out of their external wrapper.
             if (entry.nodes.some(node => node.parentNode !== body)) continue;
@@ -60,8 +107,13 @@
             queue.entries.push(entry);
           }
         }
-        const entries = [];
-        for (const token of tokens) {
+        const entries = prefixCount ? previous.entries.slice(0, prefixCount) : [];
+        // If another owner wrapped a frozen node, rebuilding is safer than
+        // moving it out of that owner's DOM (for example final code controls).
+        if (entries.some(entry => entry.nodes.some(node => node.parentNode !== body))) {
+          states.delete(body); render(body, text); return;
+        }
+        for (const token of tokens.slice(prefixCount)) {
           // Include parsed inline structure, list looseness, and other token
           // metadata. Equal raw source alone is not a sufficient cache key.
           const signature = JSON.stringify(token);
@@ -84,7 +136,8 @@
           if (node === cursor) cursor = cursor.nextSibling;
           else body.insertBefore(node, cursor);
         }
-        states.set(body, { entries, links, options });
+        states.set(body, { entries, links, options, optionSnapshot: optionSnapshot(options), source, tokens, boundary, prefixCount: nextPrefixCount,
+          hasLinks: Object.keys(tokens.links || {}).length > 0 });
       } catch (_) {
         replaceFull(body, text);
       }

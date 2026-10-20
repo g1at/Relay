@@ -5,9 +5,10 @@ const fs = require('fs');
 // Disk access, project projection and native title sync remain separate services.
 function registerHistoryIpc({
   ipcMain, history, projects, nativeHistory, isMiniChatActive,
-  saveConversation, deleteConversation, genId, protectSdkMetadata,
+  saveConversation, deleteConversation, genId, protectSdkMetadata, assertConversationAvailable = () => {}, searchService = null,
+  hydrateConversation = value => value,
 }) {
-  const { readHistoryIndex, loadConversation, persistConversationRecord, convFilePath, forEachConversation } = history;
+  const { readHistoryIndex, loadConversation, persistConversationRecord, convFilePath } = history;
   ipcMain.handle('history:list', () => {
     projects.initialize();
     // 列表只读索引,零正文 IO(v2 目录式存储的核心收益)
@@ -61,9 +62,11 @@ function registerHistoryIpc({
     return { ok: true, title: c.title };
   });
 
-  ipcMain.handle('history:load', (_e, id) => projects.projectConversation(loadConversation(id)));
+  ipcMain.handle('history:load', async (_e, id) => projects.projectConversation(await hydrateConversation(loadConversation(id))));
 
   ipcMain.handle('history:save', (_e, conv) => {
+    try { if (conv?.id) assertConversationAvailable(conv.id); }
+    catch (error) { return { ok: false, code: error.code, error: error.message }; }
     if (isMiniChatActive(conv.id)) {
       return { error: '这个对话正在快捷小窗中运行，请在小窗中继续补充要求。', code: 'MINI_TURN_ACTIVE' };
     }
@@ -83,72 +86,41 @@ function registerHistoryIpc({
       permissionLegacyPlan: conv.permissionLegacyPlan, executionMode: conv.executionMode };
   });
 
-  ipcMain.handle('history:delete', (_e, id) => {
-    deleteConversation(id);
-    return { ok: true };
+  ipcMain.handle('history:delete', async (_e, id) => {
+    try { return await deleteConversation(id) || { ok: true }; }
+    catch (error) { return { ok: false, code: error.code || 'CONVERSATION_DELETE_FAILED', error: error.message }; }
   });
 
-  // 会话全文搜索:在标题 + 对话正文(chat 的 user/assistant、create 的 prompt)里
-  //   做大小写不敏感子串匹配。目录式存储下按 updatedAt 新→旧逐文件扫描,凑满 cap 即提前停 ——
-  //   扫描序与结果序一致,无需再排序。个人量级(几百会话)全扫也在毫秒级,无需 DB/FTS5。
-  //   返回命中会话 {id,title,kind,mode,fromScheduled,updatedAt,snippet,matchField},按 updatedAt 倒序。
-  ipcMain.handle('history:search', (_e, { query, limit } = {}) => {
-    const q = String(query || '').trim();
-    if (!q) return { ok: true, items: [] };
-    const qLower = q.toLowerCase();
-    const cap = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
-    // 在一段文本里找命中,返回前后约 30 字的片段 + 用 \x00…\x01 包裹命中词(前端转 <mark>)
-    const SNIP = 30;
-    const makeSnippet = (text) => {
-      const t = String(text || '');
-      const idx = t.toLowerCase().indexOf(qLower);
-      if (idx < 0) return null;
-      const start = Math.max(0, idx - SNIP);
-      const end = Math.min(t.length, idx + q.length + SNIP);
-      let s = t.slice(start, end);
-      // 在片段内把命中词(可能多处)用哨兵包裹
-      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-      s = s.replace(re, (m) => '\x00' + m + '\x01');
-      return (start > 0 ? '…' : '') + s + (end < t.length ? '…' : '');
-    };
-
-    const results = [];
+  let search = searchService;
+  const senders = new WeakSet();
+  const clientId = event => {
+    const sender = event?.sender;
+    const id = sender?.id == null ? 'default' : String(sender.id);
+    if (sender && typeof sender.once === 'function' && !senders.has(sender)) {
+      senders.add(sender);
+      sender.once('destroyed', () => search?.cancel(id));
+    }
+    return id;
+  };
+  const getSearch = () => search ||= new (require('./history-search-client').HistorySearchClient)({ historyDir: history.getHistoryDir() });
+  ipcMain.handle('history:search', async (event, { query, limit } = {}) => {
+    const source = clientId(event);
     try {
-      forEachConversation((c) => {
-        const kind = c.kind || 'chat';
-        let snippet = null, matchField = null;
-        // 命中正文时记下定位:turnIndex = 命中所在 turn 的下标;matchSide = 命中在该 turn 的哪一侧
-        //   (user / assistant / prompt),供前端打开会话后精确滚动到那条消息。标题命中则保持 null。
-        let turnIndex = null, matchSide = null;
-        // 标题
-        if ((c.title || '').toLowerCase().includes(qLower)) { snippet = makeSnippet(c.title); matchField = 'title'; }
-        // 正文(首条命中即可)
-        if (!snippet) {
-          const turns = c.turns || [];
-          for (let ti = 0; ti < turns.length; ti++) {
-            const t = turns[ti];
-            const fields = kind === 'create' ? [['prompt', t.prompt]] : [['user', t.user], ['assistant', t.assistant]];
-            for (const [side, f] of fields) {
-              if (f && String(f).toLowerCase().includes(qLower)) {
-                snippet = makeSnippet(f); matchField = 'body'; turnIndex = ti; matchSide = side; break;
-              }
-            }
-            if (snippet) break;
-          }
+      const result = await getSearch().search(query, limit, source);
+      if (!result.ok || result.canceled) return result;
+      // A deletion can start while the worker is searching. Its durable
+      // admission barrier also excludes the result from this late reply.
+      return { ...result, items: result.items.filter(item => {
+        try { assertConversationAvailable(item.id); return true; } catch (error) {
+          if (['CONVERSATION_DELETED', 'CONVERSATION_DELETING', 'INVALID_CONVERSATION_ID'].includes(error.code)) return false;
+          throw error;
         }
-        if (snippet) {
-          results.push({
-            id: c.id, title: c.title || '未命名', kind, mode: c.mode || 'plain',
-            fromScheduled: c.fromScheduled || null, updatedAt: c.updatedAt || c.createdAt || '',
-            snippet, matchField, turnIndex, matchSide,
-          });
-        }
-        return results.length < cap;   // 凑满即提前终止扫描
-      });
-    } catch (_) { return { ok: true, items: [] }; }
-    return { ok: true, items: results };
+      }) };
+    } catch (_) { return { ok: false, items: [], code: 'HISTORY_SEARCH_FAILED', error: '搜索暂时不可用，请重试。' }; }
   });
+  ipcMain.handle('history:search:cancel', event => ({ ok: true, canceled: search?.cancel(clientId(event)) || false }));
+  return { close: () => search?.close() };
+
 
 
 }

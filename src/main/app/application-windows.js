@@ -5,6 +5,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 const { appRoot } = require('./paths');
 const { isQuickChatEnabled, normalizeQuickChatPatch } = require('./mini-window-host');
+const { attachResponsivenessDiagnostics } = require('./responsiveness-diagnostics');
 
 // This owner keeps all native window/tray state in one place. Runtime services
 // are callbacks, so constructing the owner never starts a task or an SDK session.
@@ -259,6 +260,7 @@ function createApplicationWindows({
         spellcheck: false,            // 关掉所有 input/textarea 的拼写红线
       },
     });
+    attachResponsivenessDiagnostics({ win, logger, runningCount: () => tasks.runningCount(), powerMonitor: electron.powerMonitor });
     const entryFile = path.join(appRoot, 'renderer/index.html');
     win.relayContentReady = Promise.resolve(win.loadFile(entryFile));
     // Keep a handled readiness promise for the first-run handoff. A failed
@@ -331,26 +333,33 @@ function createApplicationWindows({
 
   // Web links honor the saved browser destination, including legacy shell calls
   // from the mini window. Never navigate the application document itself.
-  async function openConfiguredWebLink(url) {
+  async function openConfiguredWebLink(url, options) {
+    const conversationId = options?.conversationId || null;
+    // Legacy callers without a chat cannot present an isolated internal tab.
+    // Do not create an invisible tab or guess the currently selected chat.
+    if (!conversationId) {
+      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) throw Error('网页链接无效');
+      await shell.openExternal(url);
+      return { ok: true, external: true, url };
+    }
     if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createMainWindow({ showOnReady: false });
     const target = mainWindow;
     await target.relayContentReady;
     if (target !== mainWindow || target.isDestroyed()) throw Error('浏览器页面尚未就绪，请重试');
-    const response = await browser.openLink(url);
+    const response = await browser.openLink(url, { conversationId });
     if (!response || response.ok === false) throw Error(response?.error || '无法打开链接');
     if (response.tab) showMainWindow();
     return response;
   }
 
-  // Keep the native navigation fallback consistent with ordinary Markdown clicks.
+  // Native navigation lacks the explicit conversation carried by Markdown clicks.
   function attachExternalLinkGuard(win, entryFile) {
     require('../projects/local-preview-guard').attachLocalPreviewGuard(win.webContents);
     const allowedLocalUrl = entryFile ? pathToFileURL(entryFile).href.replace(/[?#].*$/, '') : '';
     const openExternalSafe = (url) => {
       if (!/^https?:\/\//i.test(url) && !/^mailto:/i.test(url)) return;
-      const open = win === mainWindow && /^https?:\/\//i.test(url)
-        ? () => openConfiguredWebLink(url) : () => shell.openExternal(url);
-      void Promise.resolve().then(open).catch(error => logger.warn('[browser] 无法打开链接:', error.message));
+      // An unknown origin uses the system browser instead of an ownerless tab.
+      void Promise.resolve().then(() => shell.openExternal(url)).catch(error => logger.warn('[browser] 无法打开链接:', error.message));
     };
     // target="_blank" / window.open
     win.webContents.setWindowOpenHandler(({ url }) => {

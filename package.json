@@ -27,6 +27,7 @@
     "test:window-chrome": "electron test/window-chrome-smoke.cjs",
     "test:mini-chat": "electron test/mini-chat-smoke.cjs",
     "test:mini-windows": "electron test/mini-window-host-smoke.cjs",
+    "test:orb-geometry": "electron test/orb-window-geometry-smoke.cjs",
     "test:provider-runtime": "node test/provider-runtime-smoke.cjs",
     "test:sdk-input-priority": "node test/sdk-input-priority-smoke.cjs",
     "test:provider-model-policy": "node test/provider-model-policy-smoke.cjs",
@@ -54,6 +55,10 @@
     "test:scrollbars": "electron test/scrollbars-smoke.cjs",
     "test:browser-host": "electron test/browser-panel-host-smoke.cjs",
     "test:browser-ipc": "electron test/browser-panel-ipc-smoke.cjs",
+    "test:browser-automation": "electron test/browser-automation-smoke.cjs",
+    "test:browser-automation-ui": "electron test/browser-automation-ui-smoke.cjs",
+    "test:browser-automation-workflow": "electron test/browser-automation-workflow-smoke.cjs",
+    "test:browser-automation-downloads": "electron test/browser-automation-download-smoke.cjs",
     "test:browser-profile": "electron test/browser-profile-smoke.cjs",
     "test:browser-settings": "electron test/browser-settings-page-smoke.cjs",
     "test:workspace-browser": "electron test/workspace-tabs-browser-smoke.cjs",
@@ -79,16 +84,26 @@
     "test:taskbar-badges": "electron test/taskbar-completion-badge-smoke.cjs",
     "test:packaged-app": "electron test/packaged-application-smoke.cjs",
     "test:installer-upgrade": "node test/installer-upgrade-integration.cjs",
-    "test:installer-regression": "node build/test-installer-regression.cjs"
+    "test:installer-regression": "node build/test-installer-regression.cjs",
+    "test:browser-complex:prepare": "node test/prepare-browser-complex.cjs",
+    "test:browser-complex": "electron test/browser-complex-components-smoke.cjs",
+    "test:browser-alignment": "node test/browser-alignment-unit-runner.cjs",
+    "test:browser-oopif": "electron test/browser-oopif-smoke.cjs",
+    "test:browser-annotations": "electron test/browser-annotations-smoke.cjs",
+    "test:browser-input-takeover": "electron test/browser-input-takeover-smoke.cjs",
+    "test:browser-public-sites": "electron test/browser-public-sites-smoke.cjs",
+    "test:browser-capabilities": "electron test/browser-capabilities-smoke.cjs",
+    "test:browser-capabilities-oopif": "electron test/browser-capabilities-oopif-smoke.cjs",
+    "build:sdk-process-tree": "node build/build-sdk-process-tree.cjs"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.266",
+    "@anthropic-ai/claude-agent-sdk": "0.3.299",
     "@anthropic-ai/sdk": "0.115.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "electron-updater": "^6.3.9",
+    "js-yaml": "4.1.1",
     "node-pty": "1.1.0",
-    "zod": "4.4.3",
-    "js-yaml": "4.1.1"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@xterm/addon-fit": "0.11.0",
@@ -144,7 +159,8 @@
         "filter": [
           "**/*"
         ]
-      }
+      },
+      "src/main/sdk/native/**/*"
     ],
     "extraResources": [
       {
@@ -168,6 +184,8 @@
       }
     ],
     "asarUnpack": [
+      "src/main/app/history-search-worker.js",
+      "src/main/app/history-search-core.js",
       "src/main/app/paths.js",
       "src/main/tasks/task-progress-worker.js",
       "src/main/tasks/task-progress-store.js",
@@ -185,6 +203,7 @@
       "src/main/usage/usage-stats-service.js",
       "src/main/usage/usage-stats-worker.js",
       "src/main/sdk/sdk-settings-probe.cjs",
+      "src/main/sdk/host-mcp-stdio-relay.cjs",
       "src/main/sdk/sdk-runtime-policy.js",
       "src/main/sdk/relay-instructions.js",
       "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
@@ -192,7 +211,8 @@
       "src/main/sdk/sdk-session-history-worker.cjs",
       "src/main/sdk/sdk-task-resources.js",
       "src/main/sdk/sdk-runtime-preferences.js",
-      "renderer/taskbar-badges/native/*.node"
+      "renderer/taskbar-badges/native/*.node",
+      "src/main/sdk/native/**/*"
     ],
     "win": {
       "target": [

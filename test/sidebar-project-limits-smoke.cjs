@@ -51,6 +51,7 @@ const seed=String.raw`(()=>{
     timesMatch(){return this.initialTimes.every(([id,ts])=>records.get(id).updatedAt===ts);},
   };
   window.api=new Proxy(base,{get(target,key){
+    if(key==='runClaude'&&state.holdLaunch)return(...args)=>new Promise((resolve,reject)=>{state.pendingLaunch={args,resolve,reject};});
     if(key==='projects')return{list:async()=>({ok:true,projects:clone(projects),workspace:'D:\\Synthetic\\Relay'})};
     if(key==='history')return new Proxy(target.history,{get(original,method){
       if(method==='list')return async()=>clone([...records.values()]);
@@ -112,6 +113,29 @@ app.whenReady().then(async()=>{
   await check('switchingConversationKeepsIndependentExpandedLists',"limitRowsVisible(0)===8&&limitRowsVisible(1)===5&&limitNormalProjectsVisible()===9&&sidebarLimitFixture.writes.length===0");
   await clickNode('limitProjectMore(0)');
   await check('projectConversationCollapseReturnsToFive',"limitRowsVisible(0)===5&&limitProjectMore(0).getAttribute('aria-expanded')==='false'");
+  // Exercise the production refresh/reconcile path with runtime state that is
+  // deliberately absent from persisted history. The oldest fixture rows start
+  // below the five-row preview; idle manual pins must not hide active work.
+  await act("sidebarLimitFixture.activityOrder=[...limitProject(0).querySelectorAll('.history-item')].map(e=>e.dataset.id);sidebarLimitFixture.projectOrder=[...document.querySelectorAll('.history-project')].map(e=>e.dataset.projectId);sidebarLimitFixture.eighthId=sidebarLimitFixture.members[0][7];sidebarLimitFixture.sixthId=sidebarLimitFixture.members[0][5];sidebarLimitFixture.creationId=sidebarLimitFixture.members[0][6];");
+  await check('inactiveSixthAndEighthRowsBeginBelowProjectPreview',"sidebarLimitFixture.activityOrder.indexOf(sidebarLimitFixture.sixthId)===5&&sidebarLimitFixture.activityOrder.indexOf(sidebarLimitFixture.eighthId)===7&&limitRow(sidebarLimitFixture.sixthId).hidden&&limitRow(sidebarLimitFixture.eighthId).hidden&&limitProjectMore(0).getAttribute('aria-expanded')==='false'");
+  await act("runs.set(sidebarLimitFixture.eighthId,{jobId:'synthetic-project-eighth'});");await evaluate('refreshHistoryList()');await settle();
+  await act("sidebarLimitFixture.eighthSpinner=limitRow(sidebarLimitFixture.eighthId).querySelector('.hi-spinner');");
+  await check('runningEighthRowMovesAboveIdlePinsIntoVisibleProjectPreview',"limitProject(0).querySelector('.history-item').dataset.id===sidebarLimitFixture.eighthId&&!limitRow(sidebarLimitFixture.eighthId).hidden&&limitVisible(limitRow(sidebarLimitFixture.eighthId))&&limitRowsVisible(0)===5&&!!sidebarLimitFixture.eighthSpinner&&limitRow(sidebarLimitFixture.eighthId).classList.contains('running')");
+  await check('runtimePromotionKeepsProjectDirectoriesPinsAndCollapsedPreview',"JSON.stringify([...document.querySelectorAll('.history-project')].map(e=>e.dataset.projectId))===JSON.stringify(sidebarLimitFixture.projectOrder)&&limitProject(0)===sidebarLimitFixture.originalProjects[0]&&limitProjectMore(0).getAttribute('aria-expanded')==='false'&&sidebarLimitFixture.records.get(sidebarLimitFixture.members[0][0]).pinned&&sidebarLimitFixture.records.get(sidebarLimitFixture.members[0][2]).pinned&&sidebarLimitFixture.pinWrites.length===0");
+  await act("runs.set(sidebarLimitFixture.sixthId,{jobId:'synthetic-project-sixth'});");await evaluate('refreshHistoryList()');await settle();
+  await act("sidebarLimitFixture.sixthSpinner=limitRow(sidebarLimitFixture.sixthId).querySelector('.hi-spinner');");
+  await check('multipleRunningRowsKeepOriginalActivityOrderAheadOfIdlePins',"[...limitProject(0).querySelectorAll('.history-item')].slice(0,4).map(e=>e.dataset.id).join(',')===[sidebarLimitFixture.sixthId,sidebarLimitFixture.eighthId,sidebarLimitFixture.members[0][0],sidebarLimitFixture.members[0][2]].join(',')&&!limitRow(sidebarLimitFixture.sixthId).hidden&&limitRowsVisible(0)===5");
+  await evaluate('refreshHistoryList()');await settle();
+  await check('repeatedRuntimeRefreshKeepsEveryRowAndRunningSpinnerIdentity',"[...sidebarLimitFixture.originalRows].every(([id,row])=>limitRow(id)===row)&&limitRow(sidebarLimitFixture.eighthId).querySelector('.hi-spinner')===sidebarLimitFixture.eighthSpinner&&limitRow(sidebarLimitFixture.sixthId).querySelector('.hi-spinner')===sidebarLimitFixture.sixthSpinner");
+  await act("cvJobs.set(sidebarLimitFixture.creationId,{runId:'synthetic-project-creation',turnIndex:0,restored:true});");await evaluate('refreshHistoryList()');await settle();
+  await check('creationJobsShareRunningPriorityWithChatJobs',"[...limitProject(0).querySelectorAll('.history-item')].slice(0,3).map(e=>e.dataset.id).join(',')===[sidebarLimitFixture.sixthId,sidebarLimitFixture.creationId,sidebarLimitFixture.eighthId].join(',')&&limitRow(sidebarLimitFixture.creationId).classList.contains('running')&&!!limitRow(sidebarLimitFixture.creationId).querySelector('.hi-spinner')&&!limitRow(sidebarLimitFixture.creationId).hidden&&!runs.has(sidebarLimitFixture.creationId)");
+  await clickNode('limitProjectMore(0)');
+  await act("runs.delete(sidebarLimitFixture.sixthId);");await evaluate('refreshHistoryList()');await settle();
+  await check('oneFinishedRunDropsBelowRemainingRunsWhileExpansionPersists',"[...limitProject(0).querySelectorAll('.history-item')].slice(0,4).map(e=>e.dataset.id).join(',')===[sidebarLimitFixture.creationId,sidebarLimitFixture.eighthId,sidebarLimitFixture.members[0][0],sidebarLimitFixture.members[0][2]].join(',')&&!limitRow(sidebarLimitFixture.sixthId).classList.contains('running')&&!limitRow(sidebarLimitFixture.sixthId).querySelector('.hi-spinner')&&limitRow(sidebarLimitFixture.eighthId).querySelector('.hi-spinner')===sidebarLimitFixture.eighthSpinner&&limitProjectMore(0).getAttribute('aria-expanded')==='true'&&limitRowsVisible(0)===8");
+  await act("runs.delete(sidebarLimitFixture.eighthId);cvJobs.delete(sidebarLimitFixture.creationId);");await evaluate('refreshHistoryList()');await settle();
+  await check('allFinishedRunsRestoreOriginalPinsAndActivityOrder',"JSON.stringify([...limitProject(0).querySelectorAll('.history-item')].map(e=>e.dataset.id))===JSON.stringify(sidebarLimitFixture.activityOrder)&&[sidebarLimitFixture.sixthId,sidebarLimitFixture.eighthId,sidebarLimitFixture.creationId].every(id=>!limitRow(id).classList.contains('running')&&!limitRow(id).querySelector('.hi-spinner'))&&limitRowsVisible(0)===8");
+  await clickNode('limitProjectMore(0)');
+  await check('runtimeOrderingNeverWritesHistoryOrChangesProjectExpansionElsewhere',"sidebarLimitFixture.writes.length===0&&sidebarLimitFixture.pinWrites.length===0&&sidebarLimitFixture.timesMatch()&&limitRowsVisible(0)===5&&limitRowsVisible(1)===5&&limitNormalProjectsVisible()===9&&JSON.stringify([...document.querySelectorAll('.history-project')].map(e=>e.dataset.projectId))===JSON.stringify(sidebarLimitFixture.projectOrder)&&[...sidebarLimitFixture.originalRows].every(([id,row])=>limitRow(id)===row)");
   await clickNode('limitProjectMore(2)');
   await clickNode("limitProject(2).querySelector('.project-chevron')");
   await check('collapsingProjectHeaderHidesItsConversationBody',"limitProject(2).querySelector('.history-group-items').hidden&&limitProject(2).querySelector('.project-chevron').getAttribute('aria-expanded')==='false'&&limitProject(2).querySelector('.project-name > svg').dataset.folderState==='closed'");
@@ -160,5 +184,27 @@ app.whenReady().then(async()=>{
     }
   }
   await check('finalViewStillContainsEveryHistoryWithoutPresentationWrites',"document.querySelectorAll('.history-item').length===93&&new Set([...document.querySelectorAll('.history-item')].map(e=>e.dataset.id)).size===93&&sidebarLimitFixture.writes.length===0&&sidebarLimitFixture.pinWrites.length===4&&sidebarLimitFixture.timesMatch()&&uiFixture.errors.length===0");
+  // The real send path may be rejected before any SDK event arrives. Hold its
+  // fixture launch long enough to observe the spinner, then reject it and rely
+  // on production cleanup to repaint; do not call refreshHistoryList here.
+  await evaluate('loadConversation(sidebarLimitFixture.sixthId)');await settle();
+  await act("sidebarLimitFixture.holdLaunch=true;sidebarLimitFixture.failedSendPromise=send({explicit:true,prompt:'Synthetic launch rejection for sidebar ordering',files:[]}).then(result=>(sidebarLimitFixture.failedSendResult=result));");
+  await waitFor('sidebarLimitFixture.pendingLaunch&&runs.has(sidebarLimitFixture.sixthId)&&limitProject(0).querySelector(".history-item").dataset.id===sidebarLimitFixture.sixthId');
+  await check('realSendRegistersVisibleRunningRowBeforeLaunchResolves',"!!limitRow(sidebarLimitFixture.sixthId).querySelector('.hi-spinner')&&limitRow(sidebarLimitFixture.sixthId).classList.contains('running')&&!limitRow(sidebarLimitFixture.sixthId).hidden&&sidebarLimitFixture.writes.length===1&&sidebarLimitFixture.pendingLaunch.args[9]===sidebarLimitFixture.sixthId");
+  await act("sidebarLimitFixture.holdLaunch=false;sidebarLimitFixture.pendingLaunch.resolve({error:'Synthetic launch rejected'});");
+  await evaluate('sidebarLimitFixture.failedSendPromise');
+  await waitFor('!runs.has(sidebarLimitFixture.sixthId)&&!limitRow(sidebarLimitFixture.sixthId).querySelector(".hi-spinner")');await settle();
+  await check('launchFailureAutomaticallyRemovesSpinnerAndRestoresProjectOrder',"sidebarLimitFixture.failedSendResult?.ok===false&&sidebarLimitFixture.failedSendResult.error==='Synthetic launch rejected'&&!limitRow(sidebarLimitFixture.sixthId).classList.contains('running')&&JSON.stringify([...limitProject(0).querySelectorAll('.history-item')].map(e=>e.dataset.id))===JSON.stringify(sidebarLimitFixture.activityOrder)&&limitRow(sidebarLimitFixture.sixthId).hidden&&limitRowsVisible(0)===5");
+  await check('launchFailurePersistsOnlyItsTurnAndReusesSidebarNodes',"sidebarLimitFixture.writes.length===2&&sidebarLimitFixture.writes.every(conv=>conv.id===sidebarLimitFixture.sixthId)&&sidebarLimitFixture.records.get(sidebarLimitFixture.sixthId).turns.at(-1).error==='Synthetic launch rejected'&&sidebarLimitFixture.pinWrites.length===4&&sidebarLimitFixture.timesMatch()&&[...sidebarLimitFixture.originalRows].every(([id,row])=>limitRow(id)===row)&&document.querySelectorAll('.history-item').length===93&&uiFixture.errors.length===0");
+  // Automatic retry has a separate launch path; an IPC rejection must use its
+  // normal failure cleanup even when no result object or SDK event is emitted.
+  await act("sidebarLimitFixture.pendingLaunch=null;sidebarLimitFixture.holdLaunch=true;sidebarLimitFixture.retryFinished=false;sidebarLimitFixture.failedRetryPromise=relaunchWithoutResume(currentConv,'Synthetic automatic retry for sidebar ordering',[]).then(()=>{sidebarLimitFixture.retryFinished=true;});");
+  await waitFor('sidebarLimitFixture.pendingLaunch&&runs.has(sidebarLimitFixture.sixthId)&&limitProject(0).querySelector(".history-item").dataset.id===sidebarLimitFixture.sixthId');
+  await check('realRetryPromotesItsRunningRowBeforeLaunchResolves',"!sidebarLimitFixture.retryFinished&&!!limitRow(sidebarLimitFixture.sixthId).querySelector('.hi-spinner')&&limitRow(sidebarLimitFixture.sixthId).classList.contains('running')&&!limitRow(sidebarLimitFixture.sixthId).hidden&&sidebarLimitFixture.writes.length===3&&sidebarLimitFixture.pendingLaunch.args[9]===sidebarLimitFixture.sixthId");
+  await act("sidebarLimitFixture.holdLaunch=false;sidebarLimitFixture.pendingLaunch.reject(new Error('Synthetic retry rejected'));");
+  await evaluate('sidebarLimitFixture.failedRetryPromise');
+  await waitFor('!runs.has(sidebarLimitFixture.sixthId)&&!limitRow(sidebarLimitFixture.sixthId).querySelector(".hi-spinner")');await settle();
+  await check('retryIpcRejectionAutomaticallyClearsRuntimeStateAndRestoresOrder',"sidebarLimitFixture.retryFinished&&!jobToConv.has(sidebarLimitFixture.pendingLaunch.args[11])&&!limitRow(sidebarLimitFixture.sixthId).classList.contains('running')&&JSON.stringify([...limitProject(0).querySelectorAll('.history-item')].map(e=>e.dataset.id))===JSON.stringify(sidebarLimitFixture.activityOrder)&&limitRow(sidebarLimitFixture.sixthId).hidden&&limitRowsVisible(0)===5");
+  await check('retryRejectionPersistsOnlyItsFailureAndKeepsSidebarIdentity',"sidebarLimitFixture.writes.length===4&&sidebarLimitFixture.writes.every(conv=>conv.id===sidebarLimitFixture.sixthId)&&sidebarLimitFixture.records.get(sidebarLimitFixture.sixthId).turns.at(-1).error==='Synthetic retry rejected'&&sidebarLimitFixture.pinWrites.length===4&&sidebarLimitFixture.timesMatch()&&[...sidebarLimitFixture.originalRows].every(([id,row])=>limitRow(id)===row)&&document.querySelectorAll('.history-item').length===93&&uiFixture.errors.length===0");
   save();console.log(JSON.stringify({passed:Object.values(checks).filter(Boolean).length,errors}));clearTimeout(timeout);app.exit(0);
 }).catch(async error=>{errors.push(String(error.stack||error));try{await capture('failure')}catch{}save();console.error(error);clearTimeout(timeout);app.exit(1)});

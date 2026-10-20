@@ -13,10 +13,10 @@ const sdkPackage = JSON.parse(fs.readFileSync(
 const { bundledClaudeVersion, bundledExecutable, _buildOptions } = require('../src/main/sdk/claude-sdk');
 
 test('Relay pins Claude Agent SDK and bundled Claude Code to the reviewed release', () => {
-  assert.equal(relayPackage.dependencies['@anthropic-ai/claude-agent-sdk'], '0.3.266');
-  assert.equal(sdkPackage.version, '0.3.266');
-  assert.equal(sdkPackage.claudeCodeVersion, '2.1.266');
-  assert.equal(bundledClaudeVersion(), '2.1.266');
+  assert.equal(relayPackage.dependencies['@anthropic-ai/claude-agent-sdk'], '0.3.299');
+  assert.equal(sdkPackage.version, '0.3.299');
+  assert.equal(sdkPackage.claudeCodeVersion, '2.1.299');
+  assert.equal(bundledClaudeVersion(), '2.1.299');
 });
 
 test('installed platform runtime resolves to an existing executable', (t) => {

@@ -8,6 +8,7 @@ const { LiveTurnRouter } = require('../src/main/live/live-turn-router');
 const { LiveAsyncAgentTracker, LiveBackgroundTaskTracker, liveResultDisposition } = require('../src/main/live/live-async-agent-tracker');
 const supplements = require('../src/main/live/live-supplement-input');
 const { SdkSessionObserver, backgroundOwnedTask, observeOwnedBackgroundTasks, RouteTimingHistory } = require('../src/main/sdk/sdk-session-observer');
+const { withSessionDiagnostics } = require('../src/main/sdk/sdk-session-diagnostic-event');
 const { resourceEntries, mergeResources } = require('../src/main/sdk/sdk-task-resources');
 const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -20,7 +21,7 @@ function declaration(name) {
 }
 function harness() {
   const records = new Map([[ids.conv, { id: ids.conv, title: 'Synthetic task', updatedAt: '2026-01-01T00:00:00.000Z', pinned: true, sessionId: 'same-sdk-session', turns: [{ runId: ids.run, user: 'original request', assistant: '' }] }]]);
-  const events = [], pushes = [], kills = [], writes = [], rejected = [];
+  const events = [], pushes = [], kills = [], writes = [], rejected = [], reads = [];
   const liveSessions = new Map(), ledger = new Map(), jobs = new Map();
   const observer = new SdkSessionObserver();
   const sess = { observer, launchSpec: { cwd: '/synthetic' }, convId: ids.conv, jobId: ids.run, busy: true, dead: false,
@@ -30,12 +31,12 @@ function harness() {
     child: { push(text, metadata) { pushes.push({ text, metadata }); return true; } },
   };
   sess.turnRouter.begin(ids.run);liveSessions.set(ids.conv, sess);
-  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock, ...supplements, observer, resourceEntries, mergeResources, routeTimingHistory: new RouteTimingHistory(), sess, convId: ids.conv, liveSessions, jobs, liveTombstones: new Map(),
+  const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock, ...supplements, observer, withSessionDiagnostics, resourceEntries, mergeResources, routeTimingHistory: new RouteTimingHistory(), sess, convId: ids.conv, liveSessions, jobs, liveTombstones: new Map(),
     readAppSettings: () => ({ followUpMode: 'steer' }),
     liveResultDisposition, observeOwnedBackgroundTasks, console: { log() {}, warn() {}, error() {} },
     taskLedger: { get: id => ledger.get(id) || null }, isTerminalState: value => ['succeeded', 'failed', 'canceled'].includes(value),
     liveTurnControls: { isStopping: () => false }, interactionBroker: { rejectTask: (...args) => rejected.push(args) }, checkpointManager: null,
-    loadConversation: id => records.has(id) ? clone(records.get(id)) : null,
+    loadConversation: id => { reads.push(id); return records.has(id) ? clone(records.get(id)) : null; },
     persistConversationRecord: value => { records.set(value.id, clone(value)); writes.push(clone(value)); },
     fs: { existsSync: id => records.has(id) }, convFilePath: id => id,
     TITLE_MAX_W: 64, truncateByWidth: text => text,
@@ -51,7 +52,7 @@ function harness() {
   const end = source.indexOf('  const canUseTool = ', start);
   vm.runInContext(source.slice(start, end) + '\nglobalThis.ingest=onMessage;globalThis.exit=onExit;', context);
   const input = (messageId=ids.first, prompt='supplemental request') => ({ jobId: ids.run, conversationId: ids.conv, messageId, prompt, files: [], skill: null });
-  return { context, sess, records, events, pushes, kills, writes, ledger, jobs, liveSessions, input,
+  return { context, sess, records, events, pushes, kills, writes, reads, ledger, jobs, liveSessions, input,
     steer: value => context.steerLiveTurn(value || input()), ingest: event => context.ingest(event),
     saved: () => records.get(ids.conv), final: () => events.filter(event => event.type === 'job-done'),
   };
@@ -435,4 +436,43 @@ test('success with a denied tool waits for a user-backgrounded task already in p
   h.ingest({ type: 'system', subtype: 'task_notification', task_id: task.taskId, tool_use_id: task.toolUseId, status: 'completed' });
   h.ingest(result(undefined, { ...denial, user_message_uuid: undefined, origin: { kind: 'task-notification' }, result: 'completed reply' }));
   assert.equal(h.final().length, 1); assert.equal(h.pushes.length, 0);
+});
+
+
+test('native task resources and provenance share one latest-record write and identical replay writes nothing', () => {
+  const h = harness(); h.sess.sessionId = ids.other;
+  const task = foregroundTask(h, { name: 'Agent', toolUseId: 'owned-agent-call', taskId: 'owned-agent-task' });
+  const saved = h.saved();
+  saved.turns.push({ runId: 'newer-placeholder', user: 'later visible input', assistant: '' });
+  saved.turns[0].assistant = 'latest visible answer';
+  h.reads.length = 0; h.writes.length = 0;
+  const notification = { type: 'system', subtype: 'task_notification', task_id: task.taskId,
+    tool_use_id: task.toolUseId, status: 'completed', output_file: '/synthetic/result.txt' };
+  h.ingest(notification);
+  assert.equal(h.reads.length, 1); assert.equal(h.writes.length, 1);
+  assert.equal(h.saved().sdkSessionContext.sessionId, ids.other);
+  assert.deepEqual(h.saved().turns[0].sdkAgentIds, [task.taskId]);
+  assert.equal(h.saved().sdkTaskResources[0].uri, '/synthetic/result.txt');
+  assert.equal(h.saved().turns[0].assistant, 'latest visible answer');
+  assert.equal(h.saved().turns[1].user, 'later visible input');
+  assert.equal(h.saved().updatedAt, '2026-01-01T00:00:00.000Z');
+  h.reads.length = 0; h.writes.length = 0;
+  h.ingest(notification);
+  assert.equal(h.reads.length, 1); assert.equal(h.writes.length, 0);
+  assert.equal(h.sess.taskResources.length, 1);
+  h.ingest({ ...notification, resource_links: [{ uri: '/synthetic/result.txt', name: 'renamed output' }] });
+  assert.equal(h.writes.length, 1, 'a changed resource name must still persist');
+  assert.equal(h.saved().sdkTaskResources[0].name, 'renamed output');
+});
+
+test('persisted tool-output paths without a task notification also deduplicate full-history writes', () => {
+  const h = harness(); h.sess.sessionId = ids.other;
+  foregroundTask(h, { toolUseId: 'owned-output', taskId: 'owned-output-task' });
+  const event = { type: 'user', tool_use_result: { persistedOutputPath: '/synthetic/large-output.txt' },
+    message: { content: [{ type: 'tool_result', tool_use_id: 'owned-output', content: 'stored output' }] } };
+  h.reads.length = 0; h.writes.length = 0;
+  h.ingest(event);
+  assert.equal(h.reads.length, 1); assert.equal(h.writes.length, 1);
+  assert.equal(h.saved().sdkTaskResources[0].uri, '/synthetic/large-output.txt');
+  h.ingest(event); assert.equal(h.writes.length, 1);
 });

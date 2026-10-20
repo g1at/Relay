@@ -10,15 +10,127 @@ const OTHER = '10000000-0000-4000-8000-000000000002';
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-workspaces-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
-  const conversations = new Map(), writes = [];
+  const conversations = new Map(), writes = [], reads = [];
   const registryPath = path.join(home, 'app-data', 'conversation-workspaces.json');
   const options = { homeDir: home, registryPath,
-    loadConversation: (id) => conversations.get(id) || null,
+    loadConversation: (id) => { reads.push(id); return conversations.get(id) || null; },
     persistConversationRecord: (conv) => { writes.push(conv); conversations.set(conv.id, conv); },
     getAgentProjectRoot: () => path.join(home, 'agent-install'),
   };
-  return { home, registryPath, conversations, writes, options, service: createConversationWorkspaces(options) };
+  return { home, registryPath, conversations, writes, reads, options, service: createConversationWorkspaces(options) };
 }
+
+test('managed workspaces register persistent outputs while keeping cwd, old files and scratch separate', t => {
+  const f = fixture(t);
+  const first = f.service.resolveWorkspace({ conversationId: ID });
+  assert.equal(first.outputDir, path.join(first.cwd, 'outputs'));
+  assert.ok(fs.statSync(first.outputDir).isDirectory());
+  fs.writeFileSync(path.join(first.cwd, 'old-report.md'), 'legacy file remains');
+  fs.writeFileSync(path.join(first.outputDir, 'report.md'), 'delivery');
+  const restarted = createConversationWorkspaces(f.options);
+  const next = restarted.resolveWorkspace({ conversationId: ID, workingDir: first.cwd });
+  assert.equal(next.outputDir, first.outputDir);
+  assert.equal(next.cwd, first.cwd);
+  assert.equal(fs.readFileSync(path.join(first.cwd, 'old-report.md'), 'utf8'), 'legacy file remains');
+  assert.equal(restarted.fileLocations(ID).outputDir, first.outputDir);
+  assert.notEqual(next.scratchDir, next.outputDir);
+  assert.equal(f.writes.length, 0, 'adding outputs must not rewrite conversation history or activity times');
+});
+
+test('project directories remain the delivery context without creating an outputs tree or moving sources', t => {
+  const f = fixture(t), project = path.join(f.home, 'project');
+  fs.mkdirSync(project); fs.writeFileSync(path.join(project, 'source.js'), 'existing source');
+  const result = f.service.resolveWorkspace({ conversationId: ID, workingDir: project });
+  assert.equal(result.cwd, project); assert.equal(result.outputDir, project);
+  assert.equal(result.managed, false);
+  assert.deepEqual(fs.readdirSync(project), ['source.js']);
+});
+
+test('legacy managed registry upgrades on resolution without rearranging existing files', t => {
+  const f = fixture(t), cwd = path.join(f.home, 'RelayProjects', ID);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(path.join(cwd, 'old.py'), 'process or deliverable; do not guess');
+  fs.mkdirSync(path.dirname(f.registryPath), { recursive: true });
+  fs.writeFileSync(f.registryPath, JSON.stringify({ version: 1, items: { [ID]: { cwd, managed: true } } }));
+  const upgraded = createConversationWorkspaces(f.options);
+  assert.equal(upgraded.fileLocations(ID).outputDir, null, 'read-only listing must not allocate directories');
+  assert.equal(fs.existsSync(path.join(cwd, 'outputs')), false);
+  const resolved = upgraded.resolveWorkspace({ conversationId: ID });
+  assert.equal(resolved.outputDir, path.join(cwd, 'outputs'));
+  assert.equal(fs.readFileSync(path.join(cwd, 'old.py'), 'utf8'), 'process or deliverable; do not guess');
+});
+
+test('output paths and contents survive scratch root migration and registry restart', async t => {
+  const f = fixture(t), workspace = f.service.resolveWorkspace({ conversationId: ID });
+  fs.writeFileSync(path.join(workspace.outputDir, 'keep.txt'), 'durable result');
+  fs.writeFileSync(path.join(workspace.scratchDir, 'temporary.txt'), 'temporary');
+  const target = path.join(f.home, 'other-drive-fixture');
+  const migration = await f.service.migrateScratch(ID, target);
+  assert.equal(migration.migrated, true);
+  const restarted = createConversationWorkspaces(f.options).resolveWorkspace({ conversationId: ID });
+  assert.equal(restarted.outputDir, workspace.outputDir);
+  assert.equal(restarted.scratchDir, migration.path);
+  assert.equal(fs.readFileSync(path.join(restarted.outputDir, 'keep.txt'), 'utf8'), 'durable result');
+});
+
+test('managed output directory rejects redirected folders and non-directory collisions', t => {
+  for (const kind of ['file', 'link']) {
+    const f = fixture(t), cwd = path.join(f.home, 'RelayProjects', ID), external = path.join(f.home, 'external');
+    fs.mkdirSync(cwd, { recursive: true }); fs.mkdirSync(external);
+    const output = path.join(cwd, 'outputs');
+    if (kind === 'file') fs.writeFileSync(output, 'keep collision');
+    else {
+      try { fs.symlinkSync(external, output, 'junction'); }
+      catch (error) { if (error.code === 'EPERM') continue; throw error; }
+    }
+    assert.throws(() => f.service.resolveWorkspace({ conversationId: ID }), /成果目录/);
+    assert.deepEqual(fs.readdirSync(external), []);
+    if (kind === 'file') assert.equal(fs.readFileSync(output, 'utf8'), 'keep collision');
+  }
+});
+
+test('managed outputs cannot contain the configured scratch allocation', t => {
+  const f = fixture(t), output = path.join(f.home, 'RelayProjects', ID, 'outputs');
+  const service = createConversationWorkspaces({ ...f.options, getScratchBaseDir: () => output });
+  assert.throws(() => service.resolveWorkspace({ conversationId: ID }), /成果目录/);
+});
+
+test('shared projectless fork cwd retains the registered outputs but has independent scratch', t => {
+  const f = fixture(t), original = f.service.resolveWorkspace({ conversationId: ID });
+  const fork = f.service.resolveWorkspace({ conversationId: OTHER, workingDir: original.cwd });
+  assert.equal(fork.cwd, original.cwd); assert.equal(fork.managed, false);
+  assert.equal(fork.outputDir, original.outputDir);
+  assert.notEqual(fork.scratchDir, original.scratchDir);
+  const restarted = createConversationWorkspaces(f.options).resolveWorkspace({ conversationId: OTHER, workingDir: original.cwd });
+  assert.equal(restarted.outputDir, original.outputDir);
+});
+
+test('a legacy fork opened before its managed parent still inherits the dedicated output directory', t => {
+  const f = fixture(t), cwd = path.join(f.home, 'RelayProjects', ID);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.dirname(f.registryPath), { recursive: true });
+  fs.writeFileSync(f.registryPath, JSON.stringify({ version: 1, items: {
+    [ID]: { cwd, managed: true }, [OTHER]: { cwd, managed: false },
+  } }));
+  const upgraded = createConversationWorkspaces(f.options);
+  const fork = upgraded.resolveWorkspace({ conversationId: OTHER, workingDir: cwd });
+  assert.equal(fork.outputDir, path.join(cwd, 'outputs'));
+  assert.equal(fork.managed, false);
+  assert.equal(upgraded.fileLocations(ID).outputDir, null, 'do not rewrite the unopened parent');
+  const parent = upgraded.resolveWorkspace({ conversationId: ID });
+  assert.equal(parent.outputDir, fork.outputDir);
+  assert.notEqual(parent.scratchDir, fork.scratchDir);
+});
+
+test('invalidated-session home placeholders do not turn an explicit project into managed outputs', t => {
+  const f = fixture(t);
+  f.service.invalidateConversationSession(ID, 'old-home-session');
+  const other = f.service.resolveWorkspace({ conversationId: OTHER, workingDir: f.home });
+  assert.equal(other.managed, false); assert.equal(other.outputDir, f.home);
+  const original = f.service.resolveWorkspace({ conversationId: ID, workingDir: f.home });
+  assert.equal(original.managed, false); assert.equal(original.outputDir, f.home);
+  assert.equal(fs.existsSync(path.join(f.home, 'outputs')), false);
+});
 
 test('draft, execution and restarted resolver use one stable per-conversation default directory', (t) => {
   const f = fixture(t);
@@ -272,4 +384,87 @@ test('scratch cannot alias a sibling conversation even when both remain under th
   const target = path.join(path.dirname(other), ID);
   fs.symlinkSync(other, target, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => f.service.resolveScratch(ID), /其他会话/);
+});
+
+
+test('settled workspace acknowledgements do not read history on later assistant frames', t => {
+  const f = fixture(t);
+  f.conversations.set(ID, { id: ID, workingDir: f.home, updatedAt: 'unchanged', turns: [{ assistant: 'visible history' }] });
+  assert.equal(f.service.resolveWorkspace({ conversationId: ID }).needsContext, false);
+  f.reads.length = 0;
+  for (let i = 0; i < 300; i++) assert.equal(f.service.markContextCarried(ID), false);
+  assert.equal(f.reads.length, 0); assert.equal(f.writes.length, 0);
+  f.service.invalidateConversationSession(ID, 'retired');
+  f.reads.length = 0;
+  assert.equal(f.service.markContextCarried(ID), true);
+  for (let i = 0; i < 300; i++) assert.equal(f.service.markContextCarried(ID), false);
+  assert.equal(f.reads.length, 1); assert.equal(f.conversations.get(ID).updatedAt, 'unchanged');
+  assert.equal(f.service.acceptsSession(ID, 'retired'), false);
+});
+
+test('admission imports a legacy workspace marker even when the directory did not change', t => {
+  const f = fixture(t), original = { id: ID, workingDir: f.home, updatedAt: 'old', turns: [{ assistant: 'history' }] };
+  f.conversations.set(ID, original);
+  assert.equal(f.service.resolveWorkspace({ conversationId: ID }).needsContext, false);
+  f.conversations.set(ID, { ...original, carryContextOnNextTurn: 'workspace' });
+  const restarted = createConversationWorkspaces(f.options);
+  assert.equal(restarted.resolveWorkspace({ conversationId: ID }).needsContext, true);
+  assert.equal(restarted.markContextCarried(ID), true);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, undefined);
+  assert.equal(restarted.resolveWorkspace({ conversationId: ID }).needsContext, false);
+  f.conversations.set(ID, { ...original, carryContextOnNextTurn: 'provider' });
+  assert.equal(restarted.resolveWorkspace({ conversationId: ID }).needsContext, false);
+  assert.equal(restarted.markContextCarried(ID), false);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, 'provider', 'model-switch markers belong to their existing completion path');
+});
+
+for (const failure of ['throw', 'refuse']) test(`failed history carry acknowledgement remains retryable (${failure})`, t => {
+  const f = fixture(t);
+  f.conversations.set(ID, { id: ID, workingDir: f.home, carryContextOnNextTurn: 'workspace', updatedAt: 'old', turns: [{ assistant: 'history' }] });
+  let failing = true;
+  const service = createConversationWorkspaces({ ...f.options, persistConversationRecord: record => {
+    if (failing) { if (failure === 'throw') throw Error('synthetic write failure'); return false; }
+    return f.options.persistConversationRecord(record);
+  } });
+  assert.equal(service.resolveWorkspace({ conversationId: ID }).needsContext, true);
+  if (failure === 'throw') assert.throws(() => service.markContextCarried(ID), /synthetic write/);
+  else assert.equal(service.markContextCarried(ID), false);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, 'workspace');
+  failing = false;
+  assert.equal(service.markContextCarried(ID), true);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, undefined);
+  assert.equal(f.conversations.get(ID).updatedAt, 'old');
+  f.reads.length = 0; assert.equal(service.markContextCarried(ID), false); assert.equal(f.reads.length, 0);
+});
+
+test('unreadable history keeps workspace carry pending until a later frame can acknowledge it', t => {
+  const f = fixture(t);
+  f.conversations.set(ID, { id: ID, workingDir: f.home, carryContextOnNextTurn: 'workspace', updatedAt: 'old', turns: [] });
+  let unreadable = false;
+  const service = createConversationWorkspaces({ ...f.options, loadConversation: id => unreadable ? null : f.options.loadConversation(id) });
+  assert.equal(service.resolveWorkspace({ conversationId: ID }).needsContext, true);
+  unreadable = true;
+  assert.equal(service.markContextCarried(ID), false);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, 'workspace');
+  unreadable = false;
+  assert.equal(service.markContextCarried(ID), true);
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, undefined);
+  assert.equal(f.conversations.get(ID).updatedAt, 'old');
+  f.reads.length = 0;
+  assert.equal(service.markContextCarried(ID), false);
+  assert.equal(f.reads.length, 0);
+});
+
+test('registry carry acknowledgement failure retries after the history marker has already been cleared', t => {
+  const f = fixture(t);
+  f.conversations.set(ID, { id: ID, workingDir: f.home, carryContextOnNextTurn: 'workspace', updatedAt: 'old', turns: [] });
+  f.service.resolveWorkspace({ conversationId: ID });
+  fs.mkdirSync(f.registryPath + '.tmp');
+  assert.throws(() => f.service.markContextCarried(ID));
+  assert.equal(f.conversations.get(ID).carryContextOnNextTurn, undefined);
+  assert.equal(f.writes.length, 1);
+  fs.rmSync(f.registryPath + '.tmp', { recursive: true });
+  assert.equal(f.service.markContextCarried(ID), true);
+  assert.equal(f.writes.length, 1);
+  assert.equal(createConversationWorkspaces(f.options).resolveWorkspace({ conversationId: ID }).needsContext, false);
 });

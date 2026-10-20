@@ -25,7 +25,7 @@ function ui() {
   const calls = [], saved = [], notices = [], routes = tiers.map(t => route(t.value));
   const conv = { id: 'history-a', model: 'haiku', sessionId: 'session-a', sessionProviderId: 'fixture', sessionProviderRevision: 1 };
   const context = {
-    console, Map, Object,
+    console, Map, Object, runs: new Map(),
     currentConv: conv, currentModel: 'haiku', currentEffort: null, currentSessionId: conv.sessionId,
     supportedClaudeModels: [clone(sdkAlias)], supportedClaudeProviderId: 'fixture',
     claudeRuntimeUIRevision: 0, claudeRuntimeReadRevision: 0, pendingClaudeRuntimeSelection: null,
@@ -135,7 +135,7 @@ test('runtime effort belongs to its actual model and explicit null clears saved 
   assert.equal(h.context.currentEffort, null);
 });
 
-test('late model success persists only the originating conversation and never clears another session', async () => {
+test('late model success never saves an old conversation snapshot or clears another session', async () => {
   const h = ui(), pending = deferred();
   h.context.window.api.setClaudeRuntime = () => pending.promise;
   const request = h.context.selectModelTier(tiers[1]);
@@ -143,8 +143,8 @@ test('late model success persists only the originating conversation and never cl
   h.context.currentModel = 'haiku'; h.context.currentSessionId = 'session-b';
   pending.resolve({ ok: true, restartRequired: true, providerId: 'another', providerRevision: 1 });
   await request;
-  assert.equal(h.saved[0].id, 'history-a'); assert.equal(h.saved[0].model, 'opus');
-  assert.equal(h.saved[0].carryContextOnNextTurn, 'provider');
+  assert.deepEqual(h.saved, []);
+  assert.equal(h.conv.model, 'haiku'); assert.equal(h.conv.sessionId, 'session-a');
   assert.deepEqual(other, { id: 'history-b', model: 'haiku' });
   assert.equal(h.context.currentSessionId, 'session-b'); assert.deepEqual(h.notices, []);
 });
@@ -170,19 +170,20 @@ test('runtime reads during pending selection cannot overwrite effort or leave it
   assert.equal(h.context.currentEffort, null); assert.equal(h.context.btnModelSwitch.disabled, false);
 });
 
-test('effort success after navigation only persists its source conversation', async () => {
+test('effort success after navigation never writes the old conversation snapshot', async () => {
   const h = ui(), pending = deferred();
   h.context.currentModel = 'opus'; h.context.supportedClaudeModels = [remote];
   h.context.window.api.setClaudeRuntime = () => pending.promise;
   const request = h.context.selectEffortLevel('high');
   h.context.currentConv = { id: 'history-b', model: 'haiku' }; h.context.currentModel = 'haiku'; h.context.currentEffort = 'low';
   pending.resolve({ ok: true, applied: true, effort: 'high' }); await request;
-  assert.equal(h.saved[0].id, 'history-a'); assert.equal(h.saved[0].effort, 'high');
+  assert.deepEqual(h.saved, []); assert.equal(h.conv.effort, undefined);
   assert.equal(h.context.currentConv.effort, undefined); assert.equal(h.context.currentEffort, 'low');
 });
 
 function backend() {
   const calls = [], routes = tiers.map(t => route(t.value));
+  let record = { id: 'history-a', model: 'haiku', sessionId: 'session-a', updatedAt: '2026-09-28T07:00:00.000Z', turns: [] };
   const sess = { convId: 'history-a', busy: false, dead: false,
     launchSpec: { model: routes[0].modelId, routeTier: 'haiku', providerId: 'fixture', providerRevision: 1, effort: null },
     child: { supportedModels: async () => [clone(sdkAlias)], setModel: async value => calls.push(['model', value]), applyFlagSettings: async value => calls.push(['effort', clone(value)]) },
@@ -199,6 +200,9 @@ function backend() {
     },
     killLiveSession: async (value, reason) => { calls.push(['kill', reason]); value.dead = true; context.liveSessions.delete(value.convId); },
     ipcMain: { handle(name, fn) { assert.equal(name, 'claude:setRuntime'); handler = fn; } },
+    runtimeMetadataWriter: require('../src/main/app/conversation-mutations').createRuntimeMetadataWriter({
+      load: () => clone(record), persist: value => { record = clone(value); },
+    }),
   };
   vm.createContext(context);
   for (const name of ['relayModelTier', 'activeRelayProviderRuntime', 'publicModelInfo', 'readSupportedModels', 'sessionFingerprint']) vm.runInContext(declaration(main, name), context);
@@ -206,7 +210,8 @@ function backend() {
   const end = main.indexOf('\nasync function waitForLiveTurnIdle(', start);
   assert.ok(start >= 0 && end > start);
   vm.runInContext(main.slice(start, end), context);
-  return { context, sess, calls, routes, run: options => handler(null, { convId: sess.convId, model: 'opus', ...options }) };
+  return { context, sess, calls, routes, get record() { return clone(record); },
+    run: options => handler(null, { convId: sess.convId, model: 'opus', ...options }) };
 }
 
 test('real main handler switches a restored same-provider custom model absent from SDK aliases', async () => {
@@ -260,4 +265,50 @@ test('no live session uses the same configured target while an old instance cann
   h.context.liveSessions.set(h.sess.convId, h.sess);
   h.sess.child.supportedModels = async () => { h.context.liveSessions.set(h.sess.convId, { dead: false }); return [sdkAlias]; };
   assert.equal((await h.run()).ok, false); assert.deepEqual(h.calls, []);
+});
+
+test('queued return to the original model reapplies it after an obsolete SDK mutation finishes', async () => {
+  const h = backend(), entered = deferred(), release = deferred();
+  const original = h.sess.launchSpec.model;
+  let actualModel = original;
+  h.sess.child.setModel = async value => {
+    h.calls.push(['model', value]);
+    if (h.calls.length === 1) { entered.resolve(); await release.promise; }
+    actualModel = value;
+  };
+  const oldSelection = h.run({ model: 'opus' });
+  await entered.promise;
+  const latestSelection = h.run({ model: 'haiku' });
+  assert.deepEqual(h.calls, [['model', remote.value]]);
+  release.resolve();
+  assert.equal((await oldSelection).stale, true);
+  assert.equal((await latestSelection).applied, true);
+  assert.deepEqual(h.calls, [['model', remote.value], ['model', original]]);
+  assert.equal(actualModel, original);
+  assert.equal(h.sess.launchSpec.model, original);
+  assert.equal(h.record.model, 'haiku');
+  assert.equal(h.record.updatedAt, '2026-09-28T07:00:00.000Z');
+});
+
+test('queued return to default effort reapplies it after an obsolete SDK flag mutation finishes', async () => {
+  const h = backend(), entered = deferred(), release = deferred();
+  h.sess.launchSpec.model = remote.value;
+  let actualEffort = null;
+  h.sess.child.applyFlagSettings = async value => {
+    h.calls.push(['effort', clone(value)]);
+    if (h.calls.length === 1) { entered.resolve(); await release.promise; }
+    actualEffort = value.effortLevel;
+  };
+  const oldSelection = h.run({ effort: 'high' });
+  await entered.promise;
+  const latestSelection = h.run({ effort: null });
+  assert.deepEqual(h.calls, [['effort', { effortLevel: 'high' }]]);
+  release.resolve();
+  assert.equal((await oldSelection).stale, true);
+  assert.equal((await latestSelection).applied, true);
+  assert.deepEqual(h.calls, [['effort', { effortLevel: 'high' }], ['effort', { effortLevel: null }]]);
+  assert.equal(actualEffort, null);
+  assert.equal(h.sess.launchSpec.effort, null);
+  assert.equal(h.record.effort, null);
+  assert.equal(h.record.updatedAt, '2026-09-28T07:00:00.000Z');
 });

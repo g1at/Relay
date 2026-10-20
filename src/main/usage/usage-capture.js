@@ -15,12 +15,14 @@ function numericUsage(value, fields) {
   return Object.keys(result).length ? result : null;
 }
 
-// One observer per query() invocation. A resumed SDK session starts a new
-// query; cumulative modelUsage must never be keyed by session_id alone.
+// One observer per query() invocation. New runtimes restore historical counters
+// on resume/fork; subtract a pre-input baseline before publishing query-local
+// totals. Old journal records remain query-local and need no reinterpretation.
 // Only numbers and opaque identifiers cross this boundary, never transcript
 // text, tool arguments, credentials, or SDK-computed dollar estimates.
 function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new Date().toISOString(),
-  checkpointIntervalMs = 5000, checkpointTimeoutMs = 2000, clock = Date.now } = {}) {
+  checkpointIntervalMs = 5000, checkpointTimeoutMs = 2000, clock = Date.now,
+  inheritedCounters = false } = {}) {
   const startedAt = now();
   let resetSessionId = null;
   let sessionId = null;
@@ -34,6 +36,11 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
   let inFlight = null;
   let lastRequestedAt = -Infinity;
   let checkpointHighWater = Object.create(null);
+  let baseline = Object.create(null);
+  let baselineState = inheritedCounters ? 'required' : 'ready';
+  let baselineWork = null;
+  let cancelBaseline = null;
+  let usageIncomplete = false;
   const retiredSessions = new Set();
   const resetIds = new Set();
   const resultIds = new Set();
@@ -54,6 +61,39 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
     }
     return models;
   };
+  const completeSnapshot = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const models = modelsFor(value, true);
+    // An empty object is a valid zero baseline. Partial/malformed models are
+    // not a trustworthy historical baseline, even if another model is valid.
+    return Object.keys(value).every(model => model === '<synthetic>' || Object.hasOwn(models, model)) ? models : null;
+  };
+  const markIncomplete = () => {
+    if (usageIncomplete || closed || typeof onUsage !== 'function') return;
+    usageIncomplete = true;
+    publish({ queryId, startedAt, sessionId, resultId: `baseline-unavailable:${generation}`,
+      at: now(), modelUsage: {}, usageIncomplete: true });
+  };
+  const localModels = value => {
+    const models = modelsFor(value);
+    if (baselineState !== 'ready') {
+      // Never treat a missing baseline as zero. The first complete snapshot
+      // becomes a conservative baseline; earlier spending remains unknown.
+      markIncomplete();
+      const first = completeSnapshot(value);
+      if (first === null || !Object.keys(first).length) return Object.create(null);
+      baseline = first; baselineState = 'ready';
+      return Object.create(null);
+    }
+    const local = Object.create(null);
+    for (const [model, counters] of Object.entries(models)) {
+      const inherited = baseline[model];
+      local[model] = Object.fromEntries(Object.entries(counters).map(([field, total]) =>
+        [field, Math.max(0, total - (inherited?.[field] || 0))]));
+      if (usageIncomplete && !TOKEN_FIELDS.some(field => local[model][field] > 0)) delete local[model];
+    }
+    return local;
+  };
   const remember = models => {
     let changed = false;
     for (const [model, value] of Object.entries(models)) {
@@ -69,7 +109,7 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
   };
   const clearTimer = () => { clearTimeout(timer); timer = null; };
   const schedule = () => {
-    if (closed || disabled || !active || !query || !sessionId || timer || inFlight) return;
+    if (closed || disabled || ['required', 'preparing'].includes(baselineState) || !active || !query || !sessionId || timer || inFlight) return;
     timer = setTimeout(sample, Math.max(0, interval - (clock() - lastRequestedAt)));
     timer.unref?.();
   };
@@ -96,10 +136,10 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
       return query[CHECKPOINT_METHOD]({ skipBehaviors: true });
     }).then(value => {
       if (closed || disabled || inFlight !== token || token.generation !== generation || token.sessionId !== sessionId) return;
-      const modelUsage = modelsFor(value?.session?.model_usage, true);
+      const modelUsage = localModels(value?.session?.model_usage);
       if (!remember(modelUsage)) return;
       publish({ queryId, startedAt, sessionId: token.sessionId, resultId: `checkpoint:${++sequence}`,
-        at: now(), modelUsage, usage: null, isError: false });
+        at: now(), modelUsage, usage: null, isError: false, ...(usageIncomplete ? { usageIncomplete: true } : {}) });
     }).catch(() => { if (!closed && token.generation === generation) disabled = true; }).finally(() => {
       clearTimeout(token.timer);
       if (inFlight === token) inFlight = null;
@@ -120,8 +160,10 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
       if (event.uuid) resetIds.add(event.uuid);
       if (sessionId && sessionId !== event.new_conversation_id) retiredSessions.add(sessionId);
       generation++;
+      cancelBaseline?.();
       clearTimer();
       active = false;
+      baseline = Object.create(null); baselineState = 'ready'; usageIncomplete = false;
       checkpointHighWater = Object.create(null);
       lastRequestedAt = -Infinity;
       // The result wrapper can lag behind a reset. Attribute new cumulative
@@ -151,19 +193,21 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
     if (event.type !== 'result') return;
     const resultId = typeof event.uuid === 'string' ? event.uuid.slice(0, 256) : null;
     if (resultId && resultIds.has(resultId)) return;
+    // Even a snapshot used only as an unknown baseline has been consumed. A
+    // replay after /clear must not turn its inherited counters into new usage.
+    if (resultId) resultIds.add(resultId);
     active = Number(event.queued_turn_count) > 0;
     if (!active) clearTimer();
-    const modelUsage = modelsFor(event.modelUsage);
+    const modelUsage = localModels(event.modelUsage);
     const usage = numericUsage(event.usage, TURN_FIELDS);
     if (!Object.keys(modelUsage).length && !usage) return;
-    if (resultId) resultIds.add(resultId);
     remember(modelUsage);
     const record = {
       queryId, startedAt,
       isError: event.is_error === true || (typeof event.subtype === 'string' && event.subtype.startsWith('error')),
       sessionId: resetSessionId || (typeof event.session_id === 'string' ? event.session_id.slice(0, 256) : null),
       resultId,
-      at: now(), modelUsage, usage,
+      at: now(), modelUsage, usage, ...(usageIncomplete ? { usageIncomplete: true } : {}),
     };
     publish(record);
   };
@@ -173,8 +217,47 @@ function createUsageObserver(onUsage, { queryId = randomUUID(), now = () => new 
     query = value;
     schedule();
   };
+  // Call once after native initialization, before releasing the first prompt.
+  // No collector/new session means no extra control request. Never reject chat
+  // startup for optional metrics; callers still check their cancellation signal.
+  observe.prepareBaseline = (value, { signal, timeoutMs = checkpointTimeoutMs } = {}) => {
+    if (closed || typeof onUsage !== 'function' || baselineState === 'ready') return Promise.resolve({ status: 'ready' });
+    if (baselineWork) return baselineWork;
+    baselineState = 'preparing';
+    const epoch = generation;
+    baselineWork = new Promise(resolve => {
+      let settled = false, deadline;
+      const done = (status, models) => {
+        if (settled) return;
+        settled = true; clearTimeout(deadline); signal?.removeEventListener('abort', canceled);
+        if (cancelBaseline === canceled) cancelBaseline = null;
+        if (!closed && epoch === generation) {
+          if (status === 'ready' && baselineState === 'preparing') { baseline = models; baselineState = 'ready'; }
+          else if (baselineState === 'ready') { /* A concurrent snapshot already established a conservative baseline. */ }
+          else { baselineState = 'unavailable'; markIncomplete(); }
+        }
+        resolve({ status });
+      };
+      const canceled = () => { disabled = true; done('canceled'); };
+      cancelBaseline = canceled;
+      if (signal?.aborted) { canceled(); return; }
+      signal?.addEventListener('abort', canceled, { once: true });
+      if (!value || typeof value[CHECKPOINT_METHOD] !== 'function') { done('unavailable'); return; }
+      deadline = setTimeout(() => { disabled = true; done('unavailable'); }, Math.max(1, Math.min(Number(timeoutMs) || 2000, 10000)));
+      Promise.resolve().then(() => {
+        if (settled || closed || epoch !== generation) return null;
+        return value[CHECKPOINT_METHOD]({ skipBehaviors: true });
+      }).then(result => {
+        if (settled) return;
+        const models = completeSnapshot(result?.session?.model_usage);
+        done(models === null ? 'unavailable' : 'ready', models);
+      }, () => { disabled = true; done('unavailable'); });
+    });
+    return baselineWork;
+  };
   observe.stop = () => {
     disabled = true; active = false; generation++;
+    cancelBaseline?.();
     clearTimer();
     if (inFlight) clearTimeout(inFlight.timer);
     inFlight = null; query = null;

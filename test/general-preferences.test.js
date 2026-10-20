@@ -86,6 +86,63 @@ test('workspace root validates a writable existing folder without creating or mo
   await assert.rejects(f.service.validatePatch({ workspaceRoot: file }), /文件夹/);
   assert.deepEqual(await f.service.validatePatch({ workspaceRoot: '' }), { workspaceRoot: '' });
 });
+test('scratch root uses the authoritative app data default and remains independent of task folders', async t => {
+  const f = fixture(t, { platform: 'win32', homeDir: 'C:\\Users\\Fixture', userDataDir: 'D:\\Relay Data' });
+  assert.equal(f.service.preferences().scratchRoot, '');
+  assert.equal(f.service.preferences().defaultScratchRoot, 'D:\\Relay Data\\conversation-scratch');
+  assert.equal(f.service.scratchRoot(), 'D:\\Relay Data\\conversation-scratch');
+  f.state.workspaceRoot = 'E:\\Task Outputs';
+  assert.equal(f.service.scratchRoot(), 'D:\\Relay Data\\conversation-scratch');
+  f.state.scratchRoot = 'F:\\Temporary Work';
+  assert.equal(f.service.scratchRoot(), 'F:\\Temporary Work');
+  assert.equal(f.service.workspaceRoot(), 'E:\\Task Outputs');
+  assert.equal((await f.service.get()).preferences.defaultScratchRoot, 'D:\\Relay Data\\conversation-scratch');
+  f.state.scratchRoot = '';
+  assert.equal(f.service.scratchRoot(), 'D:\\Relay Data\\conversation-scratch');
+});
+test('scratch root validation rejects invalid paths and only previews a writable directory', async t => {
+  const f = fixture(t, { platform: process.platform });
+  const scratch = path.join(f.homeDir, 'temporary work'); fs.mkdirSync(scratch);
+  fs.writeFileSync(path.join(scratch, 'keep.txt'), 'existing content');
+  f.state.workspaceRoot = f.homeDir;
+  assert.deepEqual(await f.service.validatePatch({ scratchRoot: scratch }), { scratchRoot: path.resolve(scratch) });
+  assert.deepEqual(f.state, { workspaceRoot: f.homeDir });
+  assert.equal(fs.readFileSync(path.join(scratch, 'keep.txt'), 'utf8'), 'existing content');
+  for (const invalid of [null, 42, [], {}, 'relative', 'bad\0path']) {
+    await assert.rejects(f.service.validatePatch({ scratchRoot: invalid }), cause => cause.code === 'INVALID_SCRATCH_ROOT');
+  }
+  const missing = path.join(f.homeDir, 'not-created');
+  await assert.rejects(f.service.validatePatch({ scratchRoot: missing }), cause => cause.code === 'SCRATCH_ROOT_UNAVAILABLE');
+  assert.equal(fs.existsSync(missing), false);
+  await assert.rejects(f.service.validatePatch({ scratchRoot: path.join(scratch, 'keep.txt') }), /文件夹/);
+  assert.deepEqual(await f.service.validatePatch({ scratchRoot: '' }), { scratchRoot: '' });
+  assert.equal(normalizePreferences({ scratchRoot: 13 }).scratchRoot, '');
+});
+test('scratch migration status is read live without persistence or recursive root resolution', async t => {
+  let service, status = { running: true, pending: 2, migrated: 1, failed: 0 }, reads = 0;
+  const f = fixture(t, { getScratchMigrationStatus: () => { reads++; assert.equal(typeof service.scratchRoot(), 'string'); return { ...status }; } });
+  service = f.service;
+  assert.equal(reads, 0);
+  assert.equal(typeof service.scratchRoot(), 'string');
+  assert.equal(reads, 0);
+  assert.deepEqual((await service.get()).preferences.scratchMigration, status);
+  status = { running: false, pending: 0, migrated: 2, failed: 1, error: '目标磁盘不可用' };
+  assert.deepEqual((await service.get()).preferences.scratchMigration, status);
+  assert.deepEqual(f.state, {});
+  assert.deepEqual(await service.validatePatch({ scratchMigration: status }), {});
+});
+test('scratch migration retry enqueues immediately without waiting for copy or persisting preferences', async t => {
+  let complete, attempts = 0, migration = { running: false, pending: 0, migrated: 0, failed: 1 };
+  const copying = new Promise(resolve => { complete = resolve; });
+  t.after(() => complete());
+  const f = fixture(t, { getScratchMigrationStatus: () => migration,
+    retryScratchMigration: () => { attempts++; migration = { running: true, pending: 0, migrated: 0, failed: 0 }; return copying; } });
+  const result = f.service.retryScratchMigration();
+  assert.equal(typeof result.then, 'undefined');
+  assert.deepEqual(result, { ok: true, queued: true, scratchMigration: migration });
+  assert.equal(attempts, 1);
+  assert.deepEqual(f.state, {});
+});
 test('new terminal launch uses current selected shell and passes cwd as data to WSL', async t => {
   const { service, state } = fixture(t);
   const old = await service.resolveTerminal({ cwd: 'D:\\Project name\\x' });
@@ -120,6 +177,45 @@ test('general preferences IPC is main-frame only; folder picking previews withou
   assert.deepEqual(f.state, {});
   sender.mainFrame.url = 'https://example.invalid/';
   assert.equal((await handlers.get('generalPreferences:get')(event)).ok, false);
+});
+test('scratch folder picker uses its own path, supports cancellation, and rejects changed senders', async t => {
+  const f = fixture(t, { userDataDir: 'D:\\Relay Data' }), handlers = new Map(), dialogs = [];
+  const sender = { isDestroyed: () => false, mainFrame: { url: pathToFileURL(path.join(__dirname, '../renderer/index.html')).href } };
+  const win = { isDestroyed: () => false, webContents: sender }, event = { sender, senderFrame: sender.mainFrame };
+  let result = { filePaths: ['E:\\Conversation Temporary Files'], canceled: false }, finish = () => {};
+  registerGeneralPreferencesIpc({ ipcMain: { handle: (key, fn) => handlers.set(key, fn) }, getWindow: () => win, service: f.service,
+    dialog: { showOpenDialog: async (owner, options) => { dialogs.push({ owner, options }); finish(); return result; } } });
+  const pick = handlers.get('generalPreferences:pickScratchRoot');
+  assert.equal((await pick({ sender, senderFrame: { ...sender.mainFrame } })).code, 'FORBIDDEN');
+  assert.equal(dialogs.length, 0);
+  assert.deepEqual(await pick(event), { ok: true, path: 'E:\\Conversation Temporary Files' });
+  assert.equal(dialogs[0].owner, win);
+  assert.equal(dialogs[0].options.defaultPath, 'D:\\Relay Data\\conversation-scratch');
+  assert.deepEqual(dialogs[0].options.properties, ['openDirectory', 'createDirectory']);
+  assert.deepEqual(f.state, {});
+  f.state.scratchRoot = 'F:\\Current Temporary Files';
+  result = { canceled: true, filePaths: [] };
+  assert.deepEqual(await pick(event), { ok: false, canceled: true });
+  assert.equal(dialogs.at(-1).options.defaultPath, f.state.scratchRoot);
+  finish = () => { sender.mainFrame.url = 'https://example.invalid/'; };
+  result = { canceled: false, filePaths: ['E:\\Conversation Temporary Files'] };
+  assert.equal((await pick(event)).code, 'FORBIDDEN');
+  assert.deepEqual(f.state, { scratchRoot: 'F:\\Current Temporary Files' });
+});
+test('scratch migration retry IPC only accepts the trusted main frame', async t => {
+  let attempts = 0;
+  const f = fixture(t, { retryScratchMigration: () => { attempts++; } }), handlers = new Map();
+  const sender = { isDestroyed: () => false, mainFrame: { url: pathToFileURL(path.join(__dirname, '../renderer/index.html')).href } };
+  const win = { isDestroyed: () => false, webContents: sender };
+  registerGeneralPreferencesIpc({ ipcMain: { handle: (name, fn) => handlers.set(name, fn) }, getWindow: () => win, service: f.service });
+  const retry = handlers.get('generalPreferences:retryScratchMigration');
+  assert.equal((await retry({ sender, senderFrame: { ...sender.mainFrame } })).code, 'FORBIDDEN');
+  assert.equal(attempts, 0);
+  assert.equal((await retry({ sender, senderFrame: sender.mainFrame })).queued, true);
+  assert.equal(attempts, 1);
+  sender.mainFrame.url = 'https://example.invalid';
+  assert.equal((await retry({ sender, senderFrame: sender.mainFrame })).code, 'FORBIDDEN');
+  assert.equal(attempts, 1);
 });
 
 test('SDK preferences validate independent of environment probes and restrict new trust to known projects', async t => {

@@ -4,6 +4,7 @@ const { createConversationPermissions } = require('../../src/main/projects/conve
 // Real metadata semantics for VM tests that extract only a narrow main block.
 // All settings/history remain in the caller's synthetic fixture.
 module.exports = function installPermissions(context) {
+  require('./conversation-lifecycle-fixture')(context);
   require('./sdk-provenance-fixture')(context);
   context.protectGoalRecovery = require('../../src/main/projects/conversation-goals').protectGoalRecovery;
   context.goalConditionValue = require('../../src/main/projects/conversation-goals').condition;

@@ -2,7 +2,7 @@
 
 // Native Chromium regression with synthetic HTML/profile and loopback assets.
 // No real Relay settings, providers, history or browser session are loaded.
-const { app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
+const { BaseWindow, app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
 const http = require('node:http'), fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
 const { createBrowserProfileStore } = require('../src/main/browser/browser-profile-store');
@@ -37,7 +37,7 @@ async function run() {
   owner = new BrowserWindow({ width: 1000, height: 740, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   await owner.loadURL('data:text/html,<title>Isolated preview test</title><body style="background:%23eee">Relay preview fixture</body>');
   const profile = createBrowserProfileStore({ rootDir: path.join(runDir, 'browser') });
-  host = createBrowserPanelHost({ owner, WebContentsView, session, profile, onEvent: e => events.push(e), shell: { openExternal: async () => { throw Error('External browser forbidden in fixture'); } } });
+  host = createBrowserPanelHost({ BaseWindow, owner, WebContentsView, session, profile, onEvent: e => events.push(e), shell: { openExternal: async () => { throw Error('External browser forbidden in fixture'); } } });
   const normal = await host.invoke({ action: 'create', url: base + '/normal' }); assert.equal(normal.ok, true); await loaded(normal.id, 'Normal site');
   const normalContents = contentsFor(normal.id);
   await normalContents.executeJavaScript('document.cookie="saved_browser_cookie=secret"; localStorage.setItem("saved","secret")');

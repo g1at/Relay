@@ -40,6 +40,7 @@
   <link rel="stylesheet" href="workspace-file-layout.css" />
   <link rel="stylesheet" href="workspace-file-types.css" />
   <link rel="stylesheet" href="local-file-links.css" />
+  <link rel="stylesheet" href="turn-deliverables.css" />
   <link rel="stylesheet" href="local-markdown-images.css" />
   <link rel="stylesheet" href="code-blocks.css" />
   <link rel="stylesheet" href="workspace-source.css" />
@@ -435,6 +436,11 @@
           <button id="workspaceBrowserBack" class="workspace-icon-button" type="button" title="后退" aria-label="后退" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 5-7 7 7 7"/></svg></button><button id="workspaceBrowserForward" class="workspace-icon-button" type="button" title="前进" aria-label="前进" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 5 7 7-7 7"/></svg></button><button id="workspaceBrowserReload" class="workspace-icon-button" type="button" title="刷新页面" aria-label="刷新页面" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.2 6.2A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.8 5.8"/></svg></button><input id="workspaceBrowserAddress" class="workspace-browser-address" type="text" placeholder="输入网址" aria-label="网址" autocomplete="off" spellcheck="false"><button id="workspaceBrowserMore" class="workspace-icon-button" type="button" title="浏览器更多操作" aria-label="浏览器更多操作" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
         </form>
         <div id="workspaceBrowserFind" class="workspace-browser-find" hidden><input id="workspaceBrowserFindInput" type="search" placeholder="在页面中查找" aria-label="在页面中查找"><span id="workspaceBrowserFindCount" aria-live="polite"></span><button id="workspaceBrowserFindPrevious" class="workspace-icon-button" type="button" title="上一个匹配" aria-label="上一个匹配" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button><button id="workspaceBrowserFindNext" class="workspace-icon-button" type="button" title="下一个匹配" aria-label="下一个匹配" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 10 6 6 6-6"/></svg></button><button id="workspaceBrowserFindClose" class="workspace-icon-button" type="button" title="关闭查找" aria-label="关闭查找" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button></div>
+        <div id="workspaceBrowserAutomation" class="workspace-browser-automation" role="group" aria-label="任务网页控制" hidden>
+          <span id="workspaceBrowserAutomationStatus" role="status" aria-live="polite"></span>
+          <button id="workspaceBrowserAutomationControl" type="button">交给此任务</button>
+          <button id="workspaceBrowserAnnotate" type="button" aria-haspopup="menu" title="选择页面元素或区域，添加反馈">指出问题</button>
+        </div>
         <div id="workspaceBrowserNotice" class="workspace-notice" role="status"></div>
         <div id="workspaceBrowserViewport" class="workspace-browser-viewport"><div id="workspaceBrowserEmpty" class="workspace-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg><strong>开始浏览</strong><p>在上方输入网址，在这里查看网页。</p></div><div id="workspaceBrowserCover" class="workspace-browser-cover" aria-hidden="true" hidden></div></div>
       </section>
@@ -464,6 +470,8 @@
   <script src="conversation-context.js"></script>
   <script src="conversation-errors.js"></script>
   <script src="supplement-timeline.js"></script>
+  <script src="browser-activity.js"></script>
+  <script src="browser-feedback.js"></script>
   <script src="activity-stream.js"></script>
   <script src="model-display.js"></script>
   <script src="sidebar-update.js"></script>
@@ -488,9 +496,12 @@
   <script src="stream-markdown.js"></script>
   <script src="workspace-file-types.js"></script>
   <script src="local-file-links.js"></script>
+  <script src="turn-deliverables.js"></script>
+  <script src="turn-delivery-references.js"></script>
   <script src="local-markdown-images.js"></script>
   <script src="code-blocks.js"></script>
   <script src="personalization-guidance.js"></script>
+  <script src="composer-prewarm.js"></script>
   <script src="app.js"></script>
   <script src="read-only-markdown.js"></script>
   <script src="subagent-history.js"></script>

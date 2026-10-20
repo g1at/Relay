@@ -9,7 +9,7 @@ const { normalizeUsageRecord, VERSION, TOKEN_FIELDS } = require('./usage-stats-s
 
 // Rebuild only the background aggregation index after counter semantics change.
 // Keep the small display snapshot compatible so reopening still renders instantly.
-const USAGE_AGGREGATION_VERSION = 2;
+const USAGE_AGGREGATION_VERSION = 3;
 const clone = value => JSON.parse(JSON.stringify(value));
 const dateKey = value => {
   const date = new Date(value);
@@ -120,7 +120,9 @@ function applyUsageRecord(usage, input) {
   // high-water mark, including models temporarily absent from a result.
   const day = dateKey(record.at);
   const bucket = usage.days[day] || { results: 0, models: Object.create(null) };
-  bucket.results += 1;
+  if (record.usageIncomplete) bucket.incomplete = true;
+  // A missing resume/fork baseline is a coverage marker, not a zero-usage result.
+  if (Object.keys(record.modelUsage).length) bucket.results += 1;
   for (const [model, value] of Object.entries(record.modelUsage)) {
     const previous = own(epoch.models, model);
     const total = own(bucket.models, model) || Object.fromEntries(TOKEN_FIELDS.map(field => [field, 0]));
@@ -239,9 +241,10 @@ function buildSnapshot(index, historyState, usageComplete, now) {
       }
       if (active) conversations += 1;
     }
-    const models = Object.create(null); let results = 0;
+    const models = Object.create(null); let results = 0, incomplete = false;
     for (const [day, bucket] of Object.entries(index.usage.days)) if (keys.has(day)) {
       results += bucket.results;
+      incomplete ||= bucket.incomplete === true;
       for (const [model, value] of Object.entries(bucket.models)) {
         const total = own(models, model) || Object.fromEntries(TOKEN_FIELDS.map(field => [field, 0]));
         for (const field of TOKEN_FIELDS) total[field] += value[field];
@@ -253,7 +256,8 @@ function buildSnapshot(index, historyState, usageComplete, now) {
       tokens: { ...tokenView(models, results, index.usage.recordingStartedAt),
         daily: results > 0 ? tokenDailyView([...keys], index.usage, usageComplete) : [] },
       coverage: { history: historyState.complete ? 'complete' : historyState.available ? 'partial' : 'unknown',
-        warningCodes: [...historyState.warnings, ...(!usageComplete ? ['USAGE_RECORDS_PARTIAL'] : [])] },
+        warningCodes: [...historyState.warnings, ...(!usageComplete ? ['USAGE_RECORDS_PARTIAL'] : []),
+          ...(incomplete ? ['USAGE_BASELINE_UNAVAILABLE'] : [])] },
     };
   }
   return { version: VERSION, configKey: index.configKey, generatedAt, windows };

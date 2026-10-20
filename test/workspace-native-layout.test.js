@@ -16,10 +16,10 @@ function fixture({ viewportRect = { left: 700, right: 1200, y: 100, height: 650 
     $: id => id === 'workspaceBrowserCover' ? cover : viewport,
     app: { dataset: {}, getBoundingClientRect() { measurements++; return { left: 0 }; } },
     document: { hidden: false }, performance: { now: () => 1000 },
-    hasOverlay: () => false, renderBrowserSnapshot() {}, scheduleCapture() {}, browserNotice() {},
+    hasOverlay: () => false, tabInContext: item => item.browserConversationId !== 'other-task', renderBrowserSnapshot() {}, scheduleCapture() {}, browserNotice() {},
     assertResult(value) { return value; } };
   vm.createContext(sandbox);
-  vm.runInContext(`let item = null, opened = true, tab = null, disposed = false, nativeFrame = null,
+  vm.runInContext(`let item = null, opened = true, tab = null, disposed = false, contextLoading = false, nativeFrame = null,
     nativeActiveId = null, nativeSignature = '', nativeEpoch = 0, nativeChain = Promise.resolve(), geometryUntil = 0;
     const obscured = new Set(); const activeTab = () => item;
     ${desired}\n${schedule}
@@ -49,6 +49,15 @@ test('leaving a browser still hides its native view without measuring an empty l
   assert.equal(f.calls[0].id, 'previous-browser'); assert.equal(f.calls[0].visible, false);
   assert.equal(f.c.active(), null); assert.equal(f.measurements(), 0);
   f.c.scheduleNative(); assert.equal(f.frames.length, 0);
+});
+
+test('a foreign conversation page cannot be reattached even if active selection is stale', async () => {
+  const f = fixture(); f.c.setNative('foreign-browser');
+  f.c.setItem({ id: 'foreign', kind: 'browser', browserId: 'foreign-browser', browserConversationId: 'other-task', browser: { url: 'https://example.test/' } });
+  f.c.scheduleNative(); await f.flush();
+  assert.equal(f.measurements(), 0);
+  assert.deepEqual(f.calls.map(call => [call.action, call.visible]), [['visibility', false]]);
+  assert.equal(f.c.active(), null);
 });
 
 test('a real browser keeps bounds and visibility updates after frame coalescing', async () => {

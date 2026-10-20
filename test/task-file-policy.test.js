@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { taskFileInstructions, outsideLinks, createTaskFilePolicy } = require('../src/main/tasks/task-file-policy');
+const { locationKey, isWithinLocation, localFileLinks } = require('../src/main/tasks/task-file-links');
 const { _buildOptions: buildOptions } = require('../src/main/sdk/claude-sdk');
 
 const cwd = 'D:\\Cybersecurity\\SRC';
@@ -22,7 +23,7 @@ test('current project instructions distinguish deliverables, temporary output, s
   assert.ok(instructions.includes(JSON.stringify(cwd)));
   assert.match(instructions, /不要默认保存到桌面/);
   assert.match(instructions, /先复制到交付目录，核实文件存在/);
-  assert.match(instructions, /用户明确指定的其他输出位置仍以用户要求为准/);
+  assert.match(instructions, /用户明确指定的其他输出位置仍以项目约定或用户要求为准/);
   assert.match(instructions, /已有输入文件、源码、参考资料无需搬迁或删除/);
   assert.match(instructions, /不是硬沙箱/);
   assert.equal(taskFileInstructions(cwd), '');
@@ -150,4 +151,68 @@ test('completion review is bounded and does nothing for a response without local
   const policy = createTaskFilePolicy({ cwd, scratchDir });
   assert.deepEqual(await policy.stop({ last_assistant_message: 'Done.' }), {});
   assert.deepEqual(await policy.stop({ last_assistant_message: '[file](D:/Cybersecurity/SRC/file.md)' }), {});
+});
+
+
+test('dedicated output directory is carried through resumed prompts, native agents and delegated tasks', async () => {
+  const outputDir = cwd + '\\outputs';
+  const options = buildOptions({ cwd, scratchDir, outputDir, sessionId: 'existing',
+    nativeAgent: { agent: 'writer', agents: { writer: { prompt: 'Write a report', tools: ['Read'] } } } });
+  assert.equal(options.cwd, cwd);
+  assert.equal(options.env.RELAY_OUTPUT_DIR, outputDir);
+  assert.ok(options.systemPrompt.append.includes(JSON.stringify(outputDir)));
+  assert.match(options.systemPrompt.append, /不能只复制入口文件/);
+  assert.match(options.systemPrompt.append, /项目源码继续在原位置编辑/);
+  assert.ok(options.agents.writer.prompt.includes(JSON.stringify(outputDir)));
+  assert.deepEqual(options.agents.writer.tools, ['Read']);
+  for (const prompt of ['Continue', 'Use another model and continue']) {
+    const [submitted] = await invoke(options, 'UserPromptSubmit', { prompt });
+    assert.ok(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(outputDir)));
+  }
+  for (const tool_name of ['Agent', 'Task']) {
+    const updates = (await invoke(options, 'PreToolUse', { tool_name, tool_input: { prompt: 'Create a complete site' } }))
+      .filter(result => result.hookSpecificOutput?.updatedInput);
+    assert.ok(updates[0].hookSpecificOutput.updatedInput.prompt.includes(JSON.stringify(outputDir)));
+  }
+  assert.deepEqual(await invoke(options, 'Stop', { last_assistant_message: '[report](./outputs/report.md)' }), [{}]);
+  const [outside] = await invoke(options, 'Stop', { last_assistant_message: '[report](./report.md)' });
+  assert.equal(outside.decision, 'block');
+  assert.ok(outside.reason.includes(JSON.stringify(outputDir)));
+  assert.match(outside.reason, /成套成果保留完整目录或文件集合/);
+});
+
+test('recreated runtime and prepared paths replace stale output locations without changing process defaults', async () => {
+  const prior = process.env.RELAY_OUTPUT_DIR;
+  const first = buildOptions({ cwd, scratchDir, outputDir: cwd + '\\outputs', model: 'first' });
+  const next = buildOptions({ cwd, scratchDir: 'E:\\Scratch\\session', outputDir: cwd + '\\outputs', model: 'second', sessionId: 'resume-me' });
+  assert.equal(next.resume, 'resume-me'); assert.equal(next.model, 'second');
+  assert.equal(next.env.RELAY_SCRATCH_DIR, 'E:\\Scratch\\session');
+  assert.equal(next.env.RELAY_OUTPUT_DIR, first.env.RELAY_OUTPUT_DIR);
+  assert.equal(process.env.RELAY_OUTPUT_DIR, prior);
+  const policy = createTaskFilePolicy({ cwd, scratchDir, outputDir: cwd + '\\outputs' });
+  policy.prepare({ cwd: '/mnt/d/Cybersecurity/SRC', scratchDir: '/mnt/e/Scratch/session', outputDir: '/mnt/d/Cybersecurity/SRC/outputs' });
+  const submitted = await policy.submit({ prompt: 'continue' });
+  assert.match(submitted.hookSpecificOutput.additionalContext, /\/mnt\/e\/Scratch\/session/);
+  assert.match(submitted.hookSpecificOutput.additionalContext, /\/mnt\/d\/Cybersecurity\/SRC\/outputs/);
+  assert.equal(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(cwd + '\\outputs')), false);
+  assert.deepEqual(await policy.stop({ last_assistant_message: '[report](./outputs/report.md)' }), {});
+});
+
+test('shared link parser resolves local Markdown files and images without including examples or network paths', () => {
+  const message = '[report](./outputs/report.md:12) ![plot](<./outputs/plot 1.png>) [ref][r]\n\n[r]: <file:///D:/Cybersecurity/SRC/outputs/extra.pdf>\n\n' +
+    '`[sample](./scratch/code.py)`\n\n```md\n[code](./scratch/code.md)\n```\n\n' +
+    '<a href="./scratch/raw.md">raw</a> [web](https://example.test/a.pdf) ![remote](data:image/png;base64,aaa)';
+  assert.deepEqual(localFileLinks(message, cwd), [cwd + '\\outputs\\report.md', cwd + '\\outputs\\plot 1.png', cwd + '\\outputs\\extra.pdf']);
+  assert.equal(locationKey(cwd + '\\outputs\\report.md'), locationKey('/mnt/d/Cybersecurity/SRC/outputs/report.md'));
+  assert.equal(isWithinLocation('./outputs/报告.md', cwd + '\\outputs', cwd), true);
+  assert.equal(isWithinLocation('../SRC-old/report.md', cwd, cwd), false);
+  assert.equal(isWithinLocation('/anything', '/'), true);
+  assert.equal(isWithinLocation('/anything', ''), false);
+});
+
+test('protection link parser never silently truncates to the reminder limit or accepts oversized scans', () => {
+  const message = Array.from({ length: 20 }, (_, i) => `[file](./outputs/${i}.md)`).join('\n');
+  assert.equal(localFileLinks(message, cwd).length, 20);
+  assert.deepEqual(localFileLinks('[same](D:/Cybersecurity/SRC/a.md) [alias](/mnt/d/Cybersecurity/SRC/a.md)', cwd), [cwd + '\\a.md']);
+  assert.throws(() => localFileLinks('x'.repeat(256 * 1024 + 1), cwd), { code: 'LOCAL_FILE_LINKS_TOO_LARGE' });
 });

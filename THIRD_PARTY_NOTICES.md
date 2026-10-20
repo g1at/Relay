@@ -8,6 +8,7 @@
 
 | 组件 | 当前版本 / 文件 | 许可及保留文本 |
 | --- | --- | --- |
+| Playwright injected script | 1.62.1；`src/main/browser/vendor/playwright-injected.js` | Apache-2.0；[完整许可](licenses/playwright-LICENSE)，Copyright Microsoft Corporation；来自官方 `playwright-core` 包 |
 | highlight.js | 11.11.1；`renderer/vendor/highlight.min.js` | BSD-3-Clause；[完整许可](renderer/vendor/highlight-LICENSE) |
 | GitHub Dark theme | `renderer/vendor/github-dark.min.css`；保留 GitHub / Hirse 头部归属 | 随 highlight.js 分发；[完整许可](renderer/vendor/highlight-LICENSE) |
 | Marked | 18.0.4；`renderer/vendor/marked.umd.js` | MIT；[完整上游 LICENSE](renderer/vendor/marked-LICENSE) 同时保留 Markdown / John Gruber 的 BSD 通知 |
@@ -32,9 +33,9 @@ Relay 使用 MiSans 和 MiSans Latin。`renderer/fonts/Normal/` 与 `renderer/fo
 
 | 组件 | 锁定版本 | 包声明的许可 / 说明 |
 | --- | --- | --- |
-| `@anthropic-ai/claude-agent-sdk` | 0.3.266 | `SEE LICENSE IN README.md`；Anthropic 独立条款，见下一节 |
-| `@anthropic-ai/claude-agent-sdk-win32-x64` | 0.3.266 | 原生运行时；Anthropic 独立条款 |
-| `@anthropic-ai/claude-agent-sdk-linux-x64` | 0.3.266 | WSL 原生运行时；Anthropic 独立条款 |
+| `@anthropic-ai/claude-agent-sdk` | 0.3.299 | `SEE LICENSE IN README.md`；Anthropic 独立条款，见下一节 |
+| `@anthropic-ai/claude-agent-sdk-win32-x64` | 0.3.299 | 原生运行时；Anthropic 独立条款 |
+| `@anthropic-ai/claude-agent-sdk-linux-x64` | 0.3.299 | WSL 原生运行时；Anthropic 独立条款 |
 | `@anthropic-ai/sdk` | 0.115.0 | MIT；这是不同于 Agent SDK 的 API client 包 |
 | `@modelcontextprotocol/sdk` | 1.30.0 | MIT |
 | `electron-updater` | 6.8.9 | MIT |
@@ -50,7 +51,7 @@ Electron 发布目录中的 `LICENSE` 和 `LICENSES.chromium.html` 应与 Electr
 
 ### Claude Agent SDK 与 Claude Code 平台包
 
-本仓库保存 0.3.266 的 [SDK 原始 LICENSE](licenses/anthropic/claude-agent-sdk-LICENSE.md)、[SDK 原始 README](licenses/anthropic/claude-agent-sdk-README.md)、[Windows 包 LICENSE](licenses/anthropic/claude-agent-sdk-win32-x64-LICENSE.md) 和 [Linux 包 LICENSE](licenses/anthropic/claude-agent-sdk-linux-x64-LICENSE.md)。这些包声明 Anthropic 保留所有权利，并指向其法律条款，不包含 MIT / Apache-2.0 的通用授权。
+本仓库保存 0.3.299 的 [SDK 原始 LICENSE](licenses/anthropic/claude-agent-sdk-LICENSE.md)、[SDK 原始 README](licenses/anthropic/claude-agent-sdk-README.md)、[Windows 包 LICENSE](licenses/anthropic/claude-agent-sdk-win32-x64-LICENSE.md) 和 [Linux 包 LICENSE](licenses/anthropic/claude-agent-sdk-linux-x64-LICENSE.md)。这些包声明 Anthropic 保留所有权利，并指向其法律条款，不包含 MIT / Apache-2.0 的通用授权。
 
 [SDK 官方文档](https://code.claude.com/docs/en/agent-sdk/overview#license-and-terms) 明确 SDK 受 [Anthropic Commercial Terms](https://www.anthropic.com/legal/commercial-terms) 约束，具有独立许可的具体组件除外。[Claude Code 法律说明](https://code.claude.com/docs/en/legal-and-compliance) 对产品预装、未修改二进制、内置鉴权方式、凭据和计费等另有条件。使用或分发者应按其实际集成和凭据模式核对条款；Relay 的 Apache 许可不能代为授予服务访问权、转售权或商标权。本次许可补全不是对所有第三方服务商或网关用法的授权判断。
 

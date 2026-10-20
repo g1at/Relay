@@ -82,3 +82,10 @@ test('browser entry exposes the same pure helper on both chat pages', () => {
     assert.ok(html.indexOf('conversation-errors.js') > html.indexOf('assistant-output.js'));
   }
 });
+
+test('agent-only child failures cannot be displayed as a whole conversation failure', () => {
+  for (const child of [{ agent_id: 'worker' }, { parentToolUseId: 'tool' }]) {
+    assert.equal(forTurn({ output: { lastResult: failedResult(child) } }), '');
+    assert.equal(forTurn({ activity: { phase: 'error', error: 'child only', ...child } }), '');
+  }
+});

@@ -99,6 +99,16 @@ app.whenReady().then(async () => {
   const firstView = nativeViews().find(view => view.webContents.getURL() === base + '/');
   await check('native browser renders a page that refuses iframe embedding', !!firstView && await firstView.webContents.executeJavaScript('document.querySelector("h1").textContent.includes("项目交付预览")'));
   await check('browser and tabs stay within normal right panel', 'document.documentElement.scrollWidth<=innerWidth&&document.getElementById("workspaceBrowserNav").getBoundingClientRect().width<=document.getElementById("workspacePanel").getBoundingClientRect().width');
+  report.toolbarGeometry = await evaluate(`(()=>{
+    const bounds=id=>document.getElementById(id)?.getBoundingClientRect().toJSON();
+    const bar=document.getElementById('workspaceBrowserAutomation'),ctx=window.relayConversationWorkspace?.();
+    return {header:document.querySelector('.chat-header').getBoundingClientRect().toJSON(),
+      address:bounds('workspaceBrowserAddress'),back:bounds('workspaceBrowserBack'),
+      nav:bounds('workspaceBrowserNav'),viewport:bounds('workspaceBrowserViewport'),
+      automation:{bounds:bounds('workspaceBrowserAutomation'),hidden:bar?.hidden,
+        display:bar&&getComputedStyle(bar).display,state:bar?.dataset.state},
+      hasCurrentConversation:!!currentConv,workspaceContext:ctx?{conversationId:ctx.conversationId,workingDir:ctx.workingDir}:null};
+  })()`);
   await check('browser address starts at conversation divider with full size controls', '(()=>{const edge=document.querySelector(".chat-header").getBoundingClientRect().bottom,address=document.getElementById("workspaceBrowserAddress").getBoundingClientRect(),back=document.getElementById("workspaceBrowserBack").getBoundingClientRect();return Math.abs(address.top-edge)<1&&address.height>=29&&back.height>=28&&Math.abs(document.getElementById("workspaceBrowserViewport").getBoundingClientRect().top-document.getElementById("workspaceBrowserNav").getBoundingClientRect().bottom)<1})()');
   await capture('browser-docked');
   // Exercise the host bridge with actual native WebContents input, not a DOM

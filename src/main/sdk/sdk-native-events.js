@@ -47,7 +47,7 @@ class NativeEventState {
     return row;
   }
   observe(event = {}) {
-    if (event.type === 'assistant' && !event.parent_tool_use_id) {
+    if (event.type === 'assistant' && !event.parent_tool_use_id && !event.parentToolUseId && !event.agent_id && !event.subagent_type) {
       // Context snapshots are not billed usage; no addition to profile totals.
       if (event.context_usage) this.context = contextSnapshot(event.context_usage);
     }

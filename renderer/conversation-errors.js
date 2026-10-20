@@ -11,7 +11,7 @@
   const text = value => typeof value === 'string' ? value.trim() : '';
   const status = value => text(value).toLowerCase();
   const errorText = value => text(value) || text(object(value).message);
-  const isChild = value => !!(value.parent_tool_use_id || value.subagent_type || value.parent);
+  const isChild = value => !!(value.parent_tool_use_id || value.parentToolUseId || value.agent_id || value.subagent_type || value.parent);
 
   // History may contain a saved failed activity with no final answer and no
   // top-level error. Read only whole-turn evidence, never a failed child tool.

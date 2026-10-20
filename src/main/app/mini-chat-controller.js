@@ -25,6 +25,12 @@ function createMiniChatController({
   }
   let conversation = null, active = null, destroyed = false, stateTimer = null;
   let pendingTerminalSave = null, terminalSaveRetry = null, resetting = false;
+  const forgottenConversations = new Set();
+  let deletionRevision = 0;
+  const forgotten = task => !!task && forgottenConversations.has(task.conversationId);
+  const assertRetained = task => {
+    if (forgotten(task)) throw Object.assign(Error('这条会话已删除，请新建会话'), { code: 'CONVERSATION_DELETED' });
+  };
   const timestamp = () => { const value = now(); return new Date(value).toISOString(); };
   const defaultModel = () => {
     try { const value = typeof getDefaultModel === 'function' ? getDefaultModel() : getDefaultModel; return MODELS.has(value) ? value : 'sonnet'; }
@@ -118,6 +124,7 @@ function createMiniChatController({
   // Reload after inference and change metadata only: the user may have renamed,
   // deleted, or continued the conversation while the title model was responding.
   function requestTitle(task, record) {
+    if (forgotten(task)) return;
     const first = record.turns?.[0];
     const logicalTaskId = TaskContinuity.normalize(task.turn.taskRun)?.taskId || task.id;
     if (typeof generateTitle !== 'function' || task.titleRequested || record.titleGenerated
@@ -128,14 +135,16 @@ function createMiniChatController({
     const text = `用户:${first.user.slice(0, 400)}\n助手:${(task.turn.assistant || '').slice(0, 300)}`;
     void (async () => {
       const response = await generateTitle(text);
+      if (forgotten(task)) return;
       const title = String(response && response.title || '').trim();
       if (!title) return;
       const latest = await savedConversation(task.conversationId);
-      if (!latest || latest.titleManual || latest.titleGenerated
+      if (forgotten(task) || !latest || latest.titleManual || latest.titleGenerated
           || latest.turns?.[0]?.runId !== logicalTaskId) return;
       latest.title = title;
       latest.titleGenerated = true;
       const saved = await saveConversation(latest);
+      if (forgotten(task)) return;
       if (saved && saved.error) throw Error(saved.error);
       if (conversation && conversation.id === latest.id) {
         // Do not replace a running turn's in-memory stream with a disk snapshot.
@@ -148,9 +157,11 @@ function createMiniChatController({
   }
 
   async function persistFinished(task) {
+    if (forgotten(task)) return false;
     // Reload just before writing, so a rename/pin/project edit or accepted live
     // supplement made during the run cannot be overwritten by our old snapshot.
     const latest = await savedConversation(task.conversationId);
+    if (forgotten(task)) return false;
     const record = latest;
     if (!record || record.id !== task.conversationId) return false;
     const turns = Array.isArray(record.turns) ? record.turns : (record.turns = []);
@@ -200,6 +211,7 @@ function createMiniChatController({
       }
     }
     const saved = await saveConversation(record);
+    if (forgotten(task)) return false;
     if (saved && saved.error) throw Error(saved.error);
     if (conversation && conversation.id === record.id) conversation = clone(saved && Array.isArray(saved.turns) ? saved : record);
     delete task.turn.saveError;
@@ -212,21 +224,26 @@ function createMiniChatController({
     if (terminalSaveRetry) return terminalSaveRetry;
     const task = pendingTerminalSave;
     if (!task) return Promise.resolve();
-    terminalSaveRetry = (async () => {
+    const retry = (async () => {
       try {
-        if (!await persistFinished(task)) throw Error('原对话记录已被移除，请先复制保留当前回复');
+        const saved = await persistFinished(task);
+        if (forgotten(task)) return;
+        if (!saved) throw Error('原对话记录已被移除，请先复制保留当前回复');
         if (pendingTerminalSave === task) pendingTerminalSave = null;
         notify(true);
       } catch (error) {
+        if (forgotten(task)) return;
         task.turn.saveError = `对话记录保存失败：${errorText(error)}`;
         notify(true);
         throw Error(`上一条回复尚未保存，已保留在小窗中。${errorText(error)}`);
-      } finally { terminalSaveRetry = null; }
+      } finally { if (terminalSaveRetry === retry) terminalSaveRetry = null; }
     })();
-    return terminalSaveRetry;
+    terminalSaveRetry = retry;
+    return retry;
   }
 
   function finish(task, event) {
+    if (forgotten(task)) return Promise.resolve();
     if (task.finishPromise) return task.finishPromise;
     task.finished = true;
     const terminal = event.finalResult || (task.output.resultRevision === task.output.revision ? task.output.lastResult : null);
@@ -274,7 +291,7 @@ function createMiniChatController({
       // A fast executor can finish before its launch promise returns route data.
       await task.launchReady.promise;
       try { await persistFinished(task); }
-      catch (error) { pendingTerminalSave = task; task.turn.saveError = `对话记录保存失败：${errorText(error)}`; }
+      catch (error) { if (!forgotten(task)) { pendingTerminalSave = task; task.turn.saveError = `对话记录保存失败：${errorText(error)}`; } }
       finally { if (active === task) active = null; notify(true); }
     })();
     return task.finishPromise;
@@ -332,6 +349,7 @@ function createMiniChatController({
       const result = await steer({ jobId: task.id, runId: task.id, conversationId: task.conversationId,
         messageId: messageId || idFactory(), prompt: text, text, files: [],
         presentation: Timeline.capture(task.output), ...followUp });
+      assertRetained(task);
       if (!result || result.ok !== true) return failure(result && (result.message || result.error) || '补充要求未能发送', result && result.code);
       updateSupplement(task, result.input);
       // steerLiveTurn already persists this input atomically. Never save a stale
@@ -359,11 +377,14 @@ function createMiniChatController({
       // A previous terminal write may have failed while the reply survived in
       // memory. Commit it before any disk reload can replace that only copy.
       await retryTerminalSave();
+      assertRetained(task);
       previous = conversation;
       const latest = conversation && await savedConversation(conversation.id);
+      assertRetained(task);
       if (latest) previous = clone(latest);
       const creating = !latest && !conversation;
       const permissions = await resolvePermissions(latest || conversation);
+      assertRetained(task);
       if (creating && permissionMode !== undefined) {
         if (!['default', 'acceptEdits', 'bypassPermissions'].includes(permissionMode)) throw Error('无效的对话权限');
         permissions.permissionMode = permissionMode;
@@ -391,6 +412,7 @@ function createMiniChatController({
       task.workingDir = directoryValue(conversation.workingDir);
       task.route = routeFor(conversation);
       const targetRoute = typeof getSessionRoute === 'function' ? await getSessionRoute(model) : null;
+      assertRetained(task);
       const routeChanged = targetRoute && (!task.route || task.route.providerId !== targetRoute.providerId
         || task.route.providerRevision !== Number(targetRoute.providerRevision || 0) || task.route.routeTier !== model);
       const fresh = !!task.carryContextReason || !!routeChanged || (conversation.sessionModel && conversation.sessionModel !== model);
@@ -413,6 +435,7 @@ function createMiniChatController({
       conversation.turns.push(task.turn);
       notify(true);
       const saved = await saveConversation(clone(conversation));
+      assertRetained(task);
       if (saved && saved.error) throw Error(saved.error);
       task.historySaved = true;
       // The save can initialize/migrate the record or race an explicit change in
@@ -421,9 +444,12 @@ function createMiniChatController({
         if (creating && typeof setPermissions === 'function') {
           const selected = await setPermissions({ conversationId: conversation.id,
             permissionMode: permissions.permissionMode, executionMode: clone(permissions.executionMode) });
+          assertRetained(task);
           if (!selected || selected.ok !== true) throw Error(selected && (selected.error || selected.message) || '无法保存对话权限');
         }
-        Object.assign(conversation, await resolvePermissions(conversation));
+        const currentPermissions = await resolvePermissions(conversation);
+        assertRetained(task);
+        Object.assign(conversation, currentPermissions);
         task.turn.executionMode = clone(conversation.executionMode);
       }
       task.savedReady.resolve();
@@ -447,6 +473,7 @@ function createMiniChatController({
         let result;
         try { result = await run(request, event => receive(task, event)); }
         catch (error) { result = { error: errorText(error) }; }
+        if (forgotten(task)) return;
         adoptRuntime(task, result || {});
         task.launchReady.resolve();
         if (task.finished) { await task.finishPromise; return; }
@@ -463,6 +490,7 @@ function createMiniChatController({
     } catch (error) {
       task.savedReady.resolve();
       task.launchReady.resolve();
+      if (forgotten(task)) return failure('这条会话已删除，请新建会话', 'CONVERSATION_DELETED');
       if (task.historySaved && task.turn) {
         await finish(task, { type: 'job-done', exitCode: -1, error: errorText(error) });
         return failure(`对话无法开始：${errorText(error)}`);
@@ -488,6 +516,7 @@ function createMiniChatController({
       try {
         if (typeof pauseRun !== 'function') throw Error('当前任务暂时无法暂停');
         const result = await pauseRun(task.id);
+        if (forgotten(task)) return { ok: true, paused: true, settled: true, deleted: true };
         if (task.finished) { await task.finishPromise; return { ...result, ok: true }; }
         if (result && result.paused && result.settled) {
           await finish(task, { type: 'job-done', aborted: true, exitCode: -1 });
@@ -520,12 +549,14 @@ function createMiniChatController({
     if (active) return failure('请先等待回复完成或暂停当前任务', 'RUNNING');
     if (resetting) return failure('正在保存上一条回复，请稍后重试', 'HISTORY_SAVE_PENDING');
     resetting = true;
+    const revision = deletionRevision;
     try {
       await retryTerminalSave();
+      if (revision !== deletionRevision) return { ok: true, stale: true };
       conversation = null; notify(true);
       return { ok: true };
     } catch (error) { return failure(error, 'HISTORY_SAVE_FAILED'); }
-    finally { resetting = false; }
+    finally { if (revision === deletionRevision) resetting = false; }
   }
   async function shutdown() {
     destroyed = true; clearTimeout(stateTimer); stateTimer = null;
@@ -543,12 +574,33 @@ function createMiniChatController({
     if (active) return failure('请先等待回复完成或暂停当前任务', 'RUNNING');
     if (resetting) return failure('正在保存上一条回复，请稍后重试', 'HISTORY_SAVE_PENDING');
     resetting = true;
+    const revision = deletionRevision;
     try { await retryTerminalSave(); return { ok: true }; }
     catch (error) { return failure(error, 'HISTORY_SAVE_FAILED'); }
-    finally { resetting = false; }
+    finally { if (revision === deletionRevision) resetting = false; }
+  }
+  // The host calls this after confirming native shutdown and deleting history.
+  // Do not await a stale route/save/launch promise: mark its owner forgotten so
+  // every later continuation stays inert while the user starts a fresh chat.
+  function forgetConversation(id) {
+    if (typeof id !== 'string' || !id) return { ok: false, code: 'INVALID_CONVERSATION_ID' };
+    forgottenConversations.add(id);
+    const matched = conversation?.id === id || active?.conversationId === id || pendingTerminalSave?.conversationId === id;
+    if (!matched) return { ok: true, forgotten: false };
+    deletionRevision++;
+    if (active?.conversationId === id) {
+      active.pauseRequested = true;
+      active.savedReady.resolve(); active.launchReady.resolve();
+      active = null;
+    }
+    if (conversation?.id === id) conversation = null;
+    if (pendingTerminalSave?.conversationId === id) { pendingTerminalSave = null; terminalSaveRetry = null; }
+    resetting = false;
+    notify(true);
+    return { ok: true, forgotten: true };
   }
   return {
-    state, submit, pause, newChat, shutdown, flush, refresh,
+    state, submit, pause, newChat, shutdown, flush, refresh, forgetConversation,
     getConversationId: () => conversation && conversation.id || null,
     isRunning: () => !!active,
     destroy() { destroyed = true; clearTimeout(stateTimer); stateTimer = null; },

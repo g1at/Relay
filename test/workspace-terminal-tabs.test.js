@@ -29,8 +29,9 @@ function fixture() {
   vm.createContext(sandbox);
   vm.runInContext(`
     const sessions = new Map(), pendingTerminals = new Set(), earlyEvents = new Map(), tabs = [];
-    let termNumber = 0, disposed = false, context = {conversationId:'draft-a',workingDir:'C:/Project A'}, contextKey = 'draft-a', navigationRevision = 0, activeId = null, tab = null, opened = true, preview = null, previewRevision = 0;
+    let termNumber = 0, disposed = false, contextLoading = false, context = {conversationId:'draft-a',workingDir:'C:/Project A'}, contextKey = 'draft-a', navigationRevision = 0, activeId = null, tab = null, opened = true, preview = null, previewRevision = 0;
     const activeTab = () => tabs.find(item => item.id === activeId);
+    const visibleTabs = () => tabs;
     function syncContext() {}
     function activate(id) { navigationRevision++; activeId = id; tab = activeTab()?.kind; opened = true; renderTerminals(); }
     function assertResult(value) { if (!value || value.ok === false) throw Error(value?.error || 'failed'); return value; }

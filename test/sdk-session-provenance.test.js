@@ -74,3 +74,48 @@ test('pending fork resume flags bind source, destination and exact message, reje
   assert.throws(() => pendingForkOptions({ pendingSdkFork: fork }, null), { code: 'FORK_RESUME_MISMATCH' });
   assert.throws(() => pendingForkOptions({ pendingSdkFork: { ...fork, targetSessionId: 'bad' } }, uuid(1)), { code: 'FORK_RESUME_MISMATCH' });
 });
+
+
+test('unchanged native provenance does not request another full history write after a JSON roundtrip', () => {
+  const { session, record } = fixture();
+  Object.assign(session.launchSpec, { providerId: 'fixture-provider', runtimeFingerprint: 'contract-v2', runtimeFingerprintVersion: 2 });
+  assert.equal(applyProvenance(record, session, '/tmp/config'), true);
+  const saved = clone(record), originalTurn = saved.turns[0];
+  assert.equal(applyProvenance(saved, session, '/tmp/config'), false);
+  assert.equal(saved.turns[0], originalTurn);
+  // Only small host-owned fields may be compared, not the cumulative output.
+  originalTurn.output = { toJSON() { throw Error('unrelated history was serialized'); } };
+  assert.equal(applyProvenance(saved, session, '/tmp/config'), false);
+  session.launchSpec.runtimeFingerprint = 'contract-v3';
+  assert.equal(applyProvenance(saved, session, '/tmp/config'), true);
+  assert.equal(saved.sdkRuntimeFingerprint, 'contract-v3');
+  assert.equal(applyProvenance(saved, session, '/tmp/config'), false);
+});
+
+test('provenance dirty detection includes ownership, final fork boundary and cleared guards', () => {
+  const { session, record } = fixture();
+  applyProvenance(record, session, '/tmp/config');
+  observeProvenance(session, { type: 'assistant', uuid: uuid(4), message: { content: [{ type: 'tool_use', id: 'owned_tool' }] } });
+  observeProvenance(session, { type: 'system', subtype: 'task_started', task_type: 'local_agent', task_id: 'owned_agent' });
+  assert.equal(applyProvenance(record, session, '/tmp/config'), true);
+  assert.equal(applyProvenance(record, session, '/tmp/config'), false);
+  assert.equal(applyProvenance(record, session, '/tmp/config', { complete: true }), true);
+  assert.equal(applyProvenance(record, session, '/tmp/config', { complete: true }), false);
+  assert.equal(record.turns[0].sdkForkPoint, uuid(4));
+  record.sdkResumeRejected = true; record.pendingSdkFork = { targetSessionId: session.sessionId };
+  assert.equal(applyProvenance(record, session, '/tmp/config'), true);
+  assert.equal(record.sdkResumeRejected, undefined); assert.equal(record.pendingSdkFork, undefined);
+  assert.equal(applyProvenance(record, session, '/tmp/config'), false);
+  observeProvenance(session, { type: 'conversation_reset' });
+  assert.equal(applyProvenance(record, session, '/tmp/config'), true);
+  assert.deepEqual(record.turns[0].sdkAgentIds, []); assert.deepEqual(record.turns[0].sdkToolUseIds, []);
+  assert.equal(record.turns[0].sdkForkPoint, undefined); assert.equal(record.turns[0].sdkLastMessageUuid, undefined);
+  assert.equal(applyProvenance(record, session, '/tmp/config'), false);
+});
+
+test('uncertified prewarm cannot clear saved identity or claim a change', () => {
+  const { session, record } = fixture();
+  record.sdkResumeRejected = true; const before = clone(record); session.nativeContextReady = false;
+  assert.equal(applyProvenance(record, session, '/tmp/config'), false);
+  assert.deepEqual(record, before);
+});

@@ -62,7 +62,7 @@ function fixture({ savedWidth = null, reducedMotion = false } = {}) {
   });
   vm.runInContext(sizing + '\nconst priorInert = new Map(); let navigationRevision = 0; function closeMenus() {}\n' + maximize + '\n' + viewHandler + '\n' + resizeHandler + `
     globalThis.control = { layout, setMaximized, maxWidth, open(){opened=true;layout()},
-      get(){return {width,preferredWidth,maximized,automaticMaximized,restoreWidth,dragging:!!drag,opened,tab}},
+      get(){return {width,preferredWidth,maximized,automaticMaximized,restoreWidth,dragging:!!drag,opened,tab,dismissed:[...browserPresentationDismissed]}},
       close(){endDrag(false);opened=false;setMaximized(false,{preservePreference:true});layout()} };`, context);
   window.addEventListener('relay:sidebar-changed', event => { sidebarEvents++; context.control.layout(event.detail); });
   window.addEventListener('relay:workspace-layout', () => { workspaceEvents++; });
@@ -122,6 +122,7 @@ test('dragging right previews below minimum then collapses without losing captur
   assert.equal(f.handle.captured, 1); assert.equal(f.handle.hidden, false); assert.equal(f.panel.inert, true);
   assert.equal(f.app.classList.contains('is-workspace-snapping'), true);
   f.up(1000); assert.equal(f.handle.hidden, true); assert.equal(f.handle.captured, null);
+  assert.deepEqual(Array.from(f.control.get().dismissed), [null], 'a committed collapse records the current workspace dismissal');
   assert.equal(f.control.get().preferredWidth, 300);
   assert.equal(f.writes.get('relay.workspace-panel.width.v1'), '300');
   f.control.open(); assert.equal(f.actual(), 300); assert.equal(f.panel.inert, false);
@@ -132,6 +133,7 @@ test('one gesture can collapse and reopen with hysteresis before committing', ()
   for (const x of [959, 941, 930, 901]) { f.move(x); assert.equal(f.control.get().opened, false); }
   f.move(900); assert.equal(f.actual(), 300); assert.equal(f.control.get().opened, true);
   f.move(800); f.up(800); assert.equal(f.actual(), 400); assert.equal(f.handle.hidden, false);
+  assert.deepEqual(Array.from(f.control.get().dismissed), [], 'a gesture ending open does not suppress browser presentation');
 });
 
 test('canceling a collapsed drag restores original open state and width without saving', () => {
@@ -141,6 +143,7 @@ test('canceling a collapsed drag restores original open state and width without 
     f.event(event, { key: 'Escape' });
     assert.equal(f.actual(), 380); assert.equal(f.control.get().opened, true);
     assert.equal(f.handle.hidden, false); assert.equal(f.handle.captured, null); assert.equal(f.writes.size, 0);
+    assert.deepEqual(Array.from(f.control.get().dismissed), [], 'cancelled gestures are not deliberate dismissal');
   }
 });
 
@@ -309,11 +312,11 @@ test('management pages use all content width while keeping the open panel prefer
   }
 });
 
-test('leaving maximized reading for settings releases inert content and restores the prior width on return', () => {
+test('leaving maximized reading for settings releases inert content and restores the same full-width choice on return', () => {
   const f = fixture(); f.control.open(); f.control.setMaximized(true); f.view('settings');
-  assert.equal(f.actual(), 0); assert.equal(f.control.get().maximized, false);
+  assert.equal(f.actual(), 0); assert.equal(f.control.get().maximized, true);
   assert.equal(f.sidebar.inert, false); assert.equal(f.chat.inert, false);
-  f.view('chat'); assert.equal(f.actual(), 380); assert.equal(f.control.get().maximized, false);
+  f.view('chat'); assert.equal(f.actual(), 1200); assert.equal(f.control.get().maximized, true);
 });
 
 

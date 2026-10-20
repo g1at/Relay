@@ -40,6 +40,8 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
     ...require('../src/main/sdk/sdk-user-dialog'), ...require('../src/main/sdk/sdk-tool-proposals'),
     ...require('../src/main/live/live-prewarm-reuse'),
     ...require('../src/main/memory/memory-runtime'), relayMemoryStore: new (require('../src/main/memory/memory-store').MemoryStore)({ dir: memory }),
+    ...require('../src/main/browser/browser-tools'), AbortController,
+    browserPanelTools: { automationPauseConversation() {}, automationInvoke: async () => ({ ok: true }) },
     memoryRequestContexts: new Map(), rebuildMemoryIndex() {}, notifySkillUsageUpdated() {},
     readMemoryUsage: () => ({}), flushMemoryUsage() {},
     getSdkPluginStore: () => ({ runtime: () => ({ plugins: [], settings: { enabledPlugins: {}, pluginConfigs: {} }, fingerprint: 'fixture' }) }),
@@ -97,7 +99,7 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
   require('./helpers/conversation-permissions-fixture')(context);
   vm.createContext(context); vm.runInContext('let nativeForkService;', context);
   for (const name of ['providerSessionRoute', 'sessionRouteMatchesProvider', 'relayModelTier', 'sdkProjectContext', 'conversationRuntimeContract',
-    'migrateConversationRuntimeContract',
+    'migrateConversationRuntimeContract', 'createBrowserRunScope', 'liveBrowserContext',
     'projectConversation', 'updateConversationProject', 'resolveExecutionWorkspace', 'resolveLinkWorkspace', 'buildSdkParams', 'spawnLiveSession', 'prespawnSession',
     'runLiveTurn', 'runClaudeJob', 'saveConversation', 'getNativeForkService']) vm.runInContext(declaration(name), context);
   const start = source.indexOf("ipcMain.handle('claude:run',"), end = source.indexOf('// IPC: 丢弃某对话', start);
@@ -156,6 +158,54 @@ function legacyFixture(h) {
   h.context.persistConversationRecord(h.record);
   h.workspaces.markContextCarried(h.record.id);
   return { workspace, contract, legacy };
+}
+
+for (const liveAvailable of [true, false]) {
+  test(`a scratch migration during admission uses the committed directory at the ${liveAvailable ? 'live' : 'one-shot'} SDK boundary`, async t => {
+    const h = fixture(t, { liveAvailable });
+    const previousScratch = h.workspaces.resolveScratch(h.record.id);
+    const targetRoot = path.join(h.root, 'relocated-scratch'); fs.mkdirSync(targetRoot);
+    fs.writeFileSync(path.join(previousScratch, 'keep.txt'), 'synthetic intermediate');
+    let waited = false;
+    h.context.waitForCheckpointUnlock = async () => {
+      if (!waited) {
+        waited = true;
+        const migrated = await h.workspaces.migrateScratch(h.record.id, targetRoot);
+        assert.equal(migrated.migrated, true);
+      }
+      return true;
+    };
+    const result = await h.send(h.record, { forceFreshSession: true, sessionId: null });
+    assert.equal(result.error, undefined);
+    const launch = (liveAvailable ? h.calls.live : h.calls.oneShot)[0];
+    const currentScratch = h.workspaces.resolveScratch(h.record.id);
+    assert.notEqual(currentScratch, previousScratch);
+    assert.equal(launch.params.scratchDir, currentScratch);
+    for (const variable of ['TEMP', 'TMP', 'TMPDIR', 'RELAY_SCRATCH_DIR']) assert.equal(launch.options.env[variable], currentScratch);
+    assert.ok(launch.options.additionalDirectories.includes(currentScratch));
+    assert.ok(!launch.options.additionalDirectories.includes(previousScratch));
+    assert.ok(launch.options.systemPrompt.append.includes(JSON.stringify(currentScratch)));
+    assert.ok(!launch.options.systemPrompt.append.includes(JSON.stringify(previousScratch)));
+    assert.equal(fs.readFileSync(path.join(currentScratch, 'keep.txt'), 'utf8'), 'synthetic intermediate');
+    assert.equal(fs.existsSync(previousScratch), false);
+  });
+}
+
+for (const boundary of ['checkpoint', 'resource']) {
+  test(`deletion beginning during ${boundary} admission cannot create a new SDK writer`, async t => {
+    const h = fixture(t); let deleting = false;
+    h.context.assertConversationAvailable = () => {
+      if (deleting) throw Object.assign(Error('synthetic deletion'), { code: 'CONVERSATION_DELETING' });
+    };
+    if (boundary === 'checkpoint') h.context.waitForCheckpointUnlock = async () => { deleting = true; return true; };
+    else h.context.acquireTaskResource = async () => {
+      deleting = true;
+      return { signal: new AbortController().signal, release() {} };
+    };
+    const result = await h.send(h.record);
+    assert.equal(result.code, 'CONVERSATION_DELETING');
+    assert.equal(h.calls.live.length, 0); assert.equal(h.calls.oneShot.length, 0);
+  });
 }
 
 test('unchanged legacy metadata upgrades preserve native resume and do not inject a bounded history substitute', async t => {
@@ -392,6 +442,12 @@ test('actual main admission supplies per-conversation scratch and SDK runtime st
     assert.equal(result.error, undefined);
     const call = [...h.calls.live, ...h.calls.oneShot][0], scratchDir = h.workspaces.resolveScratch(branch.id);
     assert.equal(call.params.scratchDir, scratchDir); assert.equal(call.options.env.TEMP, scratchDir);
+    const outputDir = inProject ? h.record.sdkSessionContext.cwd : path.join(h.record.sdkSessionContext.cwd, 'outputs');
+    assert.equal(call.params.outputDir, outputDir);
+    assert.equal(call.options.env.RELAY_OUTPUT_DIR, outputDir);
+    assert.ok(call.options.systemPrompt.append.includes(JSON.stringify(outputDir)));
+    assert.equal(call.options.resume, branch.sessionId, 'storage registration must retain the native fork source');
+    assert.equal(call.options.forkSession, true);
     assert.equal(call.options.cwd, h.record.sdkSessionContext.cwd);
     assert.notEqual(scratchDir, h.workspaces.resolveScratch(h.record.id), 'a fork has independent intermediates even when cwd is shared');
     assert.equal(call.options.env.CLAUDE_CODE_TMPDIR, path.join(h.root, 'app-data', 'sdk-runtime', 'tmp'));
@@ -425,7 +481,7 @@ test('upgrading the file delivery contract replaces a previously resumable sessi
   const resolved = h.context.resolveExecutionWorkspace({ conversationId: h.record.id });
   const currentContract = h.context.conversationRuntimeContract;
   const currentSource = declaration('conversationRuntimeContract');
-  const previousSource = currentSource.replace('file-locations-v2', 'file-locations-v1');
+  const previousSource = currentSource.replace('file-locations-v3', 'file-locations-v2');
   assert.notEqual(previousSource, currentSource, 'construct the actual prior file delivery contract');
   vm.runInContext(previousSource, h.context);
   const input = { convId: h.record.id, cwd: resolved.cwd, mode: 'plain', model: h.runtime.modelId,
@@ -685,6 +741,67 @@ test('one-shot admission rebuilds its own current guidance contract and never si
   assert.ok(call.options.systemPrompt.append.includes(h.settings.relayInstructions));
   assert.match(call.params.prompt, /before boundary/);
   assert.match(call.params.prompt, /Scheduled follow-up/);
+});
+
+test('one-shot browser scopes are invalidated by kill and completion even before the executor map is released', async t => {
+  const h = fixture(t), calls = [], pauses = [];
+  h.context.browserPanelTools.automationInvoke = async (scope, input) => { calls.push({ scope, input }); return { ok: true, tabs: [] }; };
+  h.context.browserPanelTools.automationPauseConversation = (...args) => pauses.push(args);
+  const mockSdk = { tool: (name, _description, _schema, handler) => ({ name, handler }),
+    createSdkMcpServer: instance => ({ type: 'sdk', instance }) };
+  const launch = runId => {
+    const result = h.context.runClaudeJob({ ...h.context.resolveExecutionWorkspace({ conversationId: h.record.id }),
+      runId, conversationId: h.record.id, prompt: 'fixture browser request', onEvent() {} });
+    const call = h.calls.oneShot.at(-1);
+    const tabs = call.params.mcpServersFactory(mockSdk)['relay-browser'].instance.tools.find(tool => tool.name === 'tabs');
+    return { result, call, tabs };
+  };
+  const first = launch(uuid(90)); await first.tabs.handler({});
+  const firstScope = calls.at(-1).scope;
+  assert.equal(firstScope.isCurrent(), true);
+  first.result.child.kill();
+  assert.equal(h.context.jobs.has(uuid(90)), true, 'fixture deliberately delays executor removal');
+  assert.equal(firstScope.signal.aborted, true); assert.equal(firstScope.isCurrent(), false);
+  const second = launch(uuid(91)); await second.tabs.handler({});
+  const secondScope = calls.at(-1).scope;
+  assert.equal(secondScope.runId, uuid(91)); assert.equal(secondScope.isCurrent(), true);
+  second.call.params.onEvent({ type: 'job-done', exitCode: 0 });
+  assert.equal(secondScope.signal.aborted, true); assert.equal(secondScope.isCurrent(), false);
+  assert.equal(h.context.jobs.has(uuid(91)), false);
+  assert.deepEqual(pauses.map(args => args[1]), ['run-stopped', 'run-finished']);
+});
+
+test('a real main live spawn binds browser tools to the admitted turn and revokes them on executor exit', async t => {
+  const h = fixture(t), scopes = [];
+  h.context.settleLiveSupplements = () => [];
+  h.context.browserPanelTools.automationInvoke = async scope => { scopes.push(scope); return { ok: true, tabs: [] }; };
+  await h.send(h.record);
+  const session = h.context.liveSessions.get(h.record.id);
+  await session.pendingInput.done;
+  const params = h.calls.live.at(-1).params;
+  const mockSdk = { tool: (name, _description, _schema, handler) => ({ name, handler }),
+    createSdkMcpServer: instance => ({ type: 'sdk', instance }) };
+  const tabs = params.mcpServersFactory(mockSdk)['relay-browser'].instance.tools.find(tool => tool.name === 'tabs');
+  await tabs.handler({});
+  const scope = scopes.at(-1);
+  assert.equal(scope.conversationId, h.record.id); assert.equal(scope.runId, uuid(9));
+  assert.equal(scope.isCurrent(), true);
+  params.onExit(0);
+  assert.equal(scope.signal.aborted, true); assert.equal(scope.isCurrent(), false);
+});
+
+test('native Agent definitions can name the built-in browser while retaining explicit tool restrictions', t => {
+  const h = fixture(t);
+  h.context.loadNativeAgent = options => require('../src/main/sdk/native-agent-definition').buildNativeAgent({ ...options,
+    text: '---\nname: Browser reviewer\nmcpServers: [relay-browser]\ntools: [Read]\n---\nReview the current page.' });
+  const contract = h.context.conversationRuntimeContract({ convId: h.record.id,
+    cwd: h.context.resolveExecutionWorkspace({ conversationId: h.record.id }).cwd,
+    mode: 'agent', agentName: 'Browser reviewer', model: h.runtime.modelId, providerRuntime: h.runtime });
+  const agent = contract.nativeAgent.agents['Browser reviewer'];
+  assert.deepEqual(agent.mcpServers, ['relay-browser']);
+  assert.deepEqual(agent.tools, ['Read']);
+  assert.match(agent.prompt, /先 observe 再 act/);
+  assert.match(agent.prompt, /verify 核验业务结果/);
 });
 
 test('local delivery link roots use saved project membership and only the selected conversation scratch', t => {

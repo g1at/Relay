@@ -43,7 +43,7 @@ test('native reset of a background conversation leaves another conversation comp
 
 for (const mode of ['plain', 'agent', 'orchestrate']) {
   test(`${mode}: actual handlers persist only confirmed final and retain process metadata`, async () => {
-    const h = harness(mode);
+    const h = harness(mode, { mounted: true });
     const answer = '完整答案\n\n```js\nconst answer = 42;\n```\n';
     h.send(full('progress', 'still working'));
     h.send(full('final', answer));
@@ -76,37 +76,40 @@ for (const mode of ['plain', 'agent', 'orchestrate']) {
   });
 
   test(`${mode}: child stream/full reconciles once in ActivityStream without main output contamination`, () => {
-    const h = harness(mode);
-    h.send(stream({ type: 'message_start', message: { id: 'child' } }, { parent_tool_use_id: 'parent' }));
-    h.send(stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child text' } }, { parent_tool_use_id: 'parent' }));
-    h.flush();
-    assert.equal(h.run.activityState.items.filter((item) => item.result === 'child text').length, 1, 'child progress is visible before full frame');
-    const childFull = full('child', 'child text', { parent_tool_use_id: 'parent', uuid: 'child-full' });
-    h.send(childFull); h.send(childFull);
-    h.send(full('main', 'main planning'));
-    const child = h.run.outputState.messages.filter((message) => message.parent === 'parent');
-    assert.equal(child.length, 1);
-    assert.equal(h.output.textFor(child[0]), 'child text');
-    const childRows = h.run.activityState.items.filter((item) => item.result === 'child text');
-    assert.equal(childRows.length, 1, 'stream/full and replay overlap retain only one visible child result');
-    assert.equal(childRows[0].type, 'task');
-    assert.equal(childRows[0].toolUseId, 'parent');
-    assert.equal(h.run.activityState.items.filter((item) => item.result === 'main planning').length, 1);
-    assert.equal(h.run.turn.assistant, '');
-    assert.deepEqual(h.run.turn.chat, []);
-    assert.deepEqual(h.rendered, []);
+    for (const mounted of [false, true]) {
+      const h = harness(mode, { mounted });
+      h.send(stream({ type: 'message_start', message: { id: 'child' } }, { parent_tool_use_id: 'parent' }));
+      h.send(stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child text' } }, { parent_tool_use_id: 'parent' }));
+      h.flush();
+      assert.equal(h.run.activityState.items.filter((item) => item.result === 'child text').length, 1, 'child progress is visible before full frame');
+      const childFull = full('child', 'child text', { parent_tool_use_id: 'parent', uuid: 'child-full' });
+      h.send(childFull); h.send(childFull);
+      h.send(full('main', 'main planning'));
+      h.flush(); // Presentation is deferred for complete frames as well as deltas.
+      const child = h.run.outputState.messages.filter((message) => message.parent === 'parent');
+      assert.equal(child.length, 1);
+      assert.equal(h.output.textFor(child[0]), 'child text');
+      const childRows = h.run.activityState.items.filter((item) => item.result === 'child text');
+      assert.equal(childRows.length, 1, 'stream/full and replay overlap retain only one visible child result');
+      assert.equal(childRows[0].type, 'task');
+      assert.equal(childRows[0].toolUseId, 'parent');
+      assert.equal(h.run.activityState.items.filter((item) => item.result === 'main planning').length, 1);
+      assert.equal(h.run.turn.assistant, '');
+      assert.deepEqual(h.run.turn.chat, []);
+      assert.deepEqual(h.rendered, []);
+    }
   });
 }
 
 test('delta bursts schedule one bounded process render; terminal flush cancels it', () => {
-  const h = harness();
+  const h = harness('plain', { mounted: true });
   for (let i = 0; i < 500; i++) h.send(stream({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'a' } }));
   assert.equal(h.timers.size, 1);
-  assert.equal(h.updates.length, 500);
-  assert.equal(h.updates.some((update) => update.force), false, 'text deltas do not force activity DOM updates');
+  assert.equal(h.updates.length, 0, 'text deltas ingest immediately and share a deferred presentation');
   h.send(result('done'));
   assert.equal(h.timers.size, 0);
   assert.equal(h.run.activityState.items[0].result.length, 500);
+  assert.equal(h.updates.length, 1, 'terminal flush presents the complete text once');
 });
 
 test('child message_start cannot rebind the main assistant tool input stream', () => {

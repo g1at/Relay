@@ -458,10 +458,19 @@ class TaskEventJournal {
       };
     }
 
-    const available = this._events.filter((event) => (
-      event.seq > sinceSeq && (!options.runId || event.runId === options.runId)
-    ));
-    const events = available.slice(0, limit);
+    // The in-memory journal is a contiguous retained suffix. Seek directly to
+    // the requested cursor and stop after one look-ahead match, instead of
+    // filtering the whole history again for every small recovery page.
+    const firstSeq = this._events[0]?.seq || this._lastSeq + 1;
+    const start = Math.min(this._events.length, Math.max(0, sinceSeq - firstSeq + 1));
+    const events = [];
+    let hasMore = false;
+    for (let index = start; index < this._events.length; index++) {
+      const event = this._events[index];
+      if (options.runId && event.runId !== options.runId) continue;
+      if (events.length === limit) { hasMore = true; break; }
+      events.push(event);
+    }
     return {
       epoch: this.epoch,
       sinceSeq,
@@ -469,7 +478,7 @@ class TaskEventJournal {
       ackSeq: this._ackSeq,
       compactedThroughSeq: this._compactedThroughSeq,
       resetRequired: sinceSeq < this._compactedThroughSeq || sinceSeq > this._lastSeq,
-      hasMore: available.length > events.length,
+      hasMore,
       events: JSON.parse(JSON.stringify(events)),
     };
   }
@@ -601,28 +610,33 @@ class TaskEventJournal {
     const maxEvents = positiveLimit(options.maxEvents, this.maxEvents);
     const maxBytes = positiveLimit(options.maxBytes, this.maxBytes);
     const dropAcknowledged = options.dropAcknowledged !== false;
-    let retained = this._events;
-    if (dropAcknowledged && this._ackSeq > 0) {
-      retained = retained.filter((event) => event.seq > this._ackSeq);
+    // Build the bounded suffix backwards: each retained record is serialized
+    // once, and records excluded by count/byte limits need no serialization.
+    // Do not mutate the live events/cursor until the atomic replacement succeeds.
+    let first = Math.max(0, this._events.length - maxEvents);
+    if (dropAcknowledged && this._ackSeq > 0 && this._events.length) {
+      first = Math.max(first, Math.min(this._events.length, this._ackSeq - this._events[0].seq + 1));
     }
-    if (retained.length > maxEvents) retained = retained.slice(retained.length - maxEvents);
-
-    let byteLength = retained.reduce((total, event) => total + Buffer.byteLength(eventLine(event)), 0);
-    while (retained.length && byteLength > maxBytes) {
-      byteLength -= Buffer.byteLength(eventLine(retained[0]));
-      retained.shift();
+    const lines = [];
+    let byteLength = 0;
+    let start = this._events.length;
+    for (let index = this._events.length - 1; index >= first; index--) {
+      const line = eventLine(this._events[index]);
+      const bytes = Buffer.byteLength(line);
+      if (byteLength + bytes > maxBytes) break;
+      lines.push(line); byteLength += bytes; start = index;
     }
-
+    const retained = this._events.slice(start);
     const firstRetainedSeq = retained.length ? retained[0].seq : this._lastSeq + 1;
+    const content = lines.reverse().join('');
+    writeFileAtomic(this.journalPath, content);
     this._compactedThroughSeq = Math.max(
       this._compactedThroughSeq,
       Math.min(this._lastSeq, firstRetainedSeq - 1),
     );
-    const content = retained.map(eventLine).join('');
-    writeFileAtomic(this.journalPath, content);
     this._events = retained;
     this._eventCount = retained.length;
-    this._byteLength = Buffer.byteLength(content);
+    this._byteLength = byteLength;
     this._writeMeta();
     return {
       epoch: this.epoch,

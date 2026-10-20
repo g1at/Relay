@@ -1,7 +1,7 @@
 'use strict';
 // Real WebContents + production browser host; only synthetic loopback documents.
 // No Relay main window/services and no external webpage is opened.
-const { app, BrowserWindow, WebContentsView, session } = require('electron');
+const { BaseWindow, app, BrowserWindow, WebContentsView, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
 const output = path.resolve(__dirname, '../.codex-tmp/browser-page-scrollbars-smoke');
@@ -38,7 +38,7 @@ app.whenReady().then(async () => {
   const base = 'http://127.0.0.1:' + first.address().port;
   app.on('session-created', ses => ses.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/.test(details.url) && ![base, iframeBase].some(origin => details.url.startsWith(origin + '/')) })));
   owner = new BrowserWindow({ width: 660, height: 760, show: false, webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true } });
-  await owner.loadURL('about:blank'); host = createBrowserPanelHost({ owner, WebContentsView, session });
+  await owner.loadURL('about:blank'); host = createBrowserPanelHost({ BaseWindow, owner, WebContentsView, session });
   const created = await host.invoke({ action: 'create', url: base + '/' });
   await host.invoke({ action: 'setBounds', rect: { x: 0, y: 0, width: 640, height: 680 } });
   await host.invoke({ action: 'visibility', id: created.id, visible: true }); owner.show();
