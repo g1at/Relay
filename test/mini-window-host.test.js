@@ -6,7 +6,7 @@ const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const { createMiniWindowHost, isQuickChatEnabled, normalizeQuickChatPatch } = require('../src/main/app/mini-window-host');
 
-function fixture(t, initial = {}) {
+function fixture(t, initial = {}, nativeBounds = bounds => bounds) {
   let settings = structuredClone(initial), clock = 0, nextTimer = 0, failWrites = false;
   const pending = new Map(), windows = [], writes = [], states = [], menus = [], callbacks = [], errors = [];
   const timers = {
@@ -26,7 +26,7 @@ function fixture(t, initial = {}) {
   };
   class FakeWindow extends EventEmitter {
     constructor(options) {
-      super(); this.options = options; this.bounds = Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, options[key]]));
+      super(); this.options = options; this.bounds = nativeBounds(Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, options[key]])), options);
       this.destroyed = false; this.visible = false; this.focusCount = 0; this.top = options.alwaysOnTop;
       this.frames = [];
       this.webContents = new EventEmitter(); this.webContents.sent = [];
@@ -38,7 +38,7 @@ function fixture(t, initial = {}) {
     isDestroyed() { return this.destroyed; }
     isVisible() { return this.visible; }
     getBounds() { return { ...this.bounds }; }
-    setBounds(bounds) { this.bounds = { ...bounds }; this.frames.push({ at: clock, ...bounds }); this.emit('move'); this.emit('resize'); }
+    setBounds(bounds) { this.bounds = nativeBounds({ ...bounds }, this.options); this.frames.push({ at: clock, ...bounds }); this.emit('move'); this.emit('resize'); }
     setVisibleOnAllWorkspaces(value) { this.allWorkspaces = value; }
     setAlwaysOnTop(value) { this.top = value; }
     show() { this.visible = true; }
@@ -408,6 +408,57 @@ test('orb drag uses the OS cursor, distinguishes a click and persists a clamped 
   assert.deepEqual(orb.getBounds(), { x: 1364, y: 12, width: 64, height: 64 });
   assert.equal(h.host.orbDrag({ phase: 'end' }).moved, true);
   assert.deepEqual(h.settings.floatingOrbPosition, { x: 1364, y: 12 });
+});
+
+test('fractional-DPI size readback cannot accumulate across orb drags or their move frames', t => {
+  const h = fixture(t, { floatingOrbPosition: { x: 200, y: 200 } }, (bounds, options) => options.focusable === false
+    ? { ...bounds, width: bounds.width + 1, height: bounds.height + 2 } : bounds);
+  const orb = h.orb();
+  h.screen.cursor = { x: 220, y: 220 };
+  for (let i = 0; i < 60; i++) {
+    h.host.orbDrag({ phase: 'start' });
+    for (let step = 0; step < 3; step++) {
+      h.screen.cursor.x += 2; h.screen.cursor.y += 2;
+      h.host.orbDrag({ phase: 'move' });
+    }
+    h.host.orbDrag({ phase: i % 2 ? 'end' : 'cancel' });
+    assert.deepEqual([orb.bounds.width, orb.bounds.height], [65, 66], 'native rounding must remain bounded');
+    assert.equal(h.pending.size, 0, 'ending the drag consumes queued persistence');
+  }
+  assert.ok(orb.frames.length <= 240, 'placement must not retry until native bounds are exactly 64');
+  assert.ok(orb.frames.every(frame => frame.width === 64 && frame.height === 64));
+  assert.deepEqual(h.settings.floatingOrbPosition, { x: 560, y: 560 });
+  const frames = orb.frames.length;
+  h.host.orbDrag({ phase: 'start' }); h.host.orbDrag({ phase: 'end' });
+  assert.equal(orb.frames.length, frames, 'a click does not resize the orb');
+});
+
+test('cross-screen orb dragging retains its pointer anchor without inheriting inflated dimensions', t => {
+  const h = fixture(t, { floatingOrbPosition: { x: -200, y: 100 } });
+  h.screen.displays.unshift({ workArea: { x: -1280, y: -200, width: 1280, height: 800 } });
+  const orb = h.orb(); orb.bounds.width = 144; orb.bounds.height = 146;
+  h.screen.cursor = { x: -180, y: 120 }; h.host.orbDrag({ phase: 'start' });
+  h.screen.cursor = { x: 120, y: 220 }; h.host.orbDrag({ phase: 'move' });
+  assert.deepEqual(orb.getBounds(), { x: 100, y: 200, width: 64, height: 64 });
+  h.screen.cursor = { x: -1240, y: -160 }; h.host.orbDrag({ phase: 'end' });
+  assert.deepEqual(orb.getBounds(), { x: -1260, y: -180, width: 64, height: 64 });
+  assert.deepEqual(h.settings.floatingOrbPosition, { x: -1260, y: -180 });
+});
+
+test('display changes reset orb size while keeping expanded chat bounds and cancelling stale drags', t => {
+  const h = fixture(t, { floatingOrbPosition: { x: 1200, y: 600 } });
+  const orb = h.orb(), panel = h.panel(); panel.setBounds({ x: 100, y: 100, width: 500, height: 400 });
+  for (const event of ['display-metrics-changed', 'display-added', 'display-removed']) {
+    orb.bounds = { x: 200, y: 200, width: 144, height: 146 };
+    h.host.orbDrag({ phase: 'start' }); h.screen.emit(event);
+    assert.deepEqual(orb.getBounds(), { x: 200, y: 200, width: 64, height: 64 });
+    assert.deepEqual(panel.getBounds(), { x: 100, y: 100, width: 500, height: 400 });
+    assert.equal(h.host.orbDrag({ phase: 'end' }).ok, false);
+    assert.equal(h.pending.size, 0);
+  }
+  h.screen.displays = [{ workArea: { x: -100, y: -50, width: 70, height: 70 } }];
+  h.screen.emit('display-metrics-changed');
+  assert.deepEqual(orb.getBounds(), { x: -88, y: -38, width: 46, height: 46 }, 'fixed target still respects work-area clamping');
 });
 
 test('session hide releases the orb renderer; explicit show restores its position without replacing the chat', t => {

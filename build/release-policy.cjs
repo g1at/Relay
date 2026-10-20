@@ -3,6 +3,7 @@
 const PRIMARY_REPOSITORY = 'g1at/Relay';
 const LEGACY_REPOSITORY = 'g1at/relay-updates';
 const MIGRATION_VERSION = '3.0.1';
+const REPAIR_MIGRATION_VERSION = '3.0.2';
 const UPDATE_FEED = Object.freeze({ provider: 'github', owner: 'g1at', repo: 'Relay' });
 
 function versionParts(version) {
@@ -26,7 +27,7 @@ function releasePolicy(version) {
   }
   return {
     version, tag: `v${version}`, feed: { ...UPDATE_FEED },
-    repositories: version === MIGRATION_VERSION ? [PRIMARY_REPOSITORY, LEGACY_REPOSITORY] : [PRIMARY_REPOSITORY],
+    repositories: [MIGRATION_VERSION, REPAIR_MIGRATION_VERSION].includes(version) ? [PRIMARY_REPOSITORY, LEGACY_REPOSITORY] : [PRIMARY_REPOSITORY],
   };
 }
 
@@ -70,5 +71,5 @@ function assertNewRelease(policy, repository, releases, matchingRefs) {
   }
 }
 
-module.exports = { PRIMARY_REPOSITORY, LEGACY_REPOSITORY, MIGRATION_VERSION, UPDATE_FEED,
+module.exports = { PRIMARY_REPOSITORY, LEGACY_REPOSITORY, MIGRATION_VERSION, REPAIR_MIGRATION_VERSION, UPDATE_FEED,
   versionParts, compareVersions, releasePolicy, assertUpdateFeed, assertPackagePolicy, assertRemoteRepository, assertNewRelease };

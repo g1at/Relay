@@ -54,6 +54,9 @@ function fixture(t, nested = false) {
     }
     return { name, version: sdk.version, dir, optional: true };
   });
+  for (const name of ['win32-x64.node', 'sdk-job-launcher-win32-x64.exe', 'manifest.json']) {
+    write(path.join(root, 'src/main/sdk/native', name), fs.readFileSync(path.join(project, 'src/main/sdk/native', name)));
+  }
   const config = JSON.parse(JSON.stringify(manifest.build));
   const resources = path.join(root, 'fixture-output', 'resources'), destination = path.join(resources, 'app');
   const info = { appDir: root, projectDir: root, buildResourcesDir: path.join(root, 'build'), config,
@@ -101,6 +104,11 @@ test('real ASAR writer unpacks both runtimes at paths used by Windows and WSL wi
     const relative = path.join('node_modules', name, binName(name));
     assert.equal(asar.statFile(archive, relative).unpacked, true);
     assert.deepEqual(fs.readFileSync(path.join(archive + '.unpacked', relative)), nativeBytes(name));
+  }
+  for (const name of ['win32-x64.node', 'sdk-job-launcher-win32-x64.exe', 'manifest.json']) {
+    const relative = path.join('src/main/sdk/native', name);
+    assert.equal(asar.statFile(archive, relative).unpacked, true, relative);
+    assert.deepEqual(fs.readFileSync(path.join(archive + '.unpacked', relative)), fs.readFileSync(path.join(project, relative)));
   }
   assert.equal(runtimePath(archive), path.join(archive + '.unpacked', 'node_modules', wanted[1], 'claude'));
   assert.equal(fs.existsSync(runtimePath(archive)), true);
@@ -231,4 +239,22 @@ test('xterm remains vendored for on-demand terminal loading while build tools st
   }
   for (const [file, source] of [['xterm-LICENSE', '@xterm/xterm/LICENSE'], ['xterm-addon-fit-LICENSE', '@xterm/addon-fit/LICENSE']]) assert.equal(hash('renderer/vendor/' + file), hash('node_modules/' + source));
   assert.ok(manifest.dependencies['@anthropic-ai/sdk']); assert.ok(sdk.peerDependencies['@anthropic-ai/sdk']);
+});
+
+test('beforePack rejects missing or changed SDK Job binaries and stale native sources', t => {
+  const f = fixture(t), hook = require(path.join(project, manifest.build.beforePack));
+  const directory = path.join(f.root, 'src/main/sdk/native');
+  for (const name of ['win32-x64.node', 'sdk-job-launcher-win32-x64.exe']) {
+    const file = path.join(directory, name), bytes = fs.readFileSync(file);
+    fs.renameSync(file, file + '.held');
+    assert.throws(() => hook({ packager: f.packager }), /会话进程树组件不可用/);
+    fs.renameSync(file + '.held', file);
+    const changed = Buffer.from(bytes); changed[changed.length - 1] ^= 1; fs.writeFileSync(file, changed);
+    assert.throws(() => hook({ packager: f.packager }), /会话进程树组件不可用/);
+    fs.writeFileSync(file, bytes);
+  }
+  write(path.join(f.root, 'build/sdk-job-control-win.cc'), '// stale build fixture');
+  assert.throws(() => hook({ packager: f.packager }), /会话进程树组件不可用/);
+  fs.unlinkSync(path.join(f.root, 'build/sdk-job-control-win.cc'));
+  assert.doesNotThrow(() => hook({ packager: f.packager }));
 });

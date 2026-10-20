@@ -15,6 +15,8 @@ const root = path.join(repo, '.codex-tmp', 'installer-nsis-build');
 const project = path.join(root, 'fixture-project');
 const payload = path.join(root, 'fixture-payload');
 const out = path.join(root, 'compiled-not-for-install');
+const resources = path.join(root, 'fixture-resources');
+fs.cpSync(path.join(repo, 'build'), resources, { recursive: true });
 for (const dir of [project, path.join(payload, 'resources'), out]) fs.mkdirSync(dir, { recursive: true });
 const packageJson = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
 const nsisHome = process.env.RELAY_TEST_NSIS_HOME || path.join(process.env.LOCALAPPDATA, 'electron-builder', 'cache', 'nsis', 'nsis-3.0.4.1');
@@ -27,6 +29,8 @@ fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({
 }));
 fs.writeFileSync(path.join(payload, 'Relay Fixture.exe'), 'NOT AN EXECUTABLE: only compile template file-existence dependencies.\n');
 fs.writeFileSync(path.join(payload, 'resources', 'app.asar'), 'NOT AN ASAR: isolated compile fixture.\n');
+
+require('../build/generate-installer-manifest.cjs').writeManifest(payload, path.join(resources, 'installer-payload-manifest.json'), '0.0.0', 'Relay Fixture');
 
 const { build, Platform } = require('electron-builder');
 const { NsisTarget } = require('app-builder-lib/out/targets/nsis/NsisTarget');
@@ -73,13 +77,13 @@ NsisTarget.prototype.computeScriptAndSignUninstaller = async function (defines, 
         appId: 'dev.relay.installer.compile.fixture',
         productName: 'Relay Fixture',
         electronVersion: require('electron/package.json').version,
-        directories: { output: out, buildResources: path.join(repo, 'build') },
+        directories: { output: out, buildResources: resources },
         artifactName: 'SANDBOX-NOT-FOR-INSTALL-${version}-${arch}.${ext}',
         forceCodeSigning: false,
         win: { target: ['nsis'], icon: path.join(repo, 'build', 'icon.ico'), signAndEditExecutable: false },
         nsis: {
           ...packageJson.build.nsis,
-          include: path.join(repo, 'build', 'installer.nsh'),
+          include: path.join(resources, 'installer.nsh'),
           installerIcon: path.join(repo, 'build', 'icon.ico'),
           uninstallerIcon: path.join(repo, 'build', 'icon.ico'),
           installerHeaderIcon: path.join(repo, 'build', 'icon.ico'),

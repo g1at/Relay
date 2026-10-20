@@ -505,22 +505,33 @@ for (const firstRead of ['canceled-prepare', 'timed-out-prepare', 'public-status
     } });
     const session = h.sdk.createLiveSession({ mcpServers: registry, onMessage() {}, onExit() {} });
     const controller = new AbortController();
-    const first = firstRead === 'public-status' ? session.mcpServerStatus()
-      : session.prepareMcp({ servers: registry, timeoutMs: 20, signal: controller.signal });
-    await started.promise;
-    if (firstRead === 'canceled-prepare') {
+    let first;
+    try {
+      // This fixture tests an already running status read, not cold-start speed.
+      // Startup can legitimately exceed 20 ms when many files run in parallel.
+      await session.whenReady();
+      first = firstRead === 'public-status' ? session.mcpServerStatus()
+        : session.prepareMcp({ servers: registry,
+          timeoutMs: firstRead === 'timed-out-prepare' ? 20 : 2000, signal: controller.signal });
+      await Promise.race([started.promise, first.then(result => {
+        assert.ok(reads > 0, `状态查询尚未开始，准备已提前结束：${result?.code || 'unknown'}`);
+      })]);
+      if (firstRead === 'canceled-prepare') {
+        controller.abort();
+        assert.equal((await first).canceled, true);
+      } else if (firstRead === 'timed-out-prepare') {
+        assert.equal((await first).timedOut, true);
+      }
+      const recovered = await session.prepareMcp({ servers: registry, timeoutMs: 100 });
+      assert.equal(recovered.ok, true, '首个只读请求未返回，也应能重新查询真实状态');
+      assert.equal(reads, 2);
+      assert.equal(h.calls.sync.length, 0, '初始配置不因旧读取超时重复写入');
+    } finally {
       controller.abort();
-      assert.equal((await first).canceled, true);
-    } else if (firstRead === 'timed-out-prepare') {
-      assert.equal((await first).timedOut, true);
+      stuckRead.resolve([{ name: 'docs', status: 'failed' }]);
+      if (first) await first.catch(() => {});
+      await session.kill();
     }
-    const recovered = await session.prepareMcp({ servers: registry, timeoutMs: 100 });
-    assert.equal(recovered.ok, true, '首个只读请求未返回，也应能重新查询真实状态');
-    assert.equal(reads, 2);
-    assert.equal(h.calls.sync.length, 0, '初始配置不因旧读取超时重复写入');
-    stuckRead.resolve([{ name: 'docs', status: 'failed' }]);
-    await first;
-    await session.kill();
   });
 }
 
@@ -569,7 +580,7 @@ test('初始化超时可以取消等待；迟到初始化仍按相同 Query 完�
 test('one-shot and live SDK launches share output instructions and scratch defaults without changing permission mode', async () => {
   const cwd = path.resolve('Synthetic Project'), scratchDir = path.resolve('Synthetic Relay Data', 'conversation-scratch', 'session');
   for (const kind of ['live', 'one-shot']) {
-    const h = harness(), params = { cwd, validWorkingDir: cwd, scratchDir, permissionMode: 'default',
+    const h = harness(), params = { cwd, validWorkingDir: cwd, scratchDir, outputDir: path.join(cwd, 'outputs'), permissionMode: 'default',
       runtimeEnv: { CLAUDE_CODE_TMPDIR: path.resolve('Synthetic SDK Data', 'tmp') },
       appendSystemPrompt: 'Preserve existing instruction.',
       nativeAgent: { agent: 'writer', agents: { writer: { description: 'fixture', prompt: 'Original Agent instruction.' } } } };
@@ -581,6 +592,9 @@ test('one-shot and live SDK launches share output instructions and scratch defau
     assert.ok(options.additionalDirectories.includes(scratchDir));
     for (const key of ['TEMP', 'TMP', 'TMPDIR', 'RELAY_SCRATCH_DIR']) assert.equal(options.env[key], scratchDir);
     assert.equal(options.env.CLAUDE_CODE_TMPDIR, params.runtimeEnv.CLAUDE_CODE_TMPDIR);
+    assert.equal(options.env.RELAY_OUTPUT_DIR, params.outputDir);
+    assert.ok(options.systemPrompt.append.includes(JSON.stringify(params.outputDir)));
+    assert.ok(options.agents.writer.prompt.includes(JSON.stringify(params.outputDir)));
     assert.match(options.systemPrompt.append, /Preserve existing instruction/);
     assert.match(options.systemPrompt.append, /最终回答用本地 Markdown 链接/);
     assert.ok(options.systemPrompt.append.includes(JSON.stringify(scratchDir)));
@@ -593,19 +607,21 @@ test('one-shot and live SDK launches share output instructions and scratch defau
 test('one-shot and live runtime preparation map file hook locations before a WSL query starts', async () => {
   const cwd = 'D:\\Cybersecurity\\项目', scratchDir = 'C:\\Relay Data\\scratch\\session';
   const runtimeCwd = '/mnt/d/Cybersecurity/项目', runtimeScratch = '/mnt/c/Relay Data/scratch/session';
+  const outputDir = cwd + '\\outputs', runtimeOutput = runtimeCwd + '/outputs';
   for (const kind of ['one-shot', 'live']) {
     const h = harness();
     h.sdk.configureRuntimeEnvironment({ prepareOptions: async options => ({ ...options,
-      cwd: runtimeCwd, env: { ...options.env, RELAY_SCRATCH_DIR: runtimeScratch, RELAY_AGENT_ENVIRONMENT: 'wsl' } }) });
+      cwd: runtimeCwd, env: { ...options.env, RELAY_SCRATCH_DIR: runtimeScratch, RELAY_OUTPUT_DIR: runtimeOutput, RELAY_AGENT_ENVIRONMENT: 'wsl' } }) });
     let session;
     if (kind === 'live') {
-      session = h.sdk.createLiveSession({ cwd, scratchDir, onMessage() {}, onExit() {} });
+      session = h.sdk.createLiveSession({ cwd, scratchDir, outputDir, onMessage() {}, onExit() {} });
       await h.created;
-    } else await h.sdk.runOneShot({ cwd, scratchDir, prompt: 'fixture', onEvent() {} }).handle.whenClosed();
+    } else await h.sdk.runOneShot({ cwd, scratchDir, outputDir, prompt: 'fixture', onEvent() {} }).handle.whenClosed();
     const hooks = h.calls.options.hooks;
     const submitted = await hooks.UserPromptSubmit[0].hooks[0]({ hook_event_name: 'UserPromptSubmit', prompt: 'Continue', cwd: '/home/tester' });
     assert.ok(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(runtimeCwd)));
     assert.ok(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(runtimeScratch)));
+    assert.ok(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(runtimeOutput)));
     assert.equal(submitted.hookSpecificOutput.additionalContext.includes(JSON.stringify(cwd)), false);
     const updates = [];
     for (const group of hooks.PreToolUse) for (const hook of group.hooks) {
@@ -614,15 +630,16 @@ test('one-shot and live runtime preparation map file hook locations before a WSL
     }
     assert.equal(updates.length, 1); assert.equal(updates[0].name, 'writer');
     assert.ok(updates[0].prompt.includes(JSON.stringify(runtimeCwd)));
+    assert.ok(updates[0].prompt.includes(JSON.stringify(runtimeOutput)));
     assert.equal(updates[0].prompt.includes(JSON.stringify(cwd)), false);
-    const completed = await hooks.Stop[0].hooks[0]({ hook_event_name: 'Stop', cwd: '/home/tester', last_assistant_message: '[报告](./report.md)' });
+    const completed = await hooks.Stop[0].hooks[0]({ hook_event_name: 'Stop', cwd: '/home/tester', last_assistant_message: '[报告](./outputs/report.md)' });
     assert.deepEqual(clone(completed), {});
     if (session) await session.kill();
   }
 });
 test('explicit managed runtime paths replace case variants inherited from the host only when configured', () => {
   const sdk = require('../src/main/sdk/claude-sdk');
-  const names = ['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR'];
+  const names = ['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR', 'RELAY_OUTPUT_DIR'];
   const before = Object.fromEntries(Object.entries(process.env).filter(([key]) => names.includes(key.toUpperCase())));
   try {
     for (const key of Object.keys(process.env)) if (names.includes(key.toUpperCase())) delete process.env[key];
@@ -638,4 +655,38 @@ test('explicit managed runtime paths replace case variants inherited from the ho
     for (const key of Object.keys(process.env)) if (names.includes(key.toUpperCase())) delete process.env[key];
     Object.assign(process.env, before);
   }
+});
+
+
+test('live deferred MCP status stays truthful and explicit reconnect waits for native policy acceptance', async t => {
+  const h = harness();
+  h.sdk.configureRuntimeEnvironment(require('../src/main/sdk/agent-environment').createAgentEnvironment());
+  const session = h.sdk.createLiveSession({ mcpServers: registry, onMessage() {}, onExit() {} });
+  t.after(() => session.kill());
+  await session.whenReady({ timeoutMs: 2000 });
+  const config = h.calls.options.mcpServers.docs;
+  const instance = require('../src/main/sdk/host-mcp-loopback').getHostMcpLoopbackOwner(config).instance;
+  let activations = 0; instance.connectUpstream = async () => { activations++; };
+  h.setStatuses([{ name: 'docs', source: 'dynamic', config, status: 'connected' }]);
+  assert.equal((await session.mcpServerStatus())[0].status, 'deferred');
+  assert.equal((await session.prepareMcp({ servers: registry })).ok, true);
+  assert.equal(activations, 0);
+  await session.reconnectMcpServer('docs'); assert.equal(activations, 1);
+  h.setStatuses([{ name: 'docs', source: 'dynamic', config, status: 'disabled' }]);
+  assert.equal((await session.mcpServerStatus())[0].status, 'disabled');
+  await assert.rejects(session.reconnectMcpServer('docs'), /REGISTRATION_NOT_READY/);
+  assert.equal(activations, 1);
+});
+
+test('one-shot preparation admits deferred discovery without connecting its upstream', async () => {
+  const h = harness({ mcpServerStatus: async () => [{ name: 'docs', source: 'dynamic',
+    config: h.calls.options.mcpServers.docs, status: 'connected' }] }), done = deferred(), events = [];
+  h.sdk.configureRuntimeEnvironment(require('../src/main/sdk/agent-environment').createAgentEnvironment());
+  h.sdk.runOneShot({ prompt: 'synthetic ordinary chat', mcpServers: registry,
+    onEvent: event => { events.push(event); if (event.type === 'job-done') done.resolve(event); } });
+  assert.equal((await done.promise).exitCode, 0);
+  const status = events.find(event => event.subtype === 'relay_mcp_status' && event.phase === 'settled');
+  assert.equal(status.ok, true); assert.equal(status.items[0].status, 'deferred');
+  assert.equal(require('../src/main/sdk/host-mcp-loopback').getHostMcpLoopbackOwner(h.calls.options.mcpServers.docs).instance.childTransport, null);
+  assert.deepEqual(h.calls.reconnect, []); assert.equal(h.calls.inputs.length, 1);
 });

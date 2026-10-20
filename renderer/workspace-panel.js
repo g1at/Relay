@@ -7,6 +7,8 @@
   if (!app || !panel || !toggle || !handle) return;
   const $ = id => document.getElementById(id);
   const bridge = window.api && window.api.workspace;
+  const browserAutomationStates = new Map(), browserAutomationRequested = new Set();
+  const browserTabStatus = window.RelayBrowserFeedback?.createTabStatusStore();
   const icons = {
     folder: '<path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>',
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
@@ -50,8 +52,10 @@
   let preferredWidth = DEFAULT_WIDTH, width = 0, opened = false, tab = null, maximized = false, restoreWidth = DEFAULT_WIDTH;
   let automaticMaximized = false, snapTimer = null;
   try { const saved = Number(localStorage.getItem(STORAGE_KEY)); if (saved >= MIN_WIDTH && saved < 10000) preferredWidth = saved; } catch (_) {}
+  let defaultPreferredWidth = preferredWidth, contextLoading = false;
   let drag = null, layoutFrame = null, lastLayoutWidth = -1, lastLayoutViewportWidth = -1;
   let context = null, contextKey = '', revision = 0, filesRevision = 0, previewRevision = 0;
+  const browserPresentationDismissed = new Set();
   let workspace = null, expanded = new Set(), entries = new Map(), preview = null, sourceMode = false, previewImages = null;
   let directoryLink = null, selectedDirectory = null;
   let loadingFiles = false, fileFingerprint = '';
@@ -90,7 +94,7 @@
     // Measure before changing either grid column; both panes reuse this snapshot.
     const viewportWidth = Number.isFinite(geometry?.viewportWidth) ? geometry.viewportWidth : app.clientWidth;
     const maximum = Math.max(MIN_WIDTH, viewportWidth);
-    const displayed = opened && (!app.dataset.view || app.dataset.view === 'chat');
+    const displayed = opened && !contextLoading && (!app.dataset.view || app.dataset.view === 'chat');
     if (!displayed && $('workspacePreviewBody').querySelector('.workspace-html-frame')) {
       htmlSuspended = true; disposeHtmlPreview();
     } else if (displayed && htmlSuspended) {
@@ -120,6 +124,7 @@
     app.classList.toggle('workspace-maximized', displayed && maximized);
     panel.inert = !displayed; panel.setAttribute('aria-hidden', String(!displayed));
     toggle.setAttribute('aria-expanded', String(displayed));
+    toggle.disabled = contextLoading;
     toggle.title = opened ? '收起右侧栏' : '展开文件、浏览器、终端、审查与任务';
     toggle.setAttribute('aria-label', toggle.title);
     // Keep the captured grip alive through collapse so a reverse movement in
@@ -159,7 +164,10 @@
     reviewView?.setActive(displayed && tab === 'review');
     fitTerminal(); scheduleNative();
   }
-  function saveWidth() { try { localStorage.setItem(STORAGE_KEY, String(maximized ? restoreWidth : preferredWidth)); } catch (_) {} }
+  function saveWidth() {
+    defaultPreferredWidth = maximized ? restoreWidth : preferredWidth;
+    try { localStorage.setItem(STORAGE_KEY, String(defaultPreferredWidth)); } catch (_) {}
+  }
   function resizeWidth(value, { forceSplit = false, viewportWidth = app.clientWidth } = {}) {
     const maximum = Math.max(MIN_WIDTH, viewportWidth);
     const next = forceSplit ? splitRestoreWidth(value, maximum) : Math.max(MIN_WIDTH, Math.min(maximum, value));
@@ -209,6 +217,7 @@
     try { if (handle.hasPointerCapture(previous.id)) handle.releasePointerCapture(previous.id); } catch (_) {}
     layout(); if (commit) saveWidth();
     if (commit && previous.collapsed) {
+      browserPresentationDismissed.add(context?.conversationId || null);
       navigationRevision++; closeMenus(false); toggle.focus({ preventScroll: true }); dispatchTab();
     }
     window.dispatchEvent(new CustomEvent('relay:workspace-resize-end'));
@@ -258,12 +267,55 @@
   let tabsFingerprint = '', menuButton = null;
   const obscured = new Set(), priorInert = new Map();
   const activeTab = () => tabs.find(item => item.id === activeId);
+  const lastBrowserTabs = new Map();
+  const panelPresentationStates = new Map();
+  let browserContextFallback = false;
+  const browserContextId = () => context?.conversationId || null;
+  const tabInContext = item => item?.kind !== 'browser' || item.browserConversationId === browserContextId();
+  const visibleTabs = () => tabs.filter(tabInContext);
+  function rememberPanelPresentation() {
+    panelPresentationStates.set(browserContextId(), { opened, activeId,
+      // Automatic full width follows the viewport, never another conversation.
+      maximized: maximized && !automaticMaximized });
+  }
+  function restorePanelPresentation() {
+    const saved = panelPresentationStates.get(browserContextId());
+    opened = !!saved?.opened;
+    // Split width is an app preference; visibility and manual full width belong
+    // to the conversation being restored.
+    preferredWidth = defaultPreferredWidth;
+    restoreWidth = defaultPreferredWidth;
+    maximized = opened && !!saved?.maximized; automaticMaximized = false;
+    activeId = saved?.activeId || null;
+    browserContextFallback = false;
+    const selected = tabs.find(item => item.id === activeId && tabInContext(item));
+    if (!opened && panel.contains(document.activeElement)) toggle.focus({ preventScroll: true });
+    if (selected) { activate(selected.id, { reveal: false }); return; }
+    // A closed/removed tab can fall back to an existing tab without opening the
+    // panel. New conversations inherit neither visibility nor tool selection.
+    activeId = null; tab = null;
+    if (saved) reconcileBrowserTabs({ restore: true });
+    else {
+      panel.querySelectorAll('[data-workspace-content]').forEach(content => { content.hidden = true; });
+      $('workspaceTreeToggle').hidden = true;
+      renderTabs(); layout(); dispatchTab(); syncNative();
+    }
+  }
+  function reconcileBrowserTabs({ restore = false } = {}) {
+    const current = activeTab(), available = visibleTabs();
+    if (current && tabInContext(current) && !restore) { renderTabs(); return; }
+    const remembered = lastBrowserTabs.get(browserContextId());
+    const next = available.find(item => item.id === remembered) || available.find(item => item.kind === 'browser') || available[0];
+    if (next) { activate(next.id, { reveal: false }); browserContextFallback = next.kind !== 'browser'; return; }
+    navigationRevision++; activeId = null; tab = null;
+    preview = null; disposeHtmlPreview(); closeMenus(false); renderTabs(); syncInternalPages(); layout(); dispatchTab(); syncNative();
+  }
   const fileLayout = window.relayWorkspaceFileLayout = window.RelayWorkspaceFileLayout.create({
     body: $('workspaceFileBody'), tree: $('workspaceTreePane'), handle: $('workspaceTreeResizeHandle'), toggle: $('workspaceTreeToggle'), window,
     getActive: () => opened && tab === 'files' && (!app.dataset.view || app.dataset.view === 'chat'),
   });
   function renderTabs() {
-    const hasTabs = tabs.length > 0;
+    const available = visibleTabs(), hasTabs = available.length > 0;
     $('workspaceAdd').hidden = !hasTabs;
     $('workspaceTabs').hidden = !hasTabs;
     $('workspaceNoTabs').hidden = hasTabs;
@@ -271,13 +323,13 @@
       panel.querySelectorAll('[data-workspace-content]').forEach(content => { content.hidden = true; });
       $('workspaceTreeToggle').hidden = true;
     }
-    const fingerprint = JSON.stringify(tabs.map(item => [item.id, item.title, item.id === activeId]));
+    const fingerprint = JSON.stringify(available.map(item => [item.id, item.title, item.id === activeId]));
     if (fingerprint === tabsFingerprint) return;
     tabsFingerprint = fingerprint;
     const host = $('workspaceTabs'), scroll = host.scrollLeft;
     const focus = host.contains(document.activeElement) ? { id: document.activeElement.closest('[data-tab-id]')?.dataset.tabId, close: document.activeElement.classList.contains('workspace-tab-close') } : null;
     host.replaceChildren();
-    for (const item of tabs) {
+    for (const item of available) {
       const wrapper = document.createElement('div'); wrapper.className = 'workspace-tab-item'; wrapper.dataset.tabId = item.id;
       wrapper.classList.toggle('is-active', item.id === activeId);
       const button = document.createElement('button'); button.type = 'button'; button.className = 'workspace-tab'; button.dataset.workspaceTab = item.kind;
@@ -290,8 +342,8 @@
       button.addEventListener('keydown', event => {
         if (event.key === 'Delete') { event.preventDefault(); void closeTab(item.id); return; }
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        const index = tabs.indexOf(item), next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-        event.preventDefault(); activate(tabs[next].id); $('workspaceTabs').querySelector('[aria-selected="true"]')?.focus();
+        const visible = visibleTabs(), index = visible.indexOf(item), next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + visible.length) % visible.length;
+        event.preventDefault(); activate(visible[next].id); $('workspaceTabs').querySelector('[aria-selected="true"]')?.focus();
       });
       const closeButton = document.createElement('button'); closeButton.type = 'button'; closeButton.className = 'workspace-tab-close'; closeButton.setAttribute('aria-label', '关闭标签页：' + item.title); closeButton.title = '关闭标签页'; closeButton.append(icon('close'));
       closeButton.addEventListener('click', () => void closeTab(item.id)); wrapper.append(button, closeButton); host.append(wrapper);
@@ -316,7 +368,10 @@
     scroll.scrollTop = position?.top || 0; scroll.scrollLeft = position?.left || 0;
   }
   function activate(id, { refresh = true, reveal = true } = {}) {
-    const item = tabs.find(value => value.id === id); if (!item) return;
+    if (contextLoading) return;
+    const item = tabs.find(value => value.id === id); if (!item || !tabInContext(item)) return;
+    browserContextFallback = false;
+    if (item.kind === 'browser') lastBrowserTabs.set(browserContextId(), item.id);
     clearTimeout(findTimer); findTimer = null;
     $('workspaceNotice').textContent = '';
     navigationRevision++; savePreviewScroll(); disposeHtmlPreview(); activeId = id; tab = item.kind; if (reveal) opened = true; closeMenus(false);
@@ -333,21 +388,23 @@
   }
   function dispatchTab() { window.dispatchEvent(new CustomEvent('relay:workspace-tab', { detail: { tab, open: opened, id: activeId } })); }
   function open(next = null, { startTerminal = false, refresh = true } = {}) {
-    opened = true; syncContext();
+    if (contextLoading) return;
+    syncContext(); opened = true;
     const kind = ['files', 'browser', 'terminal', 'review'].includes(next) ? next : null;
-    if (!kind && !tabs.length) {
+    if (!kind && !visibleTabs().length) {
       renderTabs(); layout(); dispatchTab(); syncNative();
       $('workspaceLauncherActions').querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
       return;
     }
-    if (kind === 'browser') { const existing = tabs.find(item => item.kind === kind); if (existing) activate(existing.id); else void createBrowser(); return; }
+    if (kind === 'browser') { const existing = visibleTabs().find(item => item.id === lastBrowserTabs.get(browserContextId())) || visibleTabs().find(item => item.kind === kind); if (existing) activate(existing.id); else void createBrowser(); return; }
     if (kind === 'terminal') { void openTerminal(); return; }
-    let item = kind ? tabs.find(value => value.id === (kind === 'files' ? 'files' : kind)) : activeTab();
+    let item = kind ? tabs.find(value => value.id === (kind === 'files' ? 'files' : kind)) : activeTab() || visibleTabs()[0];
     if (!item) { const type = kind || 'files'; item = { id: type, kind: type, title: ({ files: '打开文件', terminal: '终端', review: '审查' })[type] }; tabs.push(item); }
     activate(item.id, { refresh });
   }
   function close() {
-    if (!opened) return;
+    if (contextLoading || !opened) return;
+    browserPresentationDismissed.add(browserContextId());
     navigationRevision++; disposeHtmlPreview(); endDrag(false); closeMenus(false); opened = false; setMaximized(false, { preservePreference: true });
     if (panel.contains(document.activeElement)) toggle.focus();
     layout(); dispatchTab(); syncNative();
@@ -365,17 +422,18 @@
       for (const browserId of ids) releaseNativeBrowser(browserId);
     }
     if (item.id === activeId) savePreviewScroll();
-    if (item.kind === 'browser' && !item.browser?.isPreview && item.browser?.url && item.browser.url !== 'about:blank') { closedPages.push(item.browser.url); if (closedPages.length > 20) closedPages.shift(); }
+    if (item.kind === 'browser' && !item.browser?.isPreview && item.browser?.url && item.browser.url !== 'about:blank') { const pages = closedBrowserPages(item.browserConversationId); pages.push(item.browser.url); if (pages.length > 20) pages.shift(); }
     item.managerView?.destroy(); item.managerMount?.remove();
     if (item.kind === 'review') { reviewView?.destroy(); reviewView = null; }
     tabs.splice(tabs.indexOf(item), 1);
     if (item.id !== activeId) { renderTabs(); return; }
     previewRevision++; disposeHtmlPreview();
-    const next = tabs[Math.min(index, tabs.length - 1)];
+    const available = visibleTabs(), next = available[Math.min(index, available.length - 1)];
     if (next) { const wasOpen = opened; activate(next.id); if (!wasOpen) { opened = false; layout(); dispatchTab(); syncNative(); } }
     else { navigationRevision++; activeId = null; tab = null; preview = null; panel.querySelectorAll('[data-workspace-content]').forEach(content => { content.hidden = true; }); $('workspaceNoTabs').hidden = false; $('workspaceTreeToggle').hidden = true; renderTabs(); dispatchTab(); syncNative(); if (opened) $('workspaceLauncherActions').querySelector('button:not(:disabled)')?.focus({ preventScroll: true }); }
   }
   function setMaximized(value, { preservePreference = false } = {}) {
+    if (contextLoading) return;
     const full = opened && !!value;
     if (full && !maximized) restoreWidth = splitRestoreWidth(width || preferredWidth);
     if (!full && maximized && (!automaticMaximized || !preservePreference)) preferredWidth = splitRestoreWidth(automaticMaximized ? preferredWidth : restoreWidth);
@@ -390,7 +448,7 @@
     $('workspaceFileTree').hidden = false;
   }
   function closeMenus(restoreFocus = true) {
-    const previous = menuButton; menuButton = null;
+    const previous = menuButton; menuButton = null; previous?.setAttribute('aria-expanded', 'false');
     for (const [menu, button] of [['workspaceAddMenu', 'workspaceAdd'], ['workspaceBrowserMenu', 'workspaceBrowserMore']]) { if (!$(menu).hidden) $(menu).hidden = true; $(button).setAttribute('aria-expanded', 'false'); }
     if (restoreFocus && previous) previous.focus({ preventScroll: true });
     scheduleNative();
@@ -438,9 +496,10 @@
     for (const button of panel.querySelectorAll('[data-workspace-create]')) syncToolShortcut(button);
   });
   function createTool(kind) {
+    if (contextLoading) return false;
     const action = toolActions().find(item => item.kind === kind);
     if (!action || action.disabled) return false;
-    opened = true; syncContext(); layout();
+    syncContext(); opened = true; layout();
     action.run(); return true;
   }
   function toolActions() {
@@ -486,24 +545,37 @@
   window.relayWorkspacePanel = {
     open, close, create: createTool, newTerminal, createTerminal: newTerminal, isActive: name => opened && tab === name,
     openFileLink,
-    getState: () => ({ open: opened, tab, activeId, tabs: tabs.map(item => ({ id: item.id, kind: item.kind, title: item.title, path: item.preview?.path, browserId: item.browserId, sessionId: item.sessionId, root: item.terminalRoot })), width, preferredWidth, min: MIN_WIDTH, max: maxWidth(), maximized }),
-    setObscured(reason, value) { if (value) obscured.add(reason); else obscured.delete(reason); syncNative(); },
+    getState: () => ({ open: opened, tab, activeId, tabs: visibleTabs().map(item => ({ id: item.id, kind: item.kind, title: item.title, path: item.preview?.path, browserId: item.browserId, ownerConversationId: item.browserConversationId, sessionId: item.sessionId, root: item.terminalRoot })), width, preferredWidth, min: MIN_WIDTH, max: maxWidth(), maximized }),
+    setObscured(reason, value) {
+      // File-link menus already have role=menu; measure their actual overlap.
+      // Invalidate candidates immediately rather than waiting for the observer.
+      if (reason === 'file-link-menu') overlayCandidates = null;
+      else if (value) obscured.add(reason); else obscured.delete(reason);
+      syncNative();
+    },
   };
   function syncContext() {
+    if (contextLoading) return;
     const next = readContext(), key = keyFor(next);
     if (key === contextKey) {
       context = next;
       reviewView?.setContext(next);
       $('workspaceRootTitle').textContent = directoryLink ? workspace?.name || '文件夹' : next?.title || '当前对话';
+      if (tab === 'browser') renderBrowserAutomation();
       return;
     }
-    context = next; reviewView?.setContext(next); contextKey = key; revision++; filesRevision++; previewRevision++;
+    const conversationChanged = browserContextId() !== (next?.conversationId || null);
+    if (conversationChanged) {
+      endDrag(false); clearSnapAnimation(); savePreviewScroll(); rememberPanelPresentation();
+      navigationRevision++; closeMenus(false);
+    }
+    context = next; browserFeedback?.contextChanged(); reviewView?.setContext(next); contextKey = key; revision++; filesRevision++; previewRevision++;
     const removedActivePreview = !!activeTab()?.preview;
     for (let i = tabs.length - 1; i >= 0; i--) if (tabs[i].preview) tabs.splice(i, 1);
     // A file preview does not implicitly own a file-tree tab. Switching
     // conversations restores an existing tool or the launcher, never a new tab.
     if (removedActivePreview) {
-      activeId = (tabs.find(item => item.id === 'files') || tabs[0])?.id || null;
+      activeId = (visibleTabs().find(item => item.id === 'files') || visibleTabs()[0])?.id || null;
       tab = activeTab()?.kind || null;
     }
     renderTabs();
@@ -515,10 +587,28 @@
     $('workspaceTerminalError').textContent = '';
     $('workspaceFileTree').replaceChildren();
     renderTerminals();
-    if (removedActivePreview) {
+    if (conversationChanged) {
+      restorePanelPresentation();
+    } else if (activeTab() && !tabInContext(activeTab())) {
+      reconcileBrowserTabs();
+    } else if (removedActivePreview) {
       if (activeId) activate(activeId, { reveal: false });
       else { layout(); dispatchTab(); syncNative(); }
     } else if (opened && tab === 'files') void refreshFiles();
+    if (tab === 'browser') renderBrowserAutomation();
+  }
+  function onConversationChanged(event) {
+    if (event?.detail?.loading) {
+      // History loading still exposes the previous conversation through
+      // readContext(). Hide its presentation and invalidate pending reveals,
+      // while keeping its remembered open state and background executor intact.
+      endDrag(false); clearSnapAnimation(); closeMenus(false);
+      contextLoading = true; navigationRevision++; revision++; filesRevision++; previewRevision++; loadingFiles = false;
+      layout(); syncNative(); return;
+    }
+    const wasLoading = contextLoading; contextLoading = false;
+    syncContext();
+    if (wasLoading) { layout(); dispatchTab(); syncNative(); if (opened && tab === 'files') void refreshFiles(); }
   }
   async function resolveRoot(fileStamp = filesRevision) {
     if (!bridge || !context?.conversationId) throw new Error('请先进入一个对话，再打开工作目录');
@@ -574,7 +664,7 @@
     if (activePath) Array.from(tree.querySelectorAll('[data-path]')).find(row => row.dataset.path === activePath)?.focus({ preventScroll: true });
   }
   async function refreshFiles() {
-    if (loadingFiles || !opened || tab !== 'files') return;
+    if (contextLoading || loadingFiles || !opened || tab !== 'files') return;
     const stamp = ++filesRevision, ctx = context, link = directoryLink; loadingFiles = true;
     try {
       if (!workspace && !await resolveRoot(stamp)) return;
@@ -781,8 +871,13 @@
   });
 
   const browserBridge = window.api?.browser;
+  let browserFeedback = null;
   void syncNativeWorkspaceShortcuts();
-  const closedPages = [];
+  const closedPages = new Map();
+  function closedBrowserPages(conversationId = browserContextId()) {
+    if (!closedPages.has(conversationId)) closedPages.set(conversationId, []);
+    return closedPages.get(conversationId);
+  }
   let browserPreferences = { showFullUrl: false };
   for (const [id, name, label, before] of [
     ['workspaceBrowserSiteInfo', 'lock', '网站信息', 'workspaceBrowserAddress'],
@@ -793,7 +888,9 @@
     $('workspaceBrowserNav').insertBefore(button, $(before));
   }
   $('workspaceBrowserAddress').placeholder = '搜索或输入网址';
-  let creatingBrowser = false, nativeFrame = null, nativeChain = Promise.resolve(), nativeEpoch = 0, nativeSignature = '', nativeActiveId = null;
+  $('workspaceBrowserNav').insertBefore($('workspaceBrowserAutomation'), $('workspaceBrowserMore'));
+  const creatingBrowsers = new Set();
+  let nativeFrame = null, nativeChain = Promise.resolve(), nativeEpoch = 0, nativeSignature = '', nativeActiveId = null;
   let findTimer = null, captureTimer = null, capturing = false, geometryUntil = 0;
   const closedBrowserIds = new Set();
   const browserNotice = value => { $('workspaceBrowserNotice').textContent = value || ''; };
@@ -830,12 +927,18 @@
       applyBrowserState(route.state); syncInternalPages(); syncNative();
     }
   }
-  function applyBrowserState(state) {
+  function applyBrowserState(state, conversationId) {
     if (!state?.id || closedBrowserIds.has(state.id)) return null;
+    browserTabStatus?.update({ type: 'state', id: state.id, tab: state });
     const pending = pendingNativeBrowsers.get(state.id);
     if (pending) { pending.state = { ...pending.state, ...state }; return null; }
     let item = browserTab(state.id);
-    if (!item) { item = { id: 'browser-' + (++tabNumber), kind: 'browser', browserId: state.id, title: '新标签页', browser: {} }; tabs.push(item); }
+    // The native owner is stable even after AI control is released. Never infer
+    // an async event's owner from whichever conversation is currently visible.
+    const owner = Object.hasOwn(state, 'ownerConversationId') ? state.ownerConversationId : conversationId !== undefined ? conversationId
+      : browserAutomationStates.get(state.id)?.conversationId ?? item?.browserConversationId;
+    if (!item) { item = { id: 'browser-' + (++tabNumber), kind: 'browser', browserId: state.id, title: '新标签页', browser: {}, browserConversationId: owner }; tabs.push(item); }
+    else if (owner !== undefined) item.browserConversationId = owner;
     const route = browserRoutes(item).find(value => value.browserId === state.id);
     // In-page navigation can create history without a will-navigate event.
     if (route && !item.internalPage && item.browserId === state.id && Number.isInteger(route.endIndex) && Number.isInteger(state.historyIndex) && state.historyIndex > route.endIndex) {
@@ -845,7 +948,7 @@
     if (item.internalPage || item.browserId !== state.id) return item;
     if ((state.url && item.browser.url && state.url !== item.browser.url) || (Number.isFinite(state.zoom) && state.zoom !== item.browser.zoom)) { item.snapshot = null; item.capturedAt = 0; }
     item.browser = { ...item.browser, ...state }; item.title = state.title || (state.url && state.url !== 'about:blank' ? state.url : '新标签页'); renderTabs();
-    if (activeId === item.id) renderBrowser(); return item;
+    if (activeId === item.id) { if (tabInContext(item)) renderBrowser(); else reconcileBrowserTabs(); } return item;
   }
   function nativeCanGo(item, action) {
     if (item.internalPage || !item.browser?.[action === 'back' ? 'canGoBack' : 'canGoForward']) return false;
@@ -855,39 +958,45 @@
   async function browserCall(payload) {
     if (!browserBridge?.invoke) throw new Error('浏览器组件未加载，请重启 Relay');
     const result = assertResult(await browserBridge.invoke(payload));
-    if (result.tab && payload.action !== 'close') applyBrowserState(result.tab);
+    if (result.tab && payload.action !== 'close') applyBrowserState(result.tab, payload.conversationId);
     return result;
   }
   async function createBrowser(url = 'about:blank') {
     const internal = window.RelayBrowserInternalPages?.parse(url);
     if (internal) { const item = createInternalPage(internal); return { ok: true, id: item.id }; }
-    if (creatingBrowser) return;
-    creatingBrowser = true; closeMenus(false); const intent = navigationRevision;
-    try { await syncNativeWorkspaceShortcuts(); const result = await browserCall({ action: 'create', url }); const item = applyBrowserState(result.tab || { id: result.id, url }); if (item && opened && navigationRevision === intent && (!app.dataset.view || app.dataset.view === 'chat')) { activate(item.id); focusBrowserAddress(); } return result; }
-    catch (error) { $('workspaceNotice').textContent = error.message; }
-    finally { creatingBrowser = false; }
+    const conversationId = browserContextId();
+    if (creatingBrowsers.has(conversationId)) return;
+    creatingBrowsers.add(conversationId); closeMenus(false); const intent = navigationRevision;
+    try { await syncNativeWorkspaceShortcuts(); const result = await browserCall({ action: 'create', url, conversationId }); const item = applyBrowserState(result.tab || { id: result.id, url }, conversationId); if (item && tabInContext(item) && opened && navigationRevision === intent && (!app.dataset.view || app.dataset.view === 'chat')) { activate(item.id); focusBrowserAddress(); } return result; }
+    catch (error) { if (browserContextId() === conversationId && navigationRevision === intent) $('workspaceNotice').textContent = error.message; }
+    finally { creatingBrowsers.delete(conversationId); }
   }
   function showBrowserTab(state) {
+    if (contextLoading) return;
+    syncContext();
+    const item = applyBrowserState(state); if (!item || !tabInContext(item)) return;
     void syncNativeWorkspaceShortcuts();
     if (typeof window.showChatView === 'function') window.showChatView();
-    opened = true; syncContext();
-    const item = applyBrowserState(state); if (item) activate(item.id);
+    syncContext(); opened = true;
+    activate(item.id);
   }
   window.relayWorkspacePanel.showBrowserTab = showBrowserTab;
   window.relayWorkspacePanel.openUrl = url => {
+    if (contextLoading) return Promise.resolve({ ok: false, canceled: true });
     if (typeof window.showChatView === 'function') window.showChatView();
-    opened = true; syncContext(); layout();
+    syncContext(); opened = true; layout();
     return createBrowser(url);
   };
   const pendingCodePreviews = new Map();
   async function openCodePreview(html, duplicateId = null) {
+    if (contextLoading) return { ok: false, canceled: true };
     if (typeof html !== 'string' || !duplicateId && !html.trim()) throw new Error('没有可运行的 HTML 代码');
     if (typeof browserBridge?.invoke !== 'function') throw new Error('浏览器组件未加载，请重启 Relay');
     if (typeof window.showChatView === 'function') window.showChatView();
-    opened = true; syncContext(); closeMenus(false); layout();
-    const sourceKey = contextKey, pendingKey = sourceKey + '\0' + html;
+    syncContext(); opened = true; closeMenus(false); layout();
+    const sourceKey = contextKey, conversationId = browserContextId(), pendingKey = sourceKey + '\0' + html;
     if (!duplicateId) {
-      const existing = tabs.find(item => item.kind === 'browser' && item.browser?.isPreview && item.previewHtml === html);
+      const existing = visibleTabs().find(item => item.kind === 'browser' && item.browser?.isPreview && item.previewHtml === html);
       if (existing) { activate(existing.id); return { ok: true, id: existing.browserId }; }
       if (pendingCodePreviews.has(pendingKey)) return pendingCodePreviews.get(pendingKey);
     }
@@ -897,14 +1006,14 @@
     const request = (async () => {
       try {
         const result = assertResult(await browserBridge.invoke(duplicateId
-          ? { action: 'duplicatePreview', id: duplicateId, clientRequestId }
-          : { action: 'createPreview', html, title: '运行预览', clientRequestId }));
+          ? { action: 'duplicatePreview', id: duplicateId, clientRequestId, conversationId }
+          : { action: 'createPreview', html, title: '运行预览', clientRequestId, conversationId }));
         const state = { ...result.tab, ...pending.state };
         if (pending.state?.id) pendingNativeBrowsers.delete(pending.state.id);
         if (disposed || contextKey !== sourceKey || !opened || navigationRevision !== intent || app.dataset.view && app.dataset.view !== 'chat') {
           releaseNativeBrowser(state.id || result.id); return { ok: true, canceled: true };
         }
-        const item = applyBrowserState(state);
+        const item = applyBrowserState(state, conversationId);
         if (item) { item.previewHtml = html; activate(item.id); }
         return result;
       } catch (error) {
@@ -932,6 +1041,7 @@
   function renderBrowser() {
     const item = activeTab(); if (item?.kind !== 'browser') return;
     const state = item.browser || {}, internal = !!item.internalPage, blank = !state.url || state.url === 'about:blank';
+    renderBrowserAutomation();
     syncInternalPages();
     const address = $('workspaceBrowserAddress');
     if (address.dataset.tabId !== item.id && document.activeElement === address) address.value = blank || state.isPreview ? '' : state.url;
@@ -949,12 +1059,171 @@
     $('workspaceBrowserBack').disabled = !(nativeCanGo(item, 'back') || item.browserRouteIndex > 0);
     $('workspaceBrowserForward').disabled = !(nativeCanGo(item, 'forward') || item.browserRouteIndex < (item.browserRoutes?.length || 0) - 1);
     const reload = $('workspaceBrowserReload'); reload.title = state.loading ? '停止加载' : '刷新页面'; reload.setAttribute('aria-label', reload.title); reload.replaceChildren(icon(state.loading ? 'stop' : 'reload')); reload.disabled = blank;
-    browserNotice(state.error || '');
+    if (state.error || !browserFeedback?.isSelecting()) browserNotice(state.error || '');
     $('workspaceBrowserEmpty').hidden = !blank;
     $('workspaceBrowserFind').hidden = !item.findOpen;
     if ($('workspaceBrowserFindInput').dataset.tabId !== item.id) { $('workspaceBrowserFindInput').value = item.findText || ''; $('workspaceBrowserFindInput').dataset.tabId = item.id; $('workspaceBrowserFindCount').textContent = item.findCount || ''; }
     scheduleNative(); if (!state.loading && !blank) scheduleCapture();
   }
+  function renderBrowserAutomation() {
+    const bar = $('workspaceBrowserAutomation'), item = activeTab();
+    if (!bar) return;
+    const id = item?.browserId;
+    const wasHidden = bar.hidden;
+    bar.hidden = !context?.conversationId || !!context.isDraft || item?.kind !== 'browser' || !!item.internalPage || !!item.browser?.isPreview || !id || item.browser?.url === 'about:blank';
+    if (bar.hidden !== wasHidden) scheduleNative();
+    const more = $('workspaceBrowserMore');
+    if (bar.hidden) { more.dataset.noticeKind = ''; more.title = '浏览器更多操作'; return; }
+    const current = browserAutomationStates.get(id), conversationId = context?.conversationId;
+    const other = current?.conversationId && current.conversationId !== conversationId;
+    const running = ['controlled', 'working', 'error'].includes(current?.state);
+    const bound = !!current?.conversationId;
+    bar.dataset.state = current?.state || 'unbound';
+    const status = $('workspaceBrowserAutomationStatus');
+    const controlStatus = other ? '已关联其他任务' : !bound ? '可将此页交给当前任务' : current.state === 'error'
+      ? '操作未完成 · 可接管检查页面' : running
+      ? current.state === 'working' ? 'AI 正在操作 · 可随时接管' : '已交给 AI · 可随时接管'
+      : '已暂停 · 由你控制';
+    // A saved download/feedback notice must never disguise an explicit takeover.
+    const notice = other ? null : browserTabStatus?.get(id);
+    const persistent = current?.state === 'paused' ? null : notice;
+    const noticeText = notice ? [...new Set([notice.label, notice.detail].filter(Boolean))].join('\n') : '';
+    const statusText = persistent?.label || controlStatus;
+    if (status.textContent !== statusText) status.textContent = statusText;
+    status.title = persistent?.detail || current?.reason || controlStatus;
+    bar.dataset.noticeKind = persistent?.kind || '';
+    const button = $('workspaceBrowserAutomationControl');
+    button.disabled = !!other || !conversationId;
+    button.textContent = !bound ? '交给此任务' : running ? '接管' : '允许继续';
+    button.title = other ? '此页已关联其他任务' : controlStatus + ' · ' + button.textContent + (noticeText ? '\n' + noticeText : '');
+    button.setAttribute?.('aria-label', button.textContent);
+    bar.title = [...new Set([controlStatus, noticeText, current?.reason].filter(Boolean))].join('\n');
+    more.dataset.noticeKind = notice?.kind || '';
+    more.title = '浏览器更多操作\n' + bar.title;
+    const annotate = $('workspaceBrowserAnnotate');
+    if (annotate) {
+      annotate.disabled = !bound || !!other;
+      annotate.title = !bound ? '先将网页交给当前任务，再指出问题' : other ? '此页属于其他任务' : '选择页面元素或区域，添加反馈';
+      if (noticeText) annotate.title += '\n' + noticeText;
+    }
+    if (!browserAutomationRequested.has(id)) {
+      browserAutomationRequested.add(id);
+      void browserBridge?.invoke?.({ action: 'automation', command: 'state', id }).then(result => {
+        if (!disposed && result?.ok && !closedBrowserIds.has(id)) {
+          mergeBrowserAutomationState(result);
+          if (activeTab()?.browserId === id) renderBrowserAutomation();
+        }
+      }).catch(() => {});
+    }
+  }
+  function mergeBrowserAutomationState(next) {
+    if (!next?.id || closedBrowserIds.has(next.id)) return false;
+    const current = browserAutomationStates.get(next.id);
+    const versioned = value => Number.isSafeInteger(value?.revision) && value.revision >= 0;
+    // Events and invoke replies travel on different IPC paths. A delayed resume
+    // reply must not undo a later human takeover event (or revive a closed tab).
+    if (versioned(current) && (!versioned(next) || next.revision <= current.revision)) return false;
+    browserAutomationStates.set(next.id, { ...next });
+    const item = browserTab(next.id);
+    if (item && next.conversationId) {
+      item.browserConversationId = next.conversationId;
+      if (activeId === item.id && !tabInContext(item)) reconcileBrowserTabs(); else renderTabs();
+    }
+    return true;
+  }
+  function presentAutomationTab(event) {
+    const id = event.tab?.id;
+    if (!id || closedBrowserIds.has(id)) return false;
+    const current = browserAutomationStates.get(id), revision = event.revision ?? event.tab?.revision;
+    if (current?.state === 'paused' || Number.isSafeInteger(current?.revision)
+      && (!Number.isSafeInteger(revision) || revision < current.revision)) return false;
+    // Only the renderer knows which conversation and layout the user is viewing.
+    // Background tasks may register a tab but cannot switch the visible page.
+    const firstPresentation = !browserTab(id)?.automationPresented;
+    const item = applyBrowserState(event.tab, event.conversationId);
+    if (item) item.automationPresented = true;
+    const mayReveal = event.reveal === true || firstPresentation && (opened || !browserPresentationDismissed.has(event.conversationId));
+    if (mayReveal && !contextLoading && context?.conversationId === event.conversationId && !document.hidden
+      && (!app.dataset.view || app.dataset.view === 'chat')) showBrowserTab(event.tab);
+    return true;
+  }
+  async function browserAutomationControl(command) {
+    const item = activeTab(), id = item?.browserId, conversationId = context?.conversationId;
+    if (!id || !conversationId) return;
+    try {
+      const result = assertResult(await browserBridge.invoke({ action: 'automation', command, id, conversationId }));
+      mergeBrowserAutomationState(result);
+      if (activeTab()?.browserId === id) { renderBrowserAutomation(); scheduleNative(); }
+    } catch (error) { if (activeTab()?.browserId === id) browserNotice(error.message); }
+  }
+  $('workspaceBrowserAutomationControl')?.addEventListener('click', () => {
+    const state = browserAutomationStates.get(activeTab()?.browserId);
+    void browserAutomationControl(!state?.conversationId ? 'claim' : ['controlled', 'working', 'error'].includes(state.state) ? 'pause' : 'resume');
+  });
+  function browserFeedbackNotice(message, source = {}) {
+    // Feedback status must not add/remove a row above the native viewport.
+    // Doing so races the next selection with Chromium's queued resize event.
+    if (source.conversationId && source.conversationId !== context?.conversationId) return;
+    const id = source.id || activeTab()?.browserId;
+    if (id && browserTabStatus) {
+      browserTabStatus.update({ type: 'feedback-notice', id, message });
+      if (activeTab()?.browserId === id) renderBrowserAutomation();
+    } else browserNotice(message);
+  }
+  browserFeedback = window.RelayBrowserFeedback?.create({ api: browserBridge, getContext: () => context,
+    getTab: () => activeTab()?.browser, notify: browserFeedbackNotice, addToComposer: item => window.relayAddBrowserFeedback?.(item),
+    onRestored(states, conversationId) {
+      for (const state of states) {
+        mergeBrowserAutomationState({ id: state.id, conversationId, state: 'paused', reason: '网页已恢复，请检查后允许继续' });
+        applyBrowserState(state, conversationId);
+      }
+      if (context?.conversationId === conversationId && states[0]) showBrowserTab(states[0]);
+    },
+  });
+  let browserAnnotationPreparation = 0;
+  async function chooseBrowserAnnotation(mode) {
+    const preparation = ++browserAnnotationPreparation, id = activeTab()?.browserId, conversationId = context?.conversationId;
+    const contextRevision = revision, navigation = navigationRevision;
+    const current = () => !disposed && preparation === browserAnnotationPreparation && contextRevision === revision
+      && navigation === navigationRevision && id === activeTab()?.browserId
+      && conversationId === context?.conversationId && nativeDesired().visible;
+    browserFeedbackNotice(''); browserNotice('');
+    try {
+      // A setBounds reply means the request reached the host, not that the
+      // parent's panel transition or the child viewport has finished rendering.
+      // Wait for ancestor motion to finish and drain the latest geometry writes
+      // across consecutive animation frames before the host/preload handshake.
+      await window.RelayBrowserFeedback.waitForStableViewport({
+        isCurrent: current,
+        measure() {
+          const desired = nativeDesired(), rect = $('workspaceBrowserViewport').getBoundingClientRect();
+          return [desired.id, desired.visible, desired.rect, rect.x, rect.y, rect.width, rect.height, nativeEpoch];
+        },
+        hasMotion() {
+          for (let node = $('workspaceBrowserViewport'); node; node = node.parentElement) {
+            if (node.getAnimations?.().some(animation => (animation.pending || animation.playState === 'running')
+              && Number.isFinite(animation.effect?.getComputedTiming?.().endTime))) return true;
+          }
+          return false;
+        },
+        async flush() {
+          syncNative();
+          let queued;
+          do { queued = nativeChain; await queued; } while (current() && queued !== nativeChain);
+        },
+      });
+      if (current()) await browserFeedback?.choose(mode);
+    } catch (error) {
+      if (!disposed && preparation === browserAnnotationPreparation) browserFeedbackNotice(error.message, { id, conversationId });
+    }
+  }
+  $('workspaceBrowserAnnotate')?.addEventListener('click', () => {
+    const menu = $('workspaceBrowserMenu'); menu.replaceChildren();
+    menuItem(menu, '选择页面元素', 'code', () => void chooseBrowserAnnotation('element'));
+    menuItem(menu, '框选页面区域', 'camera', () => void chooseBrowserAnnotation('region'));
+    showMenu('workspaceBrowserMenu', $('workspaceBrowserAnnotate'));
+  });
+
   function visibleElement(node) {
     if (!node || node.hidden || node.closest('[hidden],.hidden,[inert]')) return false;
     const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
@@ -963,20 +1232,31 @@
   const overlaySelector = '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],.model-popup,.preview-overlay,.confirm-overlay,.search-overlay,.cs-popup,.copy-popover,.project-composer-menu,.modal-backdrop,.agent-picker-overlay,.cv-viewer,.context-usage-popover';
   const activeOverlaySelector = '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],.model-popup.show,.preview-overlay.show,.confirm-overlay,.search-overlay.show,.cs-popup.show,.copy-popover.show,.project-composer-menu:not([hidden]),.modal-backdrop,.search-overlay,.agent-picker-overlay,.cv-viewer,.context-usage-popover.visible';
   let overlayCandidates = null;
-  function hasOverlay() {
+  function overlayObscuresBrowser(node, viewport) {
+    if (!node.isConnected || !node.matches(activeOverlaySelector) || !visibleElement(node)) return false;
+    // Native views sit above renderer content. Real modals suspend the page even
+    // when the dialog box itself is beside it; a chat menu only matters where it
+    // overlaps the page. Keeping every menu global unnecessarily froze browsing.
+    if (node.matches('dialog:modal,[aria-modal="true"],.modal-backdrop,.confirm-overlay,.preview-overlay,.search-overlay,.agent-picker-overlay,.cv-viewer')
+      || node.closest('[aria-modal="true"],.modal-backdrop,.confirm-overlay,.preview-overlay,.search-overlay,.agent-picker-overlay,.cv-viewer')) return true;
+    const rect = node.getBoundingClientRect();
+    return rect.left < viewport.right && rect.right > viewport.left
+      && rect.top < viewport.bottom && rect.bottom > viewport.top;
+  }
+  function hasOverlay(viewport = $('workspaceBrowserViewport').getBoundingClientRect()) {
     // Candidate membership changes only with DOM insertion/removal or role.
     // Visibility is still checked live so a closing modal cannot expose a page early.
     if (!overlayCandidates) overlayCandidates = Array.from(document.querySelectorAll(overlaySelector));
-    return overlayCandidates.some(node => node.isConnected && node.matches(activeOverlaySelector) && visibleElement(node));
+    return overlayCandidates.some(node => overlayObscuresBrowser(node, viewport));
   }
   function nativeDesired() {
     const item = activeTab(), state = item?.browser;
     // A launcher/file/terminal has no native page geometry to measure. Still
     // return a hidden target so a previously active browser can be detached.
-    if (item?.kind !== 'browser' || item.internalPage || !item.browserId) return { id: null, visible: false,
+    if (item?.kind !== 'browser' || !tabInContext(item) || item.internalPage || !item.browserId) return { id: null, visible: false,
       rect: { x: 0, y: 0, width: 0, height: 0 }, cover: false };
-    const allowed = opened && tab === 'browser' && !!item?.browserId && !document.hidden && !obscured.size && (!app.dataset.view || app.dataset.view === 'chat') && !hasOverlay();
     const viewport = $('workspaceBrowserViewport').getBoundingClientRect();
+    const allowed = opened && !contextLoading && tab === 'browser' && !!item?.browserId && !document.hidden && !obscured.size && (!app.dataset.view || app.dataset.view === 'chat') && !hasOverlay(viewport);
     // Fill the page viewport even at full width. The resize grip remains
     // reachable beside the tab/address bars above the native WebContentsView;
     // pointer capture keeps that gesture active when the pane moves.
@@ -1046,7 +1326,7 @@
     try {
       // Preserve Chromium history in each web segment. A local management page
       // sits between those segments in this tab's own back/forward history.
-      const response = assertResult(await browserBridge.invoke({ action: 'create', url, clientRequestId }));
+      const response = assertResult(await browserBridge.invoke({ action: 'create', url, clientRequestId, conversationId: item.browserConversationId }));
       const state = { ...response.tab, ...pending.state };
       if (pending.state?.id) pendingNativeBrowsers.delete(pending.state.id);
       if (!tabs.includes(item) || item.browserNavigation !== revision) { releaseNativeBrowser(state.id); return; }
@@ -1066,13 +1346,19 @@
     try {
       if (action === 'navigate') {
         const section = window.RelayBrowserInternalPages?.parse(extra.url);
-        if (section) { showInternalPage(item, section); return; }
+        if (section) {
+          if (item.browserId) await browserBridge.invoke({ action: 'automation', command: 'pause', id: item.browserId });
+          showInternalPage(item, section); return;
+        }
         if (/^relay:/i.test(extra.url || '')) throw new Error('没有这个浏览器管理页面');
         if (item.internalPage) { await navigateFromInternal(item, extra.url); return; }
         discardBrowserForward(item);
       }
       if (action === 'back' || action === 'forward') {
-        if (!nativeCanGo(item, action)) { restoreBrowserRoute(item, item.browserRouteIndex + (action === 'back' ? -1 : 1)); return; }
+        if (!nativeCanGo(item, action)) {
+          if (item.browserId) await browserBridge.invoke({ action: 'automation', command: 'pause', id: item.browserId });
+          restoreBrowserRoute(item, item.browserRouteIndex + (action === 'back' ? -1 : 1)); return;
+        }
       }
       if (item.internalPage) { if (action === 'reload') await item.managerView.refresh(); return; }
       await browserCall({ action, id: item.browserId, ...extra });
@@ -1107,7 +1393,7 @@
   function syncInternalPages() {
     for (const item of tabs) {
       if (!item.managerView) continue;
-      const active = !!item.internalPage && item.id === activeId && opened && (!app.dataset.view || app.dataset.view === 'chat');
+      const active = !!item.internalPage && tabInContext(item) && item.id === activeId && opened && !contextLoading && (!app.dataset.view || app.dataset.view === 'chat');
       item.managerMount.hidden = !active; item.managerView.setActive(active);
     }
   }
@@ -1140,15 +1426,15 @@
     if (item.id === activeId) { renderBrowser(); syncNative(); }
   }
   function createInternalPage(section) {
-    const item = { id: 'browser-' + (++tabNumber), kind: 'browser', title: '', browser: {} };
+    const item = { id: 'browser-' + (++tabNumber), kind: 'browser', title: '', browser: {}, browserConversationId: browserContextId() };
     tabs.push(item); showInternalPage(item, section); activate(item.id); return item;
   }
   function openBrowserManager(section = 'general') {
     closeMenus(false);
-    const existing = tabs.find(item => item.internalPage === section);
+    const existing = visibleTabs().find(item => item.internalPage === section);
     if (existing) activate(existing.id); else createInternalPage(section);
   }
-  async function reopenClosedBrowser() { const url = closedPages.pop(); if (url) { const result = await createBrowser(url); if (!result?.ok) closedPages.push(url); } }
+  async function reopenClosedBrowser() { const pages = closedBrowserPages(), url = pages.pop(); if (url) { const result = await createBrowser(url); if (!result?.ok) pages.push(url); } }
   $('workspaceBrowserBookmark').addEventListener('click', () => void browserAction('bookmark', { toggle: true }));
   $('workspaceBrowserSiteInfo').addEventListener('click', () => {
     const menu = $('workspaceBrowserMenu'); menu.replaceChildren();
@@ -1164,12 +1450,29 @@
   $('workspaceBrowserMore').addEventListener('click', () => {
     const menu = $('workspaceBrowserMenu'); menu.replaceChildren();
     const state = activeTab()?.browser || {}, internal = !!activeTab()?.internalPage, blank = internal || !state.url || state.url === 'about:blank';
+    if (!$('workspaceBrowserAutomation').hidden) {
+      const status = $('workspaceBrowserAutomationStatus'), task = browserAutomationStates.get(activeTab()?.browserId);
+      const heading = document.createElement('div'); heading.className = 'workspace-browser-task-status';
+      const label = document.createElement('strong'); label.textContent = status.textContent; heading.append(label);
+      const notice = task?.conversationId !== context?.conversationId ? null : browserTabStatus?.get(activeTab()?.browserId);
+      const details = [...new Set([status.title, notice?.label, notice?.detail].filter(value => value && value !== status.textContent))];
+      if (details.length) {
+        const detail = document.createElement('span'); detail.textContent = details.join('\n'); heading.append(detail);
+      }
+      menu.append(heading);
+      if (task?.conversationId === context?.conversationId) {
+        const release = menuItem(menu, '解除与此任务的关联', 'close', () => void browserAutomationControl('release'));
+        release.id = 'workspaceBrowserAutomationRelease';
+      }
+      menuDivider(menu);
+    }
     menuItem(menu, '新建标签页', 'plus', () => void createBrowser());
     menuItem(menu, '复制标签页', 'copy', () => {
       if (state.isPreview) void openCodePreview(activeTab()?.previewHtml || ' ', state.id).catch(error => browserNotice(error.message));
       else void createBrowser(state.url || 'about:blank');
     });
-    menuItem(menu, '重新打开关闭的标签页', 'history', () => void reopenClosedBrowser(), !closedPages.length);
+    menuItem(menu, '恢复此任务的网页…', 'restore', () => void browserFeedback?.recovery(), !context?.conversationId || !!context.isDraft);
+    menuItem(menu, '重新打开关闭的标签页', 'history', () => void reopenClosedBrowser(), !closedBrowserPages().length);
     menuDivider(menu);
     menuItem(menu, state.bookmarked ? '取消收藏此页' : '收藏此页', 'bookmark', () => void browserAction('bookmark', { toggle: true }), blank || !!state.isPreview);
     menuItem(menu, '书签', 'folder', () => openBrowserManager('bookmarks'));
@@ -1208,7 +1511,7 @@
     else if (action === 'find') openFind();
     else if (['history', 'downloads', 'bookmarks'].includes(action)) openBrowserManager(action);
     else if (action === 'bookmark') void browserAction('bookmark', { toggle: true });
-    else if (['nextTab', 'previousTab'].includes(action)) { const index = tabs.indexOf(item); activate(tabs[(index + (action === 'nextTab' ? 1 : -1) + tabs.length) % tabs.length].id); }
+    else if (['nextTab', 'previousTab'].includes(action)) { const available = visibleTabs(), index = available.indexOf(item); activate(available[(index + (action === 'nextTab' ? 1 : -1) + available.length) % available.length].id); }
     else if (['zoomIn', 'zoomOut', 'zoomReset'].includes(action)) { const zoom = item.browser.zoom || 1; void browserAction('zoom', { factor: action === 'zoomReset' ? 1 : Math.max(.25, Math.min(3, Math.round((zoom + (action === 'zoomIn' ? .1 : -.1)) * 10) / 10)) }); }
     else if (['back', 'forward', 'reload', 'print', 'devTools'].includes(action)) void browserAction(action);
   }
@@ -1223,6 +1526,24 @@
   }, true);
   const offBrowser = browserBridge?.onEvent?.(event => {
     if (disposed) return;
+    if (browserFeedback?.handle(event)) return;
+    const statusChanged = browserTabStatus?.update(event);
+    if (statusChanged && activeTab()?.browserId === (event.id || event.tab?.id)) renderBrowserAutomation();
+    if (event.type === 'task-state-error' || event.type === 'task-state-saved') return;
+    if (event.type === 'task-restored' && event.tab) {
+      mergeBrowserAutomationState({ id: event.tab.id, conversationId: event.conversationId, state: 'paused', reason: '网页已恢复，请检查后允许继续' });
+      applyBrowserState(event.tab, event.conversationId); return;
+    }
+    if (event.type === 'automation-state') {
+      mergeBrowserAutomationState(event);
+      if (activeTab()?.browserId === event.id) renderBrowserAutomation();
+      return;
+    }
+    if (event.type === 'automation-open') {
+      presentAutomationTab(event);
+      return;
+    }
+    if (event.type === 'closed') { browserAutomationStates.delete(event.id); browserAutomationRequested.delete(event.id); }
     if (event.type === 'shortcut') {
       const item = browserTab(event.id);
       if (opened && tab === 'browser' && item?.id === activeId) {
@@ -1245,7 +1566,9 @@
     if (event.type === 'profile') { if (event.section === 'settings') void refreshBrowserPreferences(); return; }
     if (event.type === 'closed') { const wasReleased = closedBrowserIds.has(event.id); closedBrowserIds.add(event.id); const item = browserTab(event.id); if (nativeActiveId === event.id) { nativeActiveId = null; nativeSignature = ''; } if (item && !wasReleased) void closeTab(item.id, { remoteClosed: true }); return; }
     if (event.type === 'find') { const item = browserTab(event.id); if (!item || (item.findRequestId && event.requestId && event.requestId < item.findRequestId)) return; item.findCount = event.matches ? String(event.activeMatchOrdinal || 0) + ' / ' + event.matches : '无匹配'; if (item === activeTab() && item.findOpen) $('workspaceBrowserFindCount').textContent = item.findCount; return; }
-    if (event.type === 'download') { if (browserTab(event.id) === activeTab() && !activeTab()?.internalPage && activeTab()?.browserId === event.id) browserNotice(event.error || ({ completed: '文件已下载，可在下载管理中查看', cancelled: '下载已取消', interrupted: '下载中断，请在下载管理中重试', blocked: '已阻止网页自动下载' })[event.item?.state || event.status] || '正在下载…'); return; }
+    // Download and recovery notices live in the fixed-height control row. They
+    // survive unrelated page-state renders without resizing an active picker.
+    if (event.type === 'download') return;
     if (event.type === 'created' && event.clientRequestId && pendingBrowserCreates.has(event.clientRequestId)) {
       const pending = pendingBrowserCreates.get(event.clientRequestId); pending.state = event.tab;
       pendingNativeBrowsers.set(event.tab.id, pending); return;
@@ -1281,8 +1604,8 @@
     const changed = records.map(relevant).some(Boolean);
     if (changed && tab === 'browser' && opened) scheduleNative();
   });
-  overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'aria-hidden', 'inert', 'role'] });
-  window.addEventListener('relay:view-changed', () => { navigationRevision++; endDrag(false); clearSnapAnimation(); closeMenus(false); if (app.dataset.view !== 'chat' && maximized) setMaximized(false, { preservePreference: true }); layout(); syncNative(); });
+  overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'open', 'aria-hidden', 'aria-modal', 'inert', 'role'] });
+  window.addEventListener('relay:view-changed', () => { navigationRevision++; endDrag(false); clearSnapAnimation(); closeMenus(false); if (app.dataset.view !== 'chat') contextLoading = false; layout(); syncNative(); });
   document.addEventListener('visibilitychange', syncNative);
   document.addEventListener('transitionrun', event => {
     if (event.target === app || event.target === panel || panel.contains(event.target)) trackGeometry();
@@ -1297,7 +1620,7 @@
   }
   function currentTerminal() { return sessions.get(activeTab()?.sessionId); }
   function newTerminal() {
-    if (disposed) return null;
+    if (disposed || contextLoading) return null;
     syncContext();
     const number = ++termNumber;
     const item = { id: 'terminal-' + number, kind: 'terminal', title: '终端 ' + number, terminalNumber: number, terminalContext: context ? { ...context } : null, terminalContextKey: contextKey, sessionId: null, terminalError: '' };
@@ -1455,7 +1778,7 @@
     });
   }
   $('workspaceTerminalStart').addEventListener('click', () => void startTerminalSession());
-  window.addEventListener('relay:conversation-changed', syncContext);
+  window.addEventListener('relay:conversation-changed', onConversationChanged);
   const offRuntimeWorkspace = bridge?.onRuntimeChanged?.(event => {
     if (disposed || event.conversationId !== context?.conversationId) return;
     revision++; filesRevision++; previewRevision++; workspace = null; directoryLink = null; selectedDirectory = null;
@@ -1472,6 +1795,6 @@
   const themeObserver = new MutationObserver(() => { for (const item of sessions.values()) item.terminal.options.theme = terminalTheme(); });
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   const refreshTimer = setInterval(() => { if (opened && tab === 'files' && !document.hidden) void refreshFiles(); }, 3000);
-  window.addEventListener('pagehide', () => { disposed = true; stopShortcutHints?.(); reviewView?.destroy(); reviewView = null; clearInterval(refreshTimer); resizeObserver.disconnect(); themeObserver.disconnect(); overlayObserver.disconnect(); offTerminal?.(); offBrowser?.(); clearTimeout(findTimer); clearTimeout(captureTimer); if (nativeFrame) cancelAnimationFrame(nativeFrame); for (const item of tabs) { item.managerView?.destroy(); for (const id of nativeBrowserIds(item)) releaseNativeBrowser(id); } for (const item of sessions.values()) { item.terminal.dispose(); void bridge.terminalClose({ id: item.id }).catch(() => {}); } });
+  window.addEventListener('pagehide', () => { disposed = true; stopShortcutHints?.(); reviewView?.destroy(); reviewView = null; clearInterval(refreshTimer); resizeObserver.disconnect(); themeObserver.disconnect(); overlayObserver.disconnect(); offTerminal?.(); browserFeedback?.dispose(); offBrowser?.(); clearTimeout(findTimer); clearTimeout(captureTimer); if (nativeFrame) cancelAnimationFrame(nativeFrame); for (const item of tabs) { item.managerView?.destroy(); for (const id of nativeBrowserIds(item)) releaseNativeBrowser(id); } for (const item of sessions.values()) { item.terminal.dispose(); void bridge.terminalClose({ id: item.id }).catch(() => {}); } });
   app.classList.add('has-workspace-panel'); renderLauncher(); renderTabs(); layout(); void refreshBrowserPreferences();
 }());

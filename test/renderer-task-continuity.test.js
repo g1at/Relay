@@ -56,6 +56,7 @@ test('main finalization stores active elapsed time and explicit paused state for
   const h = harness(), taskRun = resumed();
   h.run.taskRun = taskRun; h.run.turn.taskRun = clone(taskRun); h.run.turn.inputKind = 'resume';
   h.run.turn.ts = new Date(taskRun.segmentStartedAt).toISOString();
+  h.conv.turns[0].ts = h.run.turn.ts;
   h.run.activityState.taskRun = clone(taskRun); h.run.abortRequested = true; h.run.pauseRequested = true;
   await h.context.finishRunUnsafe('job', { exitCode: 0, relay_task_finished_at: taskRun.segmentStartedAt + 34000,
     relay_task_duration_ms: 70000, finalResult: { type: 'result', subtype: 'success', terminal_reason: 'aborted_streaming' } });
@@ -81,7 +82,7 @@ test('lost-session automatic retry passes the original active interval and retry
   h.run.taskRun = taskRun; h.run.turn.taskRun = clone(taskRun); h.run.activityState.taskRun = clone(taskRun);
   h.run.turn.inputKind = 'resume'; h.run.turn.ts = new Date(taskRun.segmentStartedAt).toISOString();
   h.run.sessionId = 'synthetic-session'; h.run.stderrBuf = 'No conversation found with session ID synthetic-session';
-  h.conv.turns[0] = { user: '', runId: 'job', taskRun: clone(taskRun), inputKind: 'resume' };
+  h.conv.turns[0] = { user: '', runId: 'job', ts: h.run.turn.ts, taskRun: clone(taskRun), inputKind: 'resume' };
   h.context.relaunchWithoutResume = async (...args) => { retry = args; };
   await h.context.finishRunUnsafe('job', { exitCode: 1, relay_task_finished_at: taskRun.segmentStartedAt + 2000,
     relay_task_duration_ms: taskRun.elapsedBeforeMs + 2000 });

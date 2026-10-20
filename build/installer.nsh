@@ -9,6 +9,7 @@
 !include "getProcessInfo.nsh"
 Var pid
 Var RelayNoCloseMode
+!include "${BUILD_RESOURCES_DIR}\installer-transaction.nsh"
 
 ; Future CLI installers opt in explicitly. A process-local environment marker
 ; carries the policy to a newly built uninstaller invoked by the stock upgrade
@@ -23,6 +24,7 @@ Var RelayNoCloseMode
   ${If} $RelayNoCloseMode != "1"
     !insertmacro _CHECK_APP_RUNNING
   ${EndIf}
+  !include "${BUILD_RESOURCES_DIR}\installer-legacy-upgrade.nsh"
 !macroend
 
 !ifdef BUILD_UNINSTALLER
@@ -42,6 +44,7 @@ Var RelayNoCloseMode
 !endif
 
 !macro customHeader
+  !insertmacro RelayTransactionFunctions "${RELAY_UI_PREFIX}"
   BrandingText "Relay"
   ShowInstDetails hide
   ShowUninstDetails hide
@@ -81,6 +84,7 @@ Var RelayNoCloseMode
     Pop $0
   FunctionEnd
   !ifndef BUILD_UNINSTALLER
+  !ifndef HIDE_RUN_AFTER_FINISH
     ; customHeader expands after electron-builder registers StdUtils plugins.
     ; A top-level function in this include would resolve those plugins early.
     Function RelayStartAfterInstall
@@ -95,6 +99,7 @@ Var RelayNoCloseMode
       Pop $1
       Pop $0
     FunctionEnd
+  !endif
   !endif
 !macroend
 
@@ -113,6 +118,7 @@ Var RelayNoCloseMode
 
 !ifndef BUILD_UNINSTALLER
   Function .onGUIEnd
+    Call RelayRollbackTransactions
     Call RelayUIDestroy
   FunctionEnd
 
@@ -125,6 +131,7 @@ Var RelayNoCloseMode
   FunctionEnd
 
   Function .onInstFailed
+    Call RelayRollbackTransactions
     Call RelayUIFailure
   FunctionEnd
 
@@ -132,6 +139,7 @@ Var RelayNoCloseMode
   Var RelayUninstallFinishText
 
   Function un.onGUIEnd
+    Call un.RelayRollbackTransactions
     Call un.RelayUIDestroy
   FunctionEnd
 
@@ -144,11 +152,13 @@ Var RelayNoCloseMode
   FunctionEnd
 
   Function un.onUninstFailed
+    Call un.RelayRollbackTransactions
     Call un.RelayUIFailure
   FunctionEnd
 !endif
 
 !macro customWelcomePage
+  !include "${BUILD_RESOURCES_DIR}\installer-safe-user-path.nsh"
   !define MUI_WELCOMEPAGE_TITLE "安装 Relay"
   !define MUI_WELCOMEPAGE_TEXT "开始安装您的本地 AI 助手。"
   !define MUI_PAGE_CUSTOMFUNCTION_SHOW RelayStyleWelcomePage
@@ -191,6 +201,7 @@ Var RelayNoCloseMode
 !macroend
 
 !macro customUnWelcomePage
+  !include "${BUILD_RESOURCES_DIR}\installer-safe-user-path.nsh"
   !define MUI_WELCOMEPAGE_TITLE "卸载 Relay"
   !define MUI_WELCOMEPAGE_TEXT "移除应用，保留安装目录外的个人文件。"
   !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.RelayStyleWelcomePage
@@ -215,49 +226,46 @@ Var RelayNoCloseMode
     Goto relay_payload_ready
   relay_payload_missing:
     DetailPrint "Relay 的应用文件未完整写入，请重新运行安装程序。"
+    Call RelayRollbackTransactions
     Call RelayUIFailure
     SetErrorLevel 2
     Abort "应用文件不完整，安装未完成。"
   relay_payload_ready:
+  !insertmacro RelayVerifyPayload
+  !insertmacro RelayCommitTransactions ""
 !macroend
 
 !macro customRemoveFiles
   Push "正在移除应用文件…"
   Call un.RelayUISetStage
-  ; Preserve electron-builder 25's upgrade rename/restore transaction. The
-  ; additional failure check prevents registry removal and a false success if
-  ; Windows refuses to remove a locked or inaccessible application directory.
-  ${If} ${isUpdated}
-    CreateDirectory "$PLUGINSDIR\old-install"
-    Push ""
-    Call un.atomicRMDir
-    Pop $R0
-    ${If} $R0 != 0
-      DetailPrint "文件正在使用，无法移除：$R0"
-      Push ""
-      Call un.restoreFiles
-      Pop $R0
-      Call un.RelayUIFailure
-      SetErrorLevel 2
-      Abort "应用文件正在使用，请关闭相关程序后重试。"
-    ${EndIf}
-  ${EndIf}
+  ; A same-volume transaction replaces upstream atomicRMDir, whose destination
+  ; is TEMP and therefore fails when the installation is on a different drive.
+  ; The helper checks deny-delete handles and ACLs before moving anything.
   ClearErrors
-  RMDir /r $INSTDIR
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
   ${If} ${Errors}
-    DetailPrint "无法完整移除 $INSTDIR，请检查文件占用及目录权限。"
-    ${If} ${isUpdated}
-      Push ""
-      Call un.restoreFiles
-      Pop $R0
-    ${EndIf}
     Call un.RelayUIFailure
     SetErrorLevel 2
-    Abort "应用文件未能完整移除。"
+    Abort "无法切换到临时目录，尚未移除应用文件。"
+  ${EndIf}
+  ${If} $installMode == "CurrentUser"
+    StrCpy $RelayTransactionScope "CurrentUser"
+  ${Else}
+    StrCpy $RelayTransactionScope "AllUsers"
+  ${EndIf}
+  StrCpy $RelayTransactionAction "Remove"
+  Call un.RelayRunTransaction
+  ${If} $RelayTransactionCode != 0
+    Call un.RelayRollbackTransactions
+    Call un.RelayUIFailure
+    SetErrorLevel 2
+    Abort "应用文件正在使用或无法访问，卸载未完成。"
   ${EndIf}
 !macroend
 
 !macro customUnInstall
   Push "正在完成卸载…"
   Call un.RelayUISetStage
+  !insertmacro RelayCommitTransactions "un."
 !macroend

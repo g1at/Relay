@@ -6,6 +6,9 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
   const copy = (value) => JSON.parse(JSON.stringify(value));
+  // Reducer-only acceleration. Never persist a Map (or duplicate message text)
+  // in output snapshots, and never keep discarded states alive through a cache.
+  const messageIndexes = new WeakMap();
 
   // Only standalone protocol-shaped blocks outside quoted/code examples qualify.
   // Preserve every isolated byte in diagnostics; ordinary XML and inline explanations stay intact.
@@ -67,10 +70,39 @@
   function owner(event) { return String(event.parent_tool_use_id || event.parentToolUseId
     || (event.agent_id ? 'agent:' + event.agent_id : event.subagent_type ? 'subagent:' + event.subagent_type : '')); }
   function messageFor(state, id, parent) {
-    let message = state.messages.find((item) => item.id === id && item.parent === parent && Number(item.contextEpoch || 0) === state.contextEpoch);
+    const keyFor = (item) => JSON.stringify([Number(item.contextEpoch || 0), item.parent, item.id]);
+    const key = JSON.stringify([state.contextEpoch, parent, id]);
+    let index = messageIndexes.get(state);
+    const rebuild = () => {
+      index = { messages: state.messages, length: state.messages.length, entries: new Map() };
+      state.messages.forEach((message, position) => {
+        const itemKey = keyFor(message);
+        if (!index.entries.has(itemKey)) index.entries.set(itemKey, { message, position });
+      });
+      messageIndexes.set(state, index);
+    };
+    if (!index || index.messages !== state.messages || index.length !== state.messages.length) rebuild();
+    let entry = index.entries.get(key);
+    if (entry && (state.messages[entry.position] !== entry.message || keyFor(entry.message) !== key)) {
+      rebuild();
+      entry = index.entries.get(key);
+    }
+    // A caller may replace/rename an item without changing the array length.
+    // Check misses once; ordinary deltas stay on the constant-time hit path.
+    if (!entry) {
+      const position = state.messages.findIndex(item => item.id === id && item.parent === parent
+        && Number(item.contextEpoch || 0) === state.contextEpoch);
+      if (position >= 0) {
+        entry = { message: state.messages[position], position };
+        index.entries.set(key, entry);
+      }
+    }
+    let message = entry && entry.message;
     if (!message) {
       message = { id, parent, blocks: [], stopReason: null, aborted: false, order: state.eventOrder, contextEpoch: state.contextEpoch };
       state.messages.push(message);
+      index.entries.set(key, { message, position: state.messages.length - 1 });
+      index.length = state.messages.length;
     }
     return message;
   }

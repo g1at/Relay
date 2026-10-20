@@ -48,6 +48,7 @@ function harness() {
     },
     resolveExecutionWorkspace: ({ conversationId, workingDir }) => ({ cwd: workingDir || 'managed', validWorkingDir: workingDir || 'managed', conversationId }),
   };
+  require('./helpers/conversation-lifecycle-fixture')(context);
   vm.createContext(context);
   for (const name of ['sessionFingerprint', 'prespawnSession', 'runLiveTurn']) vm.runInContext(declaration(name), context);
   for (const name of ['claude:prespawn', 'claude:resetSession']) {
@@ -158,10 +159,12 @@ test('file/terminal resolver honors explicit selected path, explicit default, an
   const id = '10000000-0000-4000-8000-000000000001', calls = [];
   const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     liveSessions: new Map(), WORKSPACE_UUID: UUID, directoryValue, fs: { existsSync: () => true }, convFilePath: () => 'synthetic',
+    assertConversationAvailable() {}, getProjectStore: () => ({ binding: () => undefined }),
     loadConversation: () => ({ id, workingDir: { path: 'saved-path' }, mode: 'agent', agent: 'writer' }),
     resolveExecutionWorkspace: (options) => { calls.push(options); return options; },
   };
-  vm.createContext(context); vm.runInContext(declaration('resolveWorkspaceForTools'), context);
+  vm.createContext(context);
+  for (const name of ['resolveRegisteredWorkspaceForTools', 'resolveLiveWorkspaceForTools', 'resolveWorkspaceForTools']) vm.runInContext(declaration(name), context);
   context.resolveWorkspaceForTools({ conversationId: id, workingDir: 'selected-path' });
   context.resolveWorkspaceForTools({ conversationId: id, workingDir: null });
   context.resolveWorkspaceForTools({ conversationId: id });
@@ -178,13 +181,14 @@ test('main workspace service rejects a cwd change while a one-shot ledger task i
   let writes = 0;
   const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     conversationWorkspaceService: null, path, fs, workspaceKey,
-    generalPreferences: { workspaceRoot: () => path.join(home, 'RelayProjects') },
+    generalPreferences: { workspaceRoot: () => path.join(home, 'RelayProjects'), scratchRoot: () => path.join(home, 'conversation-scratch') },
     createConversationWorkspaces: (options) => createConversationWorkspaces({ ...options, homeDir: home }),
     app: { getPath: () => home }, convFilePath: () => path.join(home, 'no-history.json'),
     loadConversation: () => null, persistConversationRecord: () => writes++, readAppSettings: () => ({}),
     liveSessions: new Map(), RUN_STATES: { QUEUED: 'queued' },
     taskLedger: { list: () => [{ state: 'running', source: { conversationId: id }, metadata: { workingDir: home } }] },
   };
+  require('./helpers/conversation-lifecycle-fixture')(context);
   vm.createContext(context); vm.runInContext(declaration('getConversationWorkspaces'), context);
   assert.throws(() => context.getConversationWorkspaces().resolveWorkspace({ conversationId: id }), /正在运行/);
   assert.equal(writes, 0);

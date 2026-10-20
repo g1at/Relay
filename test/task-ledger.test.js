@@ -244,3 +244,15 @@ test('runId 拒绝路径字符，运行记录不能写到账本目录之外', (t
     (error) => error.code === 'INVALID_RUN_ID',
   );
 });
+
+
+test('conversation filtering restricts progress cleanup to the selected conversation before limiting', t => {
+  const { ledger } = makeLedger(t);
+  ledger.create({ runId: 'selected-older', source: { type: 'chat', conversationId: 'selected' } });
+  ledger.create({ runId: 'selected-newer', source: { type: 'chat', conversationId: 'selected' } });
+  ledger.create({ runId: 'other-latest', source: { type: 'chat', conversationId: 'other' } });
+  assert.deepEqual(ledger.list({ conversationId: 'selected' }).map(run => run.runId), ['selected-newer', 'selected-older']);
+  assert.deepEqual(ledger.list({ conversationId: 'selected', limit: 1 }).map(run => run.runId), ['selected-newer']);
+  assert.deepEqual(ledger.list({ conversationId: 'missing' }), []);
+  assert.equal(ledger.list().length, 3);
+});

@@ -374,3 +374,65 @@ test('maxEpochs 清理最旧 epoch 的日志和元数据', (t) => {
   assert.equal(names.includes('epoch-1.meta.json'), false);
   assert.equal(names.filter((name) => name.endsWith('.jsonl')).length, 3);
 });
+
+
+test('long live replay seeks past old events and stops at a look-ahead match while preserving sparse pagination', t => {
+  const { journal } = makeJournal(t);
+  journal.appendMany(Array.from({ length: 4096 }, (_, index) => ({
+    type: 'claude.event', runId: index % 3 ? 'other' : 'wanted', payload: { index },
+  })));
+  let inspected = 0;
+  // Observe index reads, not elapsed time: a small page must not visit the whole
+  // retained history on a slow machine or a busy event loop either.
+  journal._events = new Proxy(journal._events, { get(target, key, receiver) {
+    if (/^\d+$/.test(String(key))) inspected++;
+    return Reflect.get(target, key, receiver);
+  } });
+  const page = journal.replay({ sinceSeq: 4000, limit: 2, runId: 'wanted' });
+  assert.deepEqual(page.events.map(event => event.seq), [4003, 4006]);
+  assert.equal(page.hasMore, true); assert.ok(inspected <= 12, 'Only the cursor suffix and one matching look-ahead are visited');
+  const empty = journal.replay({ sinceSeq: 4096, limit: 0 });
+  assert.equal(empty.hasMore, false); assert.deepEqual(empty.events, []);
+  const probe = journal.replay({ sinceSeq: 4093, limit: 0, runId: 'wanted' });
+  assert.equal(probe.hasMore, true); assert.deepEqual(probe.events, []);
+  const last = journal.replay({ sinceSeq: 4093, limit: 2, runId: 'wanted' });
+  assert.deepEqual(last.events.map(event => event.seq), [4096]); assert.equal(last.hasMore, false);
+});
+
+test('byte-limited compaction serializes only its retained suffix once and keeps UTF-8 byte accounting', t => {
+  const { journal } = makeJournal(t);
+  journal.appendMany(Array.from({ length: 512 }, (_, index) => ({
+    type: 'claude.event', runId: 'long-run', payload: { text: '中文证据'.repeat(128), index },
+  })));
+  const before = journal.replay(0).events;
+  const expected = before.slice(-4);
+  const budget = expected.reduce((bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event) + '\n'), 0);
+  const originalStringify = JSON.stringify; let serialized = 0;
+  t.mock.method(JSON, 'stringify', function(value, ...args) {
+    if (value?.type === 'claude.event') serialized++;
+    return originalStringify.call(this, value, ...args);
+  });
+  const compacted = journal.compact({ dropAcknowledged: false, maxBytes: budget });
+  assert.deepEqual(readLines(journal.journalPath), expected);
+  assert.equal(compacted.retained, 4); assert.equal(journal.metadata().byteLength, budget);
+  assert.equal(serialized, 5, 'Four retained records and one byte-boundary probe, not the whole journal');
+  assert.deepEqual(journal.replay({ sinceSeq: 508 }).events, expected);
+});
+
+test('failed compaction leaves the durable journal and live replay cursor unchanged for retry', t => {
+  const { journal } = makeJournal(t);
+  journal.appendMany(Array.from({ length: 20 }, (_, index) => ({ type: 'claude.event', runId: 'run', payload: { text: 'x'.repeat(200), index } })));
+  const before = journal.replay(0), bytes = fs.readFileSync(journal.journalPath), metadata = journal.metadata();
+  const originalRename = fs.renameSync;
+  const mocked = t.mock.method(fs, 'renameSync', function(from, to) {
+    if (to === journal.journalPath) throw Object.assign(new Error('Synthetic replace failure'), { code: 'EPERM' });
+    return originalRename.call(this, from, to);
+  });
+  assert.throws(() => journal.compact({ dropAcknowledged: false, maxBytes: 1024 }), /Synthetic replace failure/);
+  assert.deepEqual(journal.replay(0), before); assert.deepEqual(journal.metadata(), metadata);
+  assert.deepEqual(fs.readFileSync(journal.journalPath), bytes);
+  mocked.mock.restore();
+  journal.compact({ dropAcknowledged: false, maxBytes: 1024 });
+  assert.ok(journal.eventCount < 20); assert.ok(journal.compactedThroughSeq > 0);
+  assert.deepEqual(readLines(journal.journalPath), journal.replay(0).events);
+});

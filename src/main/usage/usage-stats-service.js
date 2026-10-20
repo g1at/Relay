@@ -26,14 +26,16 @@ function normalizeUsageRecord(input) {
     if (!TOKEN_FIELDS.every(field => Number.isSafeInteger(value[field]) && value[field] >= 0)) continue;
     models[name] = Object.fromEntries(TOKEN_FIELDS.map(field => [field, value[field]]));
   }
-  if (!Object.keys(models).length) return null;
-  if (input.isError === true && Object.values(models).every(value => TOKEN_FIELDS.every(field => value[field] === 0))) return null;
+  const usageIncomplete = input.usageIncomplete === true;
+  if (!Object.keys(models).length && !usageIncomplete) return null;
+  if (input.isError === true && !usageIncomplete && Object.values(models).every(value => TOKEN_FIELDS.every(field => value[field] === 0))) return null;
   const record = {
     queryId, sessionId: identity(input.sessionId), resultId: identity(input.resultId),
     at, startedAt: iso(input.startedAt) || at,
     source: ['conversation', 'scheduled', 'background', 'mini'].includes(input.source) ? input.source : 'background',
     conversationId: identity(input.conversationId) || null, modelUsage: models,
     isError: input.isError === true,
+    ...(usageIncomplete ? { usageIncomplete: true } : {}),
   };
   // A result UUID stays the same if redelivered across a conversation reset;
   // deduplicate it within the query independently of the wrapper session ID.

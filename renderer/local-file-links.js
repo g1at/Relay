@@ -55,9 +55,24 @@
           && node.childNodes.length > 0 && [...node.childNodes].every(onlyLink));
       return onlyLink(block);
     }
+    function turnArtifact(link, parsed) {
+      if (!parsed || parsed.line !== null || link.closest('.turn-deliverables')
+          || typeof options.resolveTurnArtifact !== 'function') return null;
+      try {
+        const reference = options.resolveTurnArtifact(link, parsed);
+        const keys = ['conversationId', 'runId', 'turnTs', 'itemId'];
+        if (!reference || !keys.every(key => typeof reference[key] === 'string' && reference[key].length > 0
+            && reference[key].length <= 512 && !/[\u0000-\u001f\u007f]/.test(reference[key]))) return null;
+        const resolved = Object.fromEntries(keys.map(key => [key, reference[key]]));
+        resolved.pending = reference.pending === true;
+        resolved.label = typeof reference.label === 'string' && reference.label.trim() && reference.label.length <= 200
+          && !/[\u0000-\u001f\u007f]/.test(reference.label) ? reference.label : '查看本轮成果';
+        return resolved;
+      } catch (_) { return null; }
+    }
     function restoreLink(link, record) {
       link.replaceChildren(...record.nodes.map(node => node.cloneNode(true)));
-      link.classList.remove('relay-file-card');
+      link.classList.remove('relay-file-card', 'relay-turn-artifact-reference');
       link.removeAttribute('aria-label');
     }
     function decorateLink(link) {
@@ -78,7 +93,9 @@
         record = { nodes: [...link.childNodes].map(node => node.cloneNode(true)), label: link.textContent.trim(), title: link.getAttribute('title'), key: null };
         presentations.set(link, record);
       }
-      const card = standalone(link, parsed), key = JSON.stringify([href, card]);
+      const reference = turnArtifact(link, parsed), card = !reference && standalone(link, parsed);
+      const key = JSON.stringify([href, card, reference]);
+      record.reference = reference;
       if (record.key === key) return;
       record.key = key;
       links.set(link, href);
@@ -86,6 +103,10 @@
       link.setAttribute('data-relay-file-link', ''); link.classList.add('relay-local-file-link');
       link.title = `${parsed.path}${parsed.line ? `:${parsed.line}` : ''}`;
       restoreLink(link, record);
+      if (reference && !reference.pending) {
+        link.textContent = reference.label; link.classList.add('relay-turn-artifact-reference');
+        link.setAttribute('aria-label', reference.label); return;
+      }
       const types = root?.relayWorkspaceFileTypes || root?.relayFileTypes;
       const directory = /[\\/]$/.test(parsed.path);
       const info = types?.describe?.(parsed.path, { directory }) || { label: '文件' };
@@ -111,8 +132,10 @@
       if (node.matches?.('a[href]')) decorateLink(node);
       for (const link of node.querySelectorAll('a[href]')) decorateLink(link);
     }
-    function decorate() {
-      for (const link of container.querySelectorAll('a[href]')) decorateLink(link);
+    function decorate(scope = container) {
+      if (!scope || scope !== container && !container.contains(scope)) return;
+      if (scope === container) for (const link of container.querySelectorAll('a[href]')) decorateLink(link);
+      else decorateScope(scope);
     }
     function selected(event) {
       const link = event.target?.closest?.('a');
@@ -132,6 +155,16 @@
       event.preventDefault(); event.stopImmediatePropagation();
       closeMenu();
       try {
+        // Ownership can change after a snapshot update or a conversation switch.
+        // Recheck immediately before navigation; never reuse a stale target.
+        decorateLink(item.link);
+        const reference = presentations.get(item.link)?.reference;
+        if (reference && !reference.pending) {
+          if (typeof options.navigateTurnArtifact !== 'function') throw new Error('本轮成果暂不可用。');
+          const result = await options.navigateTurnArtifact({ ...reference }, item.link);
+          if (result === false || result?.ok === false) throw new Error(result?.error || '本轮成果暂不可用。');
+          return;
+        }
         const input = request(item.href);
         const preview = options.preview || root?.relayWorkspacePanel?.openFileLink;
         if (typeof preview !== 'function') throw new Error('此窗口暂不支持文件预览，请在主窗口中打开。');

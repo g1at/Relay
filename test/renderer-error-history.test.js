@@ -41,7 +41,7 @@ test('failure writes the exact older run turn while preserving later answers and
   const later = { runId: 'later-run', user: 'later question', assistant: 'later answer',
     status: 'complete', ts: '2026-09-11T01:00:00Z', assistantTs: '2026-09-11T01:00:02Z' };
   h.conv.turns = [{ runId: 'first-run', user: 'first', assistant: 'first answer', status: 'complete' },
-    { runId: 'job', user: 'continue', assistant: '', executionMode: { kind: 'goal' } }, clone(later)];
+    { runId: 'job', ts: h.run.turn.ts, user: 'continue', assistant: '', executionMode: { kind: 'goal' } }, clone(later)];
   const first = clone(h.conv.turns[0]);
   h.run.turnIndex = 1;
   await h.context.finishRunUnsafe('job', { type: 'job-done', exitCode: -1, error: 'goal preparation timeout' });

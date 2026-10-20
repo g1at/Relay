@@ -542,3 +542,16 @@ test('later API retry updates its event position after intervening work and surv
   ingest(restored, { type: 'stream_event', event: { type: 'message_start', message: { id: 'back' } } });
   assert.equal(restored.items.at(-1).title, '服务商已恢复响应');
 });
+
+test('agent-only assistant replies cannot complete the main conversation thinking indicator', () => {
+  const state = activity.createState();
+  ingest(state, { type: 'system', subtype: 'thinking_tokens', estimated_tokens: 100, estimated_tokens_delta: 100 });
+  const indicator = state.items.find(item => item.id === 'sdk-thinking-progress');
+  assert.equal(indicator.status, 'running');
+  for (const child of [{ agent_id: 'worker' }, { parent_tool_use_id: 'tool' }, { parentToolUseId: 'tool' }, { subagent_type: 'worker' }]) {
+    ingest(state, { type: 'assistant', ...child, message: { id: 'child-answer', content: [{ type: 'text', text: 'Child finished' }] } });
+    assert.equal(indicator.status, 'running');
+  }
+  ingest(state, { type: 'assistant', message: { id: 'root-answer', content: [{ type: 'text', text: 'Main finished' }] } });
+  assert.equal(indicator.status, 'success');
+});

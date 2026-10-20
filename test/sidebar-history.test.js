@@ -52,7 +52,7 @@ test('a late history read cannot restore older grouping or remove a new running 
   const context = vm.createContext({
     window: { api: { history: { list: () => new Promise(resolve => readers.push(resolve)) } },
       RelaySidebarHistory: { reconcile: (_container, items) => rendered.push(items) } },
-    getProjectComposer: () => null,
+    getProjectComposer: () => null, isConvRunning: () => false,
     historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
   });
   vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
@@ -256,7 +256,7 @@ test('a history refresh waits for its project catalog and stale paired responses
   const context = vm.createContext({
     window: { api: { history: { list: () => new Promise(resolve => historyReads.push(resolve)) } },
       RelaySidebarHistory: { reconcile: (_container, items, options) => rendered.push({ items, projects: options.projects, header: options.projectHeader }) } },
-    getProjectComposer: () => composer, historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
+    getProjectComposer: () => composer, isConvRunning: () => false, historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
   });
   vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
   const first = context.refreshHistoryList(), second = context.refreshHistoryList();
@@ -266,4 +266,134 @@ test('a history refresh waits for its project catalog and stale paired responses
   assert.equal(rendered.length, 1);assert.equal(rendered[0].items, latestItems);assert.equal(rendered[0].projects, latestProjects);assert.equal(rendered[0].header, header);
   projectReads[0]([{ id: 'old-project', name: 'Old project' }]);historyReads[0]([{ id: 'old-run', projectId: 'old-project' }]);await first;
   assert.equal(rendered.length, 1);assert.equal(rendered[0].items[0].id, 'new-run');
+});
+
+
+test('running project conversations precede idle pins and preserve server order within each priority', () => {
+  const projects = freeze([{ id: 'project', name: 'Project' }]);
+  const items = freeze([
+    { id: 'idle-pin-first', projectId: 'project', pinned: true, updatedAt: '2026-09-25' },
+    { id: 'running-first', projectId: 'project', updatedAt: '2020-01-01' },
+    { id: 'idle-first', projectId: 'project', updatedAt: '2026-09-24' },
+    { id: 'running-pin-first', projectId: 'project', pinned: true, updatedAt: '2010-01-01' },
+    { id: 'idle-pin-second', projectId: 'project', pinned: true, updatedAt: '2026-09-23' },
+    { id: 'running-second', projectId: 'project', updatedAt: '2026-09-25' },
+    { id: 'running-pin-second', projectId: 'project', pinned: true, updatedAt: '2026-09-25' },
+    { id: 'idle-second', projectId: 'project', updatedAt: '2026-09-25' },
+  ]);
+  const running = new Set(['running-first', 'running-pin-first', 'running-second', 'running-pin-second']);
+  const now = new Date(2026, 8, 25, 17), stamp = now.getTime();
+  const before = JSON.stringify({ projects, items });
+  const groups = groupItems(items, now, projects, { isRunning: id => running.has(id) });
+  assert.deepEqual(groups.find(group => group.project).items.map(item => item.id), [
+    'running-pin-first', 'running-pin-second', 'running-first', 'running-second',
+    'idle-pin-first', 'idle-pin-second', 'idle-first', 'idle-second',
+  ]);
+  assert.equal(groups.find(group => group.project).pinned, true);
+  assert.ok(groups.flatMap(group => group.items).every(item => items.includes(item)));
+  assert.equal(JSON.stringify({ projects, items }), before);
+  assert.equal(now.getTime(), stamp);
+});
+
+test('stopping one or all project runs restores the original pinned and server ordering without retimestamping', () => {
+  const projects = freeze([{ id: 'project', name: 'Project' }]);
+  const items = freeze([
+    { id: 'pin', projectId: 'project', pinned: true, updatedAt: '2026-09-25' },
+    { id: 'recent', projectId: 'project', updatedAt: '2026-09-24' },
+    { id: 'running-first', projectId: 'project', updatedAt: '2026-09-23' },
+    { id: 'running-second', projectId: 'project', updatedAt: '2000-01-01' },
+  ]);
+  const running = new Set(['running-first', 'running-second']);
+  const before = JSON.stringify(items), now = new Date(2026, 8, 25, 17), stamp = now.getTime();
+  const order = () => groupItems(items, now, projects, { isRunning: id => running.has(id) })
+    .find(group => group.project).items.map(item => item.id);
+  assert.deepEqual(order(), ['running-first', 'running-second', 'pin', 'recent']);
+  running.delete('running-first');
+  assert.deepEqual(order(), ['running-second', 'pin', 'recent', 'running-first']);
+  running.clear();
+  assert.deepEqual(order(), items.map(item => item.id));
+  assert.equal(JSON.stringify(items), before);
+  assert.equal(now.getTime(), stamp);
+});
+
+test('promoting running project members does not change pin-ranked projects or regular registry order', () => {
+  const projects = freeze([
+    { id: 'alpha', name: 'Alpha' }, { id: 'beta', name: 'Beta' },
+    { id: 'gamma', name: 'Gamma' }, { id: 'delta', name: 'Delta' },
+  ]);
+  const items = freeze([
+    { id: 'beta-running', projectId: 'beta', updatedAt: '2000-01-01' },
+    { id: 'delta-running', projectId: 'delta', updatedAt: '2000-01-01' },
+    { id: 'gamma-pin-first', projectId: 'gamma', pinned: true, updatedAt: '2020-01-01' },
+    { id: 'beta-pin-second', projectId: 'beta', pinned: true, updatedAt: '2026-09-25' },
+    { id: 'gamma-running', projectId: 'gamma', updatedAt: '2000-01-01' },
+    { id: 'alpha-idle', projectId: 'alpha', updatedAt: '2026-09-25' },
+  ]);
+  const running = new Set(['beta-running', 'delta-running', 'gamma-running']);
+  const baseline = groupItems(items, new Date(2026, 8, 25), projects);
+  const groups = groupItems(items, new Date(2026, 8, 25), projects, { isRunning: id => running.has(id) });
+  assert.deepEqual(groups.map(group => group.id), ['pinned', 'project-gamma', 'project-beta', 'project-alpha', 'project-delta']);
+  assert.deepEqual(groups.map(group => group.id), baseline.map(group => group.id));
+  assert.deepEqual(groups[1].items.map(item => item.id), ['gamma-running', 'gamma-pin-first']);
+  assert.deepEqual(groups[2].items.map(item => item.id), ['beta-running', 'beta-pin-second']);
+  assert.equal(groups[4].pinned, false);
+});
+
+test('running state leaves global pins, calendar buckets and their supplied order unchanged', () => {
+  const projects = freeze([{ id: 'project', name: 'Project' }]);
+  const items = freeze([
+    { id: 'global-pin-idle', pinned: true, updatedAt: '2000-01-01' },
+    { id: 'global-pin-running', pinned: true, updatedAt: '2001-01-01' },
+    { id: 'global-today-idle', updatedAt: new Date(2026, 8, 25, 16).toISOString() },
+    { id: 'global-today-running', updatedAt: new Date(2026, 8, 25, 15).toISOString() },
+    { id: 'global-yesterday-running', updatedAt: new Date(2026, 8, 24, 23).toISOString() },
+    { id: 'global-old-running', updatedAt: '2000-01-01' },
+    { id: 'project-idle', projectId: 'project', updatedAt: '2026-09-25' },
+    { id: 'project-running', projectId: 'project', updatedAt: '2000-01-01' },
+  ]);
+  const now = new Date(2026, 8, 25, 17), stamp = now.getTime(), before = JSON.stringify({ projects, items });
+  const baseline = groupItems(items, now, projects);
+  const groups = groupItems(items, now, projects, { isRunning: id => id.endsWith('-running') });
+  assert.deepEqual(groups.filter(group => !group.project), baseline.filter(group => !group.project));
+  assert.deepEqual(groups.find(group => group.project).items.map(item => item.id), ['project-running', 'project-idle']);
+  assert.equal(JSON.stringify({ projects, items }), before);
+  assert.equal(now.getTime(), stamp);
+});
+
+test('history refresh passes the live running predicate after asynchronous history and project reads', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  const start = source.indexOf('async function refreshHistoryList() {'), end = source.indexOf('// jumpTo(可选)', start);
+  assert.ok(start > 0 && end > start);
+  const historyReads = [], projectReads = [], rendered = [], running = new Set();
+  const isConvRunning = id => running.has(id);
+  const now = new Date(2026, 8, 25, 17);
+  const composer = { refresh: () => new Promise(resolve => projectReads.push(resolve)), header() {} };
+  const context = vm.createContext({
+    window: { api: { history: { list: () => new Promise(resolve => historyReads.push(resolve)) } },
+      RelaySidebarHistory: { reconcile: (_container, items, options) => {
+        assert.equal(options.isRunning, isConvRunning);
+        rendered.push(groupItems(items, now, options.projects, { isRunning: options.isRunning })
+          .find(group => group.project).items.map(item => item.id));
+      } } },
+    getProjectComposer: () => composer, isConvRunning,
+    historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
+  });
+  vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
+  const items = freeze([
+    { id: 'idle-pin', projectId: 'project', pinned: true, updatedAt: '2026-09-25' },
+    { id: 'late-run', projectId: 'project', updatedAt: '2000-01-01' },
+  ]);
+  const projects = freeze([{ id: 'project', name: 'Project' }]);
+  const started = context.refreshHistoryList();
+  historyReads[0](items); await Promise.resolve();
+  assert.equal(rendered.length, 0);
+  running.add('late-run');
+  projectReads[0](projects); await started;
+  assert.deepEqual(rendered, [['late-run', 'idle-pin']]);
+
+  const stopped = context.refreshHistoryList();
+  projectReads[1](projects); await Promise.resolve();
+  running.clear();
+  historyReads[1](items); await stopped;
+  assert.deepEqual(rendered, [['late-run', 'idle-pin'], ['idle-pin', 'late-run']]);
 });

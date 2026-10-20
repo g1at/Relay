@@ -141,7 +141,12 @@ app.whenReady().then(async () => {
   await until(() => js(orb, '!!document.querySelector("#relayOrb") && !!window.api.mini.state'), 'orb document ready');
   check('orbShowsWithoutCreatingChatOrMainWindow', host.getPanelWindow() === null && BrowserWindow.getAllWindows().length === 1 && mainOpened === 0);
   console.log('native orb bounds', JSON.stringify({ topmost: orb.isAlwaysOnTop(), resizable: orb.isResizable(), size: orb.getSize(), bounds: orb.getBounds() }));
-  check('orbIsTopmostAndFrameless', orb.isAlwaysOnTop() && !orb.isResizable() && orb.getSize()[0] === 64 && orb.getSize()[1] === 64);
+  // Native fractional-DPI enclosing can add up to 3 DIP during construction.
+  // The repeated-drag bound is checked by test:orb-geometry, not relaxed here
+  // relative to an already-inflated size.
+  check('orbIsTopmostAndFrameless', orb.isAlwaysOnTop() && !orb.isResizable()
+    && orb.getSize().every(size => size >= 64 && size <= 67)
+    && await js(orb, 'relayOrb.getBoundingClientRect().width===48&&relayOrb.getBoundingClientRect().height===48'));
   check('orbProductionRendererHasClickAndDragTarget', await js(orb, 'document.querySelector("#relayOrb").getAttribute("aria-label").includes("快捷对话")'));
   await capture(orb, 'orb');
 

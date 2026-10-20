@@ -16,7 +16,19 @@ test('an internal routed link shows exactly the browser tab returned by the back
   const calls = [], tab = { id: 'browser-fixture', url: 'http://localhost:3000' };
   const api = { browser: { invoke: async value => { calls.push(value); return { ok: true, tab }; } }, openExternal: () => assert.fail('external route must not run') };
   await routeLink({ api, workspace: { showBrowserTab: value => calls.push(value) }, url: ' http://localhost:3000 ' });
-  assert.deepEqual(calls, [{ action: 'openLink', url: 'http://localhost:3000' }, tab]);
+  assert.deepEqual(calls, [{ action: 'openLink', url: 'http://localhost:3000', conversationId: null }, tab]);
+});
+test('link routing captures the initiating conversation before waiting for the native page', async () => {
+  const calls = [], shown = [];
+  let current = 'task-a', finish;
+  const pending = routeLink({ url: 'https://example.test/', getContext: () => ({ conversationId: current }),
+    api: { browser: { invoke: input => { calls.push(input); return new Promise(resolve => { finish = resolve; }); } } },
+    workspace: { showBrowserTab: tab => shown.push(tab) } });
+  current = 'task-b';
+  const tab = { id: 'original-tab', ownerConversationId: 'task-a', url: 'https://example.test/' };
+  finish({ ok: true, tab }); await pending;
+  assert.equal(calls.length, 1); assert.equal(calls[0].conversationId, 'task-a');
+  assert.deepEqual(shown, [tab], 'the native owner metadata is kept for workspace visibility filtering');
 });
 test('a backend-opened external route is never opened a second time', async () => {
   let shown = 0;

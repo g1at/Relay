@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "platform": "win32",
+  "arch": "x64",
+  "sources": {
+    "sdk-job-state.h": "704aa465b1e7f40acf8c128534e2d6f2b81a3ff759ae68ef7458b7321e30baec",
+    "sdk-job-control-win.cc": "01e94d1939a2ffbc5d3820eeaf35cdfe5ac3dbc0d9c0ebe7786cef4ebf59d8bd",
+    "sdk-job-launcher-win.cc": "876ad130d32034177eac16b3bc08a2f797363b74f6b218d4cd5b9b964ad9e8b4"
+  },
+  "artifacts": {
+    "win32-x64.node": "f647df8770282d1e9da5a796ee1d66db153632371459668b5395a9547f1768aa",
+    "sdk-job-launcher-win32-x64.exe": "98177e832fa197886ec359d72abcc4bf31f21af4f55aa976b2a257f2cc21a65b"
+  }
+}

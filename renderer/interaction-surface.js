@@ -641,10 +641,11 @@
       if (request.unsupported || !isVisibleInteraction(interaction) || isInteractionBusy(interaction)) return;
       if (request.mode === 'url') {
         const id = String(interaction.id);
+        const conversationId = window.relayConversationWorkspace?.().conversationId || interaction.conversationId;
         state.busyIds.add(id); state.errors.delete(id); setCurrentBusyState(interaction, true);
         try {
           const open = window.relayWorkspacePanel?.openUrl;
-          const result = typeof open === 'function' ? await open(request.url) : await window.api.openExternal(request.url);
+          const result = typeof open === 'function' ? await open(request.url) : await window.api.openExternal(request.url, { conversationId });
           if (result === false || result?.ok === false) throw new Error(result?.error || '暂时无法打开工具网页');
         } catch (error) {
           state.errors.set(id, error?.message || '暂时无法打开工具网页');
@@ -705,6 +706,12 @@
     const facts = element('dl', 'interaction-permission-facts');
     appendFact(facts, '路径', permission.blockedPath);
     appendFact(facts, 'Agent', interaction.agentID);
+    if (permission.mcpServer) {
+      appendFact(facts, 'MCP 服务', permission.mcpServer.name);
+      const sources = new Map([['sdk', '宿主提供'], ['plugin', '插件'], ['user', '用户设置'],
+        ['project', '项目设置'], ['local', '本地设置'], ['dynamic', '运行时配置'], ['managed', '受管设置']]);
+      appendFact(facts, '配置来源', sources.get(permission.mcpServer.source) || permission.mcpServer.source);
+    }
     if (facts.children.length) card.appendChild(facts);
 
     if (hasPermissionInput(permission.input)) {
@@ -718,23 +725,24 @@
 
     const actions = element('div', 'interaction-actions interaction-permission-actions');
     const allowGroup = element('div', 'interaction-action-group interaction-action-allow');
-    const deny = button('拒绝', 'interaction-button interaction-button-quiet');
+    const defaultToNo = permission.defaultToNo === true;
+    const deny = button('拒绝', `interaction-button ${defaultToNo ? 'interaction-button-primary' : 'interaction-button-quiet'}`);
     deny.dataset.action = 'deny';
-    deny.appendChild(element('kbd', 'interaction-key', 'Esc'));
+    deny.appendChild(element('kbd', 'interaction-key', defaultToNo ? '↵ / Esc' : 'Esc'));
     deny.title = '只拒绝当前操作，任务仍可继续';
     deny.disabled = isBusy;
     deny.addEventListener('click', () => respond(interaction, {
       action: 'deny', message: '用户拒绝了此操作',
     }));
     const split = element('div', 'interaction-allow-split');
-    const allowOnce = button('允许一次', 'interaction-button interaction-button-primary');
+    const allowOnce = button('允许一次', `interaction-button ${defaultToNo ? 'interaction-button-quiet' : 'interaction-button-primary'}`);
     allowOnce.dataset.action = 'allow_once';
-    allowOnce.appendChild(element('kbd', 'interaction-key', '↵'));
+    if (!defaultToNo) allowOnce.appendChild(element('kbd', 'interaction-key', '↵'));
     allowOnce.title = '只允许当前这一项操作';
     allowOnce.disabled = isBusy;
     allowOnce.addEventListener('click', () => respond(interaction, { action: 'allow_once' }));
     split.appendChild(allowOnce);
-    if (permission.canAllowForSession) {
+    if (permission.canAllowForSession && permission.suppressAlwaysAllowRule !== true) {
       const toggle = button('', 'interaction-allow-menu-toggle');
       toggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg>';
       toggle.setAttribute('aria-label', '选择允许范围');
@@ -1112,7 +1120,7 @@
       if (event.target && event.target.closest('button, input, textarea, select, summary, [contenteditable="true"]')) return;
       event.preventDefault();
       event.stopPropagation();
-      respond(interaction, { action: 'allow_once' });
+      respond(interaction, { action: interaction.permission?.defaultToNo === true ? 'deny' : 'allow_once' });
     }
   }
 
@@ -1127,12 +1135,13 @@
     if (mount.hidden) return;
     const interaction = state.items.get(state.currentId);
     const activeQuestion = ui.content.querySelector('.interaction-question:not([hidden])');
-    // Permission focus lands on the question. Enter explicitly allows once;
-    // Escape explicitly denies. No focus change itself submits a decision.
+    // Safety prompts begin on decline and never expose a one-key approval.
+    // Ordinary permissions retain title focus; focusing never submits a decision.
     const target = interaction && interaction.kind === 'question'
       ? activeQuestion && (activeQuestion.querySelector('input:checked')
         || activeQuestion.querySelector('input:not([disabled]), textarea'))
-      : ui.title;
+      : interaction?.kind === 'permission' && interaction.permission?.defaultToNo === true
+        ? ui.content.querySelector('[data-action="deny"]') : ui.title;
     (target || ui.title).focus();
     ui.shell.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }

@@ -5,16 +5,27 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createAgentEnvironment, toWslPath, mapMcpServers, runtimePath } = require('../src/main/sdk/agent-environment');
+const { getHostMcpLoopbackOwner: loopbackOwner } = require('../src/main/sdk/host-mcp-loopback');
+const { bundledClaudeVersion } = require('../src/main/sdk/sdk-runtime-version');
+const hostBridge = config => loopbackOwner(config)?.instance || config.instance;
 function fixture(t, overrides = {}) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-wsl-fixture-'));
   t.after(() => fs.rmSync(homeDir, { force: true, recursive: true }));
   const configDir = path.join(homeDir, '.claude'); fs.mkdirSync(configDir);
   const linuxExecutable = path.join(homeDir, 'claude'); fs.writeFileSync(linuxExecutable, 'fixture');
-  const calls = [], spawned = [];
+  const calls = [], spawned = [], owners = new Set();
+  t.after(() => Promise.allSettled([...owners].map(item => item.close())));
   const service = createAgentEnvironment({ platform: 'win32', homeDir, configDir, linuxExecutable,
     env: { SystemRoot: 'C:\\Windows' }, getEnvironment: () => 'wsl',
-    runFile: async (file, args) => { calls.push({ file, args }); return args.includes('sh') ? 'Relay-Test\nx86_64' : args.includes('uname') ? 'x86_64' : args.includes('--version') ? '2.1.266 (Claude Code)' : ''; },
+    runFile: async (file, args) => { calls.push({ file, args }); return args.includes('sh') ? 'Relay-Test\nx86_64' : args.includes('uname') ? 'x86_64' : args.includes('--version') ? `${bundledClaudeVersion()} (Claude Code)` : ''; },
     spawn: (file, args, options) => { const child = { pid: 123, file, args, options }; spawned.push(child); return child; }, ...overrides });
+  for (const method of ['prepareOptions', 'prepareMcpServers']) {
+    const original = service[method].bind(service);
+    service[method] = async (...args) => { const result = await original(...args);
+      for (const config of Object.values(method === 'prepareOptions' ? result.mcpServers || {} : result)) { const item = loopbackOwner(config); if (item) owners.add(item); }
+      return result;
+    };
+  }
   return { service, calls, spawned, configDir };
 }
 test('WSL path mapping handles spaces and rejects UNC/relative paths without shell parsing', () => {
@@ -93,6 +104,20 @@ test('preflight separates missing distribution, incompatible architecture and wr
   const old = fixture(t, { runFile: async (_file, args) => args.includes('sh') ? 'Relay-Test\nx86_64' : '2.0.0' });
   assert.equal((await old.service.probe()).code, 'WSL_RUNTIME_VERSION');
 });
+test('WSL runtime version follows the installed SDK and compares complete versions', async t => {
+  const current = fixture(t);
+  const ready = await current.service.probe();
+  assert.equal(ready.available, true);
+  assert.equal(ready.version, bundledClaudeVersion());
+  const prefixed = fixture(t, { expectedVersion: '2.1.28',
+    runFile: async (_file, args) => args.includes('sh') ? 'Relay-Test\nx86_64' : '2.1.283 (Claude Code)' });
+  assert.equal((await prefixed.service.probe()).code, 'WSL_RUNTIME_VERSION');
+  const injected = fixture(t, { expectedVersion: '9.8.7',
+    runFile: async (_file, args) => args.includes('sh') ? 'Relay-Test\nx86_64' : '9.8.7 (Claude Code)' });
+  assert.equal((await injected.service.probe()).version, '9.8.7');
+  const unknown = fixture(t, { expectedVersion: '' });
+  assert.equal((await unknown.service.probe()).code, 'WSL_RUNTIME_VERSION_METADATA');
+});
 test('MCP HTTP/in-process tools are retained; local commands use Windows host bridges without path translation', () => {
   const sdk = { type: 'sdk', instance: {} };
   const result = mapMcpServers({ internal: sdk, web: { type: 'http', url: 'https://example.invalid' }, local: { command: 'node', args: ['D:\\MCP\\server.js'], env: { ROOT: 'D:\\Data' } } });
@@ -145,7 +170,7 @@ test('WSL resources retain the actual distro and cwd without repeating preflight
 
 test('an old WSL launch stays pinned if a refreshed probe sees a new Windows default distribution', async t => {
   let current = 'First-Distro';
-  const f = fixture(t, { runFile: async (_file, args) => args.includes('sh') ? `${current}\nx86_64` : '2.1.266' });
+  const f = fixture(t, { runFile: async (_file, args) => args.includes('sh') ? `${current}\nx86_64` : bundledClaudeVersion() });
   const first = await f.service.prepareOptions({ cwd: 'D:\\Task' });
   current = 'Second-Distro';
   await f.service.probe({ refresh: true, runtimeOnly: true });
@@ -189,11 +214,14 @@ test('WSL preserves explicit isolated config and bridges debug, settings and plu
   assert.equal(prepared.plugins[0].path, '/mnt/d/Plugins/tool');
 });
 
-test('live MCP reload uses Windows bridges and preserves native servers', async t => {
+test('live MCP reload uses host bridges in both native and WSL environments', async t => {
   const f = fixture(t), servers = { local: { command: 'node', args: ['D:\\Server\\main.js'] } };
-  assert.equal(await f.service.prepareMcpServers(servers, { environment: 'native' }), servers);
-  assert.equal((await f.service.prepareMcpServers(servers, { environment: 'wsl' })).local.instance.config.args[0], 'D:\\Server\\main.js');
-  assert.equal((await f.service.prepareMcpServers({ local: { command: 'cmd.exe' } }, { environment: 'wsl' })).local.type, 'sdk');
+  const native = await f.service.prepareMcpServers(servers, { environment: 'native' });
+  assert.equal(native.local.type, 'http');
+  t.after(() => loopbackOwner(native.local).close());
+  assert.equal(loopbackOwner(native.local).instance.config, servers.local);
+  assert.equal(hostBridge((await f.service.prepareMcpServers(servers, { environment: 'wsl' })).local).config.args[0], 'D:\\Server\\main.js');
+  assert.equal((await f.service.prepareMcpServers({ local: { command: 'cmd.exe' } }, { environment: 'wsl' })).local.type, 'stdio');
 });
 
 test('an isolated query and later MCP reload stay bound to their resource directory despite incompatible global resources', async t => {
@@ -218,24 +246,27 @@ test('Windows-only or missing MCP dependencies cannot disable WSL and bridge ins
   const input = { cwd: 'D:\\Task', mcpServers: { windows: { command: 'cmd.exe', args: ['/c', 'fixture'] } }, env: { RELAY_AGENT_ENVIRONMENT: 'wsl', PATH: 'C:\\Windows' } };
   const first = await f.service.prepareOptions(input), second = await f.service.prepareOptions(input);
   const again = await f.service.prepareMcpServers(input.mcpServers, { environment: 'wsl', prepared: first });
-  assert.equal(again.windows.instance, first.mcpServers.windows.instance);
-  assert.notEqual(second.mcpServers.windows.instance, first.mcpServers.windows.instance);
+  assert.equal(hostBridge(again.windows), hostBridge(first.mcpServers.windows));
+  assert.notEqual(hostBridge(second.mcpServers.windows), hostBridge(first.mcpServers.windows));
   const changed = await f.service.prepareMcpServers({ windows: { command: 'node.exe' } }, { environment: 'wsl', prepared: first });
-  assert.notEqual(changed.windows.instance, first.mcpServers.windows.instance);
-  assert.equal(changed.windows.instance.options.env.PATH, 'C:\\Windows');
+  assert.notEqual(hostBridge(changed.windows), hostBridge(first.mcpServers.windows));
+  assert.equal(hostBridge(changed.windows).options.env.PATH, 'C:\\Windows');
 });
 
 
 test('WSL keeps project cwd while translating scratch, SDK runtime storage and escaped Agent instructions', async t => {
   const f = fixture(t), sdk = require('../src/main/sdk/claude-sdk');
-  const cwd = 'D:\\Synthetic Project', scratchDir = 'C:\\Synthetic Relay\\conversation-scratch\\session';
-  const input = sdk._buildOptions({ cwd, validWorkingDir: cwd, scratchDir, permissionMode: 'default',
+  const cwd = 'D:\\Synthetic Project', scratchDir = 'C:\\Synthetic Relay\\conversation-scratch\\session', outputDir = cwd + '\\outputs';
+  const input = sdk._buildOptions({ cwd, validWorkingDir: cwd, scratchDir, outputDir, permissionMode: 'default',
     runtimeEnv: { RELAY_AGENT_ENVIRONMENT: 'wsl', CLAUDE_CODE_TMPDIR: 'C:\\Synthetic Relay\\sdk-runtime\\tmp',
       CLAUDE_CODE_DEBUG_LOGS_DIR: 'C:\\Synthetic Relay\\sdk-runtime\\debug', XDG_CACHE_HOME: 'C:\\Synthetic Relay\\sdk-runtime\\cache' },
     nativeAgent: { agent: 'writer', agents: { writer: { prompt: 'Original instruction' } } } });
   const before = JSON.stringify(input);
   const prepared = await f.service.prepareOptions(input);
   assert.equal(prepared.cwd, '/mnt/d/Synthetic Project');
+  assert.equal(prepared.env.RELAY_OUTPUT_DIR, '/mnt/d/Synthetic Project/outputs');
+  assert.ok(prepared.systemPrompt.append.includes(JSON.stringify('/mnt/d/Synthetic Project/outputs')));
+  assert.ok(prepared.agents.writer.prompt.includes(JSON.stringify('/mnt/d/Synthetic Project/outputs')));
   const scratch = '/mnt/c/Synthetic Relay/conversation-scratch/session';
   for (const key of ['TEMP', 'TMP', 'TMPDIR', 'RELAY_SCRATCH_DIR']) assert.equal(prepared.env[key], scratch);
   assert.equal(prepared.env.CLAUDE_CODE_TMPDIR, '/mnt/c/Synthetic Relay/sdk-runtime/tmp');
@@ -250,20 +281,90 @@ test('WSL keeps project cwd while translating scratch, SDK runtime storage and e
   for (const key of ['TEMP', 'TMP', 'TMPDIR']) {
     assert.equal(child.options.env[key], scratch); assert.ok(child.options.env.WSLENV.split(':').includes(key));
   }
+  assert.equal(child.options.env.RELAY_OUTPUT_DIR, '/mnt/d/Synthetic Project/outputs');
+  assert.ok(child.options.env.WSLENV.split(':').includes('RELAY_OUTPUT_DIR'));
   assert.equal(JSON.stringify(input), before);
 });
 
 
 test('WSL translates file policy in custom system prompt blocks without moving the SDK cache boundary', async t => {
   const f = fixture(t), sdk = require('../src/main/sdk/claude-sdk'), boundary = '__SYNTHETIC_DYNAMIC_BOUNDARY__';
-  const input = sdk._buildOptions({ cwd: 'D:\\Task', scratchDir: 'C:\\Relay\\Scratch',
+  const input = sdk._buildOptions({ cwd: 'D:\\Task', scratchDir: 'C:\\Relay\\Scratch', outputDir: 'D:\\Task\\outputs',
     customSystemPrompt: { static: ['Fixed instruction'], dynamic: ['Dynamic instruction'] } },
     { SYSTEM_PROMPT_DYNAMIC_BOUNDARY: boundary });
   const before = JSON.stringify(input.systemPrompt);
   const prepared = await f.service.prepareOptions(input);
   assert.equal(prepared.systemPrompt.type, 'custom');
   assert.deepEqual(prepared.systemPrompt.prompt.slice(0, 3), ['Fixed instruction', boundary, 'Dynamic instruction']);
-  assert.match(prepared.systemPrompt.prompt[3], /\/mnt\/d\/Task/);
+  assert.match(prepared.systemPrompt.prompt[3], /\/mnt\/d\/Task\/outputs/);
   assert.match(prepared.systemPrompt.prompt[3], /\/mnt\/c\/Relay\/Scratch/);
   assert.equal(JSON.stringify(input.systemPrompt), before);
+});
+
+test('native local MCPs share the existing cached host lifecycle without a WSL probe', async t => {
+  const f = fixture(t, { getEnvironment: () => 'native' });
+  const local = { command: 'fixture-only', args: ['server'], env: { SAMPLE: 'fixture' } };
+  const remote = { type: 'http', url: 'https://example.invalid' };
+  const sdk = { type: 'sdk', instance: {} };
+  const input = { cwd: 'D:\\Task', env: { RELAY_AGENT_ENVIRONMENT: 'native' }, mcpServers: { local, remote, sdk } };
+  const before = JSON.stringify(input);
+  const prepared = await f.service.prepareOptions(input);
+  assert.equal(f.calls.length, 0);
+  assert.equal(prepared.mcpServers.local.type, 'http');
+  t.after(() => loopbackOwner(prepared.mcpServers.local).close());
+  assert.equal(loopbackOwner(prepared.mcpServers.local).instance.config, local);
+  assert.equal(prepared.mcpServers.remote, remote);
+  assert.equal(prepared.mcpServers.sdk, sdk);
+  assert.equal(JSON.stringify(input), before);
+  const same = await f.service.prepareMcpServers(input.mcpServers, { environment: 'native', prepared });
+  assert.equal(same.local, prepared.mcpServers.local);
+  const changed = await f.service.prepareMcpServers({ local: { ...local, args: ['other'] }, remote }, { environment: 'native', prepared });
+  t.after(() => loopbackOwner(changed.local).close());
+  assert.notEqual(loopbackOwner(changed.local).instance, loopbackOwner(same.local).instance);
+  assert.equal(changed.remote, remote);
+  assert.equal(f.calls.length, 0);
+  await loopbackOwner(same.local).close(); await loopbackOwner(changed.local).close();
+});
+
+test('native sessions created before local MCP attachment retain a reusable bridge context', async t => {
+  const f = fixture(t, { getEnvironment: () => 'native' });
+  const input = { model: 'sonnet', cwd: 'D:\\Task', env: { RELAY_AGENT_ENVIRONMENT: 'native' } };
+  const prepared = await f.service.prepareOptions(input);
+  assert.equal(prepared, input);
+  const local = { command: 'fixture-only' };
+  const first = await f.service.prepareMcpServers({ local }, { environment: 'native', prepared });
+  // The projection is model-independent and equivalent, including later model switches.
+  prepared.model = 'moonshot/kimi-k3[1m]';
+  const second = await f.service.prepareMcpServers({ local }, { environment: 'native', prepared });
+  assert.equal(first.local, second.local);
+  t.after(() => loopbackOwner(first.local).close());
+  assert.equal(loopbackOwner(first.local).instance.options.cwd, input.cwd);
+  assert.equal(f.calls.length, 0);
+  await loopbackOwner(first.local).close();
+});
+
+
+test('WSL maps inline SDK path flags and legacy split flags without parsing other option values', async t => {
+  const f = fixture(t);
+  const input = { cwd: 'D:\\Task & name', pathToClaudeCodeExecutable: 'D:\\Relay\\claude.exe' };
+  const prepared = await f.service.prepareOptions(input);
+  const flags = ['--add-dir', '--plugin-dir', '--plugin-dir-no-mcp', '--debug-file', '--settings', '--resume', '--session-debug-file'];
+  const sourceArgs = [input.pathToClaudeCodeExecutable];
+  const mapped = [];
+  for (const flag of flags) {
+    const value = 'D:\\Paths = &\\中文\\' + flag.slice(2);
+    sourceArgs.push(flag + '=' + value, flag, value);
+    mapped.push(flag + '=' + toWslPath(value), flag, toWslPath(value));
+  }
+  const inlineSettings = JSON.stringify({ permissions: { additionalDirectories: ['C:\\Windows-only resource'] } });
+  const passthrough = ['--settings=' + inlineSettings, '--settings', inlineSettings,
+    '--resume=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', '--debug-file=/tmp/already-linux',
+    '--model=D:\\literal-model', '--append-system-prompt=D:\\literal-prompt',
+    '--unknown-path=D:\\leave-untouched', '--add-dir='];
+  sourceArgs.push(...passthrough); mapped.push(...passthrough);
+  const before = [...sourceArgs];
+  const child = prepared.spawnClaudeCodeProcess({ args: sourceArgs, env: prepared.env });
+  assert.deepEqual(child.args.slice(6), mapped);
+  assert.deepEqual(sourceArgs, before, 'never mutate the SDK argument snapshot');
+  assert.equal(child.options.shell, false);
 });

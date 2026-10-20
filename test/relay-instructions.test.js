@@ -103,10 +103,12 @@ test('the scheduled main-process resume boundary keeps history but retires a ses
   const fingerprint = () => buildRuntimePolicy({ settings }).fingerprint;
   const record = { sessionId: 'saved-session', sdkRuntimeFingerprint: fingerprint(), turns: [{ user: 'Earlier request', assistant: 'Earlier answer' }] };
   const context = vm.createContext({ TaskClock: class {}, crypto: { randomUUID: () => 'fixture-run' },
+    getConversationWorkspaces: () => ({ resolveWorkspace() {} }),
     loadConversation: () => record, activeRelayProviderRuntime: () => ({ modelId: 'synthetic', tier: 'haiku' }),
     conversationRuntimeContract: () => { builds++; return { fingerprint: fingerprint() }; },
     providerSessionRoute: () => ({}), sessionRouteMatchesProvider: () => true, requiresFreshContract,
     conversationContext: () => '以下是我们之前的对话记录，供你参考延续：\nEarlier request\nEarlier answer' });
+  require('./helpers/conversation-lifecycle-fixture')(context);
   vm.runInContext(main.slice(start, end) + 'return { prompt, safeSessionId, resumeAccepted, runtimeContract };\n}', context);
   const run = prompt => context.runClaudeJob({ conversationId: 'fixture-conversation', sessionId: 'saved-session', prompt, cwd: '/fixture' });
   assert.equal(run('New request').safeSessionId, 'saved-session');

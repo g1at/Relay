@@ -4,6 +4,7 @@
 // contacting a model, or opening the user's profile. Usage:
 // electron test/packaged-application-smoke.cjs --archive <resources/app.asar>
 // Add --wsl-distribution <installed-name> to exercise the real Windows→WSL bridge.
+// Add --directory-build for --dir output, whose publishing feed may be absent.
 const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs');
 const originalFs = require('original-fs');
@@ -18,6 +19,7 @@ const root = path.resolve(__dirname, '..');
 const archiveIndex = process.argv.indexOf('--archive');
 const distributionIndex = process.argv.indexOf('--wsl-distribution');
 const wslDistribution = distributionIndex >= 0 ? process.argv[distributionIndex + 1] : null;
+const directoryBuild = process.argv.includes('--directory-build');
 const archive = path.resolve(archiveIndex >= 0 ? process.argv[archiveIndex + 1] : path.join(root, 'dist/win-unpacked/resources/app.asar'));
 if (!fs.existsSync(archive)) throw Error('Build an isolated Windows package first and pass --archive <resources/app.asar>.');
 const external = archive + '.unpacked';
@@ -26,7 +28,7 @@ fs.mkdirSync(outputRoot, { recursive: true });
 const fixture = fs.mkdtempSync(path.join(outputRoot, 'run-'));
 app.setPath('userData', path.join(fixture, 'profile'));
 app.on('window-all-closed', () => {});
-const report = { archive, fixture, checks: [], failures: [],
+const report = { archive, fixture, directoryBuild, checks: [], failures: [], unverified: [],
   scope: 'Actual built ASAR and unpacked workers, isolated synthetic data; no Relay main, installation or model calls.' };
 const resources = path.dirname(archive);
 const sourceManifest = require('../package.json');
@@ -80,8 +82,13 @@ function verifyArchive() {
   for (const name of ['LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md']) {
     check('LegalResource_' + name, hash(fs.readFileSync(path.join(resources, 'legal', name))) === hash(fs.readFileSync(path.join(root, name))));
   }
-  const feed = yaml.load(fs.readFileSync(path.join(resources, 'app-update.yml'), 'utf8'));
-  check('UpdateFeedPreserved', feed.provider === 'github' && feed.owner === sourceManifest.build.publish.owner && feed.repo === sourceManifest.build.publish.repo);
+  const feedFile = path.join(resources, 'app-update.yml');
+  if (directoryBuild && !fs.existsSync(feedFile)) {
+    report.unverified.push({ name: 'UpdateFeedPreserved', reason: 'Directory build has no publishing target; app-update.yml was not generated.' });
+  } else {
+    const feed = yaml.load(fs.readFileSync(feedFile, 'utf8'));
+    check('UpdateFeedPreserved', feed.provider === 'github' && feed.owner === sourceManifest.build.publish.owner && feed.repo === sourceManifest.build.publish.repo);
+  }
   const binaries = files.filter(file => /claude-agent-sdk-[^/]+\/claude(?:\.exe)?$/.test(file)).sort();
   check('ExactlyTwoSupportedSdkRuntimes', JSON.stringify(binaries) === JSON.stringify([
     'node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',

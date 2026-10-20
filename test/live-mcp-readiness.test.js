@@ -376,3 +376,24 @@ test('superseded configuration stays stale even if its old SDK status request ne
   assert.equal(result.timedOut, false);
   hung.resolve([]);
 });
+
+
+test('deferred MCP is ready without spawning or reconnecting unused processes', async () => {
+  const h = fixture({ mcpServerStatus: async () => [{ name: 'docs', status: 'deferred', tools: [{ name: 'discover' }] }] });
+  const result = await h.gate.prepare({ servers: registry });
+  assert.equal(result.ok, true); assert.equal(result.code, null);
+  assert.equal(result.items[0].status, 'deferred');
+  assert.deepEqual(h.calls.reconnect, []); assert.deepEqual(h.calls.toggle, []);
+});
+
+test('deferred readiness preserves pending waits and disables retired discovery endpoints', async () => {
+  let retired = true, reads = 0;
+  const h = fixture({
+    mcpServerStatus: async () => [{ name: 'docs', status: ++reads < 3 ? 'pending' : 'deferred' },
+      { name: 'retired', status: retired ? 'deferred' : 'disabled' }],
+    toggleMcpServer: async (name, enabled) => { assert.equal(name, 'retired'); assert.equal(enabled, false); retired = false; },
+  }, { initialServers: { ...registry, retired: { command: 'fixture-only' } }, initialServersApplied: true });
+  const result = await h.gate.prepare({ servers: registry });
+  assert.equal(result.ok, true); assert.ok(reads >= 3); assert.equal(retired, false);
+  assert.deepEqual(h.calls.reconnect, []);
+});

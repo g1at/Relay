@@ -38,6 +38,135 @@ function fixture(overrides = {}) {
   return { controller, deps, history, calls, saves, states, changed, pauses, steers, finish };
 }
 
+test('forgetting a deleted mini conversation clears only that owner and the next send gets a new ID', async () => {
+  const f = fixture();
+  const old = await f.controller.submit({ text: 'old request' }); await f.finish('old response');
+  assert.equal(f.controller.forgetConversation('unrelated-id').forgotten, false);
+  assert.equal(f.controller.getConversationId(), old.conversationId);
+  f.history.delete(old.conversationId);
+  assert.equal(f.controller.forgetConversation(old.conversationId).forgotten, true);
+  assert.equal(f.controller.getConversationId(), null); assert.equal(f.controller.isRunning(), false);
+  const next = await f.controller.submit({ text: 'new request' });
+  assert.equal(next.ok, true); assert.notEqual(next.conversationId, old.conversationId);
+  assert.equal(f.controller.state().conversation.turns[0].user, 'new request');
+  assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
+test('forgetting a queued mini launch returns immediately and late results cannot replace a new chat', async () => {
+  const launch = deferred(), calls = [];
+  const f = fixture({ run(request, emit) {
+    calls.push({ request, emit });
+    return calls.length === 1 ? launch.promise : { jobId: request.runId };
+  } });
+  const old = await f.controller.submit({ text: 'queued request' });
+  f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  assert.equal(f.controller.isRunning(), false);
+  const next = await f.controller.submit({ text: 'new request' });
+  assert.notEqual(next.conversationId, old.conversationId);
+  calls[0].emit({ type: 'job-done', exitCode: 0, finalResult: success('obsolete answer') });
+  launch.resolve({ jobId: old.runId, sessionId: 'obsolete-native-session' }); await tick();
+  assert.equal(f.controller.getConversationId(), next.conversationId);
+  assert.equal(f.controller.state().conversation.turns[0].user, 'new request');
+  assert.equal(f.controller.isRunning(), true); assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
+test('deleting while mini permissions are pending prevents the old submit from launching or restoring its snapshot', async () => {
+  const gate = deferred(); let held = false, hold = false;
+  const f = fixture({ getPermissions: async id => {
+    if (hold) { held = true; await gate.promise; }
+    return { ok: true, conversationId: id, permissionMode: 'default', executionMode: { kind: 'default' }, revision: 1 };
+  } });
+  const old = await f.controller.submit({ text: 'original request' }); await f.finish('done');
+  hold = true;
+  const obsolete = f.controller.submit({ text: 'obsolete request' }); await waitFor(() => held);
+  f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  hold = false;
+  const next = await f.controller.submit({ text: 'fresh request' });
+  gate.resolve();
+  assert.equal((await obsolete).code, 'CONVERSATION_DELETED');
+  assert.equal(f.calls.length, 2); assert.equal(f.controller.getConversationId(), next.conversationId);
+  assert.equal(f.controller.state().conversation.turns[0].user, 'fresh request');
+  assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
+test('a delayed mini placeholder save cannot restore deleted UI or send its queued input', async () => {
+  const gate = deferred(), deleted = new Set(); let held = false, hold = false;
+  const f = fixture({ saveConversation: async record => {
+    if (hold) { held = true; await gate.promise; }
+    if (deleted.has(record.id)) return false; // Main persistence tombstone.
+    f.history.set(record.id, copy(record));
+  } });
+  const old = await f.controller.submit({ text: 'first request' }); await f.finish('done');
+  hold = true;
+  const obsolete = f.controller.submit({ text: 'obsolete second request' }); await waitFor(() => held);
+  deleted.add(old.conversationId); f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  hold = false;
+  const next = await f.controller.submit({ text: 'new request' });
+  gate.resolve(); assert.equal((await obsolete).code, 'CONVERSATION_DELETED');
+  assert.equal(f.calls.length, 2); assert.equal(f.controller.getConversationId(), next.conversationId);
+  assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
+test('a late terminal history read after deletion cannot overwrite the fresh mini conversation', async () => {
+  const gate = deferred(); let hold = false, held = false;
+  const f = fixture({ loadConversation: async id => {
+    const snapshot = copy(f.history.get(id));
+    if (hold) { held = true; await gate.promise; }
+    return snapshot;
+  } });
+  const old = await f.controller.submit({ text: 'old request' });
+  hold = true;
+  f.calls[0].emit({ type: 'job-done', exitCode: 0, finalResult: success('old result') });
+  await waitFor(() => held);
+  f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  hold = false;
+  const next = await f.controller.submit({ text: 'new request' });
+  gate.resolve(); await tick();
+  assert.equal(f.controller.getConversationId(), next.conversationId); assert.equal(f.controller.isRunning(), true);
+  assert.equal(f.history.has(old.conversationId), false);
+  assert.equal(f.controller.state().conversation.turns[0].user, 'new request');
+  f.controller.destroy();
+});
+
+test('deletion discards a failed terminal-save retry without letting an old newChat clear the new owner', async () => {
+  const retryGate = deferred(); let holdRetry = false, retryHeld = false;
+  const f = fixture({ saveConversation: async record => {
+    if (record.turns.at(-1)?.assistant) {
+      if (!holdRetry) throw Error('synthetic disk full');
+      retryHeld = true; await retryGate.promise;
+      throw Error('obsolete retry failed');
+    }
+    f.history.set(record.id, copy(record));
+  } });
+  const old = await f.controller.submit({ text: 'old request' }); await f.finish('unsaved response');
+  assert.match(f.controller.state().conversation.turns[0].saveError, /disk full/);
+  holdRetry = true;
+  const oldNewChat = f.controller.newChat(); await waitFor(() => retryHeld);
+  f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  const next = await f.controller.submit({ text: 'new request' });
+  retryGate.resolve(); assert.equal((await oldNewChat).stale, true); await tick();
+  assert.equal(f.controller.getConversationId(), next.conversationId); assert.equal(f.controller.isRunning(), true);
+  assert.equal(f.controller.state().conversation.turns[0].saveError, undefined);
+  assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
+test('title completion for a deleted mini conversation cannot update a new chat', async () => {
+  const title = deferred(), f = fixture({ generateTitle: () => title.promise });
+  const old = await f.controller.submit({ text: 'old title subject' }); await f.finish('old response');
+  f.history.delete(old.conversationId); f.controller.forgetConversation(old.conversationId);
+  const next = await f.controller.submit({ text: 'fresh subject' });
+  title.resolve({ title: 'obsolete generated title' }); await tick();
+  assert.equal(f.controller.getConversationId(), next.conversationId);
+  assert.equal(f.controller.state().conversation.title, 'fresh subject');
+  assert.equal(f.history.has(old.conversationId), false);
+  f.controller.destroy();
+});
+
 test('mini persists a completed answer and denial notice without erasing the denied tool receipt', async () => {
   const f = fixture();
   await f.controller.submit({ text: 'Inspect a synthetic local configuration.' });

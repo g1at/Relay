@@ -7,6 +7,7 @@ const path = require('node:path');
 // WSL. electron-builder otherwise silently skips a missing FileSet source.
 function verifySdkPackaging(context = {}) {
   const root = context.packager?.info?.appDir || path.resolve(__dirname, '..');
+  require('./verify-sdk-process-tree.cjs')(root);
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const version = manifest.dependencies?.['@anthropic-ai/claude-agent-sdk'];
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) throw Error('SDK 版本必须锁定后再打包。');

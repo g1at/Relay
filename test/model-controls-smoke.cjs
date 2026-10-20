@@ -22,7 +22,7 @@ async function waitFor(code) { await evaluate(`new Promise((resolve,reject)=>{co
 async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
 async function capture(name) { await settle(); fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
 async function pointer(type, fraction) {
-  const p = await evaluate(`(() => { const r=modelPopup.querySelector('.model-effort-range').getBoundingClientRect(); return {x:Math.round(r.left+13+(r.width-26)*${fraction}),y:Math.round(r.top+r.height/2)}; })()`);
+  const p = await evaluate(`(() => { const r=modelPopup.querySelector('.model-effort-range').getBoundingClientRect(); return {x:Math.round(r.left+r.height/2+(r.width-r.height)*${fraction}),y:Math.round(r.top+r.height/2)}; })()`);
   win.webContents.sendInputEvent({ type, ...p, button: 'left', clickCount: 1 }); await delay(25);
 }
 async function key(keyCode) {
@@ -70,7 +70,7 @@ app.whenReady().then(async () => {
   await check('LeavingTheThumbRestoresItsSize', 'Math.abs(new DOMMatrix(getComputedStyle(modelPopup.querySelector(".model-effort-thumb")).transform).a-1)<.001');
   await pointer('mouseDown', 0);
   await pointer('mouseMove', .41);
-  await check('DraggingPreviewsContinuouslyWithoutRuntimeCalls', 'modelReview.runtime.length===0&&currentEffort==="medium"&&modelPopup.querySelector(".model-effort-slider-shell").dataset.dragging==="true"&&(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect();const fraction=(t.left+t.width/2-r.left-13)/(r.width-26);return Math.abs(fraction-.41)<.012&&Math.abs(fraction-.5)>.04;})()');
+  await check('DraggingPreviewsContinuouslyWithoutRuntimeCalls', 'modelReview.runtime.length===0&&currentEffort==="medium"&&modelPopup.querySelector(".model-effort-slider-shell").dataset.dragging==="true"&&(()=>{const r=modelPopup.querySelector(".model-effort-range").getBoundingClientRect(),t=modelPopup.querySelector(".model-effort-thumb").getBoundingClientRect();const fraction=(t.left+t.width/2-r.left-r.height/2)/(r.width-r.height);return Math.abs(fraction-.41)<.012&&Math.abs(fraction-.5)>.04;})()');
   await check('StrengthTextHasSelectionMotion', 'modelPopup.querySelector(".model-strength-title").getAnimations().some(animation=>animation.playState==="running")');
   await check('DragTracksPointerDirectlyButKeepsScaleTransition', '(()=>{const t=getComputedStyle(modelPopup.querySelector(".model-effort-thumb"));return t.transitionDuration.startsWith("0s,")&&t.transitionDuration.includes("0.2s")})()');
   await capture('compact-reasoning-drag');

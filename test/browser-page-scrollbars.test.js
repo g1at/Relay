@@ -98,7 +98,10 @@ test('presentation preload inserts the same user stylesheet synchronously before
   vm.runInContext(source, context);
   assert.deepEqual(calls, [{ css: PAGE_CSS, origin: 'user' }]);
   assert.equal(context.window, undefined); assert.equal(context.document, undefined);
-  assert.doesNotMatch(source, /ipcRenderer|contextBridge|executeJavaScript|fetch\(|XMLHttpRequest|addEventListener/);
+  assert.doesNotMatch(source, /contextBridge|executeJavaScript|fetch\(|XMLHttpRequest|localStorage|sessionStorage/);
+  assert.match(source, /window\.top === window/);
+  assert.match(source, /event\.isTrusted/);
+  assert.match(source, /browser:page-event/);
 });
 
 test('loading the shared presentation stylesheet in the browser process does not require renderer APIs', () => {

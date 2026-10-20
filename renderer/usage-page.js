@@ -45,6 +45,8 @@
     return {
       days, generatedAt: typeof raw.generatedAt === 'string' && Number.isFinite(Date.parse(raw.generatedAt)) ? raw.generatedAt : null,
       tokenCoverage: tokens.coverage || 'unknown', historyCoverage: raw.coverage?.history || 'unknown',
+      warningCodes: Array.isArray(raw.coverage?.warningCodes)
+        ? [...new Set(raw.coverage.warningCodes.filter(code => typeof code === 'string' && /^[A-Z_]{1,80}$/.test(code)))] : [],
       messages: number(raw.totals.messages),
       activeDays: daily.length === days && daily.every(item => item.count !== null) ? daily.filter(item => item.count > 0).length : null,
       daily, tokenTotal, models, tokenDaily, cacheHitRate, inputTotalTokens: inputTotal,
@@ -52,6 +54,14 @@
       cacheReadTokens: knownTokens ? components[2] : null, cacheCreationTokens: knownTokens ? components[3] : null,
       cacheTokens: knownTokens && components[2] !== null && components[3] !== null ? components[2] + components[3] : null,
     };
+  }
+  function coverageNotice(snapshot) {
+    if (!snapshot) return '';
+    const warnings = new Set(snapshot.warningCodes || []), reasons = [];
+    if (warnings.has('USAGE_BASELINE_UNAVAILABLE')) reasons.push('部分恢复对话缺少起始用量，统计可能偏低。');
+    if (warnings.has('USAGE_RECORDS_PARTIAL')) reasons.push('部分用量记录暂不可用。');
+    if (snapshot.historyCoverage === 'partial') reasons.push('部分对话记录暂不可用。');
+    return reasons.join('');
   }
   function buildActivityHeatmap(snapshot, mode = 'messages') {
     const days = range(snapshot?.days), daily = snapshot?.daily || [];
@@ -144,6 +154,7 @@
     const page = element('section', 'relay-usage-page' + (profile ? ' is-profile' : '')); page.setAttribute('aria-label', profile ? '对话活动与模型用量' : '用量');
     page.innerHTML = `<header class="rup-heading"><div><h2>使用统计</h2><p>了解你与 Relay 的日常协作。</p></div><div class="rup-ranges" role="group" aria-label="统计时间范围">${RANGES.map(value => `<button type="button" data-usage-days="${value}" aria-pressed="false">${value} 天</button>`).join('')}</div></header>
       <div class="rup-meta"><span data-usage-range>近 30 天</span><div class="rup-refresh-state"><span data-usage-status role="status" aria-live="polite">后台统计中</span><button type="button" class="rup-refresh" data-usage-refresh title="刷新用量统计" aria-label="刷新用量统计"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.34 5.66"/></svg><span>刷新</span></button></div></div>
+      <p class="rup-empty" data-usage-coverage role="status" aria-live="polite" hidden></p>
       <section class="rup-overview" aria-label="用量概览"><div class="rup-metrics"><article class="rup-metric rup-metric-primary"><h3><span class="rup-token-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m13 2-9 12h7l-1 8 10-13h-7z"/></svg></span>已记录 Token</h3><strong data-usage-metric="tokens">—</strong><p>输入（含缓存）与输出总量</p></article><article class="rup-metric"><h3><i class="rup-dot is-purple" aria-hidden="true"></i>对话轮次</h3><strong data-usage-metric="messages">—</strong><p>每次发送计为一轮</p></article><article class="rup-metric"><h3><i class="rup-dot is-green" aria-hidden="true"></i>活跃天数</h3><strong data-usage-metric="active">—</strong><p>有对话的日子</p></article><article class="rup-metric"><h3><i class="rup-dot is-amber" aria-hidden="true"></i>单日峰值 Token</h3><strong data-usage-metric="peak">—</strong><p data-usage-peak-detail>尚无每日记录</p></article></div>
       <div class="rup-token-breakdown">${TOKEN_CARDS.map(part => `<article class="rup-token-part is-${part.tone}"><h4><i class="rup-dot is-${part.tone}" aria-hidden="true"></i>${part.label}</h4><strong data-usage-part="${part.key}">—</strong></article>`).join('')}</div><div class="rup-token-composition" data-usage-composition aria-hidden="true"></div></section>
       <section class="rup-section rup-flow"${profile ? '' : ' hidden'}><header><div><h3>使用趋势</h3><span class="rup-flow-caption" data-usage-flow-caption>每日已记录 Token</span></div><div class="rup-trend-modes" role="group" aria-label="趋势统计类型"><button type="button" data-usage-trend-mode="tokens" aria-pressed="true">Token</button><button type="button" data-usage-trend-mode="messages" aria-pressed="false">对话</button></div></header><div class="rup-flow-body"><div class="rup-flow-scale" data-usage-flow-scale aria-hidden="true"></div><div class="rup-flow-plot" data-usage-trend-chart tabindex="0" aria-label="每日用量趋势"><p class="rup-chart-empty">统计完成后显示趋势</p></div></div><div class="rup-axis rup-flow-axis" data-usage-flow-axis aria-hidden="true"></div><div class="rup-flow-detail" data-usage-flow-detail role="status" aria-live="polite"></div></section>
@@ -302,6 +313,8 @@
       }
     }
     function renderSnapshot(snapshot) {
+      const notice = q('[data-usage-coverage]');
+      notice.textContent = coverageNotice(snapshot); notice.hidden = !notice.textContent;
       metric('messages', snapshot?.messages ?? null); metric('tokens', snapshot?.tokenTotal ?? null); metric('active', snapshot?.activeDays ?? null);
       const peak = getRecordedTokenPeak(snapshot); metric('peak', peak.value);
       const peakValue = q('[data-usage-metric=peak]'), peakDetail = q('[data-usage-peak-detail]');
@@ -322,7 +335,8 @@
       buttons.forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.usageDays) === state.days)));
       q('[data-usage-range]').textContent = `近 ${displayedDays} 天`;
       const mismatch = snapshot && displayedDays !== state.days;
-      status.textContent = state.error ? (snapshot ? '更新失败，保留已有统计' : '暂时无法读取统计') : mismatch ? `正在获取近 ${state.days} 天` : state.slow ? '仍在后台统计，可继续使用 Relay' : state.pending ? (snapshot ? '正在更新' : '后台统计中') : state.stale ? '显示最近一次统计' : snapshot?.historyCoverage === 'partial' ? '部分记录暂不可用' : '已更新';
+      status.textContent = state.error ? (snapshot ? '更新失败，保留已有统计' : '暂时无法读取统计') : mismatch ? `正在获取近 ${state.days} 天` : state.slow ? '仍在后台统计，可继续使用 Relay' : state.pending ? (snapshot ? '正在更新' : '后台统计中') : state.stale ? '显示最近一次统计' : '';
+      status.hidden = !status.textContent;
       status.title = snapshot?.generatedAt ? `最近统计：${new Date(snapshot.generatedAt).toLocaleString('zh-CN')}` : '';
       refreshButton.querySelector('span').textContent = state.error || state.slow ? '重试' : '刷新';
       if (snapshot !== lastSnapshot) { lastSnapshot = snapshot; renderSnapshot(snapshot); }
@@ -346,5 +360,5 @@
     const manager = { refresh: () => controller.refresh(), setRange: controller.setRange, destroy() { controller.destroy(); if (mount._relayUsage === manager) delete mount._relayUsage; } };
     mount._relayUsage = manager; controller.refresh(); return manager;
   }
-  return { create, createController, normalizeSnapshot, formatNumber, formatFullNumber, formatPercent, buildActivityHeatmap, buildTrendSeries, buildTrendGeometry, getRecordedTokenPeak };
+  return { create, createController, normalizeSnapshot, coverageNotice, formatNumber, formatFullNumber, formatPercent, buildActivityHeatmap, buildTrendSeries, buildTrendGeometry, getRecordedTokenPeak };
 });

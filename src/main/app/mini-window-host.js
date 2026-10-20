@@ -79,6 +79,13 @@ function createMiniWindowHost(options) {
     }, area);
   }
 
+  function clampOrb(position, area) {
+    // Windows can round getBounds() outwards at fractional DPI. Feeding those
+    // dimensions into the next move makes this transparent window grow with
+    // every drag. Its intended size is fixed; only read back its position.
+    return clamp({ x: position.x, y: position.y, width: ORB_SIZE, height: ORB_SIZE }, area);
+  }
+
   function getState() {
     return {
       visible: alive(panel) && panel.isVisible(),
@@ -226,7 +233,7 @@ function createMiniWindowHost(options) {
     if (alive(orb)) return orb;
     const position = settings.floatingOrbPosition;
     const area = safePosition(position) ? workArea({ ...position, width: ORB_SIZE, height: ORB_SIZE }) : workArea();
-    const bounds = clamp({ width: ORB_SIZE, height: ORB_SIZE,
+    const bounds = clampOrb({
       x: safePosition(position) ? position.x : area.x + area.width - ORB_SIZE - 24,
       y: safePosition(position) ? position.y : area.y + area.height * 0.62,
     }, area);
@@ -379,14 +386,15 @@ function createMiniWindowHost(options) {
   function orbDrag(input = {}) {
     if (disposed || !alive(orb) || !orb.isVisible()) return { ok: false };
     if (input.phase === 'start') {
-      drag = { point: screen.getCursorScreenPoint(), bounds: orb.getBounds(), moved: false };
+      const { x, y } = orb.getBounds();
+      drag = { point: screen.getCursorScreenPoint(), position: { x, y }, moved: false };
       return { ok: true, moved: false };
     }
     if (!drag || !['move', 'end', 'cancel'].includes(input.phase)) return { ok: false };
     const cursor = screen.getCursorScreenPoint();
     const dx = cursor.x - drag.point.x, dy = cursor.y - drag.point.y;
     drag.moved ||= Math.hypot(dx, dy) >= 4;
-    if (drag.moved) orb.setBounds(clamp({ ...drag.bounds, x: drag.bounds.x + dx, y: drag.bounds.y + dy }));
+    if (drag.moved) orb.setBounds(clampOrb({ x: drag.position.x + dx, y: drag.position.y + dy }));
     const result = { ok: true, moved: drag.moved, bounds: orb.getBounds() };
     if (input.phase !== 'move') { drag = null; persistBounds(); }
     return result;
@@ -426,7 +434,7 @@ function createMiniWindowHost(options) {
     cancelAnimation(); drag = null;
     for (const win of [panel, orb]) if (alive(win)) {
       const bounds = win.getBounds();
-      win.setBounds(win === panel ? clampPanel(bounds) : clamp(bounds));
+      win.setBounds(win === panel ? clampPanel(bounds) : clampOrb(bounds));
     }
     persistBounds(); notify();
   }

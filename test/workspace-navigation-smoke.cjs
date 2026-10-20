@@ -150,11 +150,25 @@ app.whenReady().then(async () => {
   await finishMockRun('导航验收完成：草稿保留，后台任务正常结束。');
   await check('backgroundCompletionKeepsLibraryActive', "activeView === 'library' && currentConv.turns.at(-1).assistant === '导航验收完成：草稿保留，后台任务正常结束。'");
   await act("document.querySelector('.history-item[data-id=\"' + workspaceFixture.conversationId + '\"]').click();"); await settle();
-  await check('backgroundCompletionReturnsOneFinalAndUsableComposer', "activeView === 'chat' && !isRunning && !sendBtn.disabled && inputEl.value === '后台完成后的补充草稿' && document.querySelector('.message.user') === workspaceFixture.userNode && [...document.querySelectorAll('.message.assistant .body')].filter(el=>el.textContent.includes('导航验收完成：')).length === 1 && ![...document.querySelectorAll('.conversation-narration')].some(el=>el.textContent.includes('导航验收完成：'))");
+  // A dirty background recovery rereads history and replaces nodes; require the same unique user content and evidence of that reload.
+  await check('backgroundCompletionReturnsOneFinalAndUsableComposer', "activeView === 'chat' && !isRunning && !sendBtn.disabled && inputEl.value === '后台完成后的补充草稿' && document.querySelectorAll('.message.user').length === 1 && document.querySelector('.message.user').textContent === workspaceFixture.userNode.textContent && (document.querySelector('.message.user') === workspaceFixture.userNode || uiFixture.calls.filter(call => call === 'history.load').length > workspaceFixture.historyLoads) && [...document.querySelectorAll('.message.assistant .body')].filter(el=>el.textContent.includes('导航验收完成：')).length === 1 && ![...document.querySelectorAll('.conversation-narration')].some(el=>el.textContent.includes('导航验收完成：'))");
   await capture('chat-complete');
   await click('#btnSend'); await waitFor('uiFixture.runId !== workspaceFixture.firstJobId && isRunning');
   await finishMockRun('第二轮对话正常完成。');
   await check('continuationRunsAfterOffPageCompletion', "currentConv.turns.length === 2 && currentConv.turns.at(-1).assistant === '第二轮对话正常完成。' && [...document.querySelectorAll('.message.assistant .body')].filter(el=>el.textContent.includes('导航验收完成：')).length === 1");
+
+  // Only deliberate input in an existing chat starts the mocked executor warmup.
+  await check('historyAndDraftRestorationNeverPrewarm', "uiFixture.calls.filter(call=>call==='prespawnClaude').length === 0");
+  await act("inputEl.value = '准备下一轮的草稿'; inputEl.dispatchEvent(new Event('input',{bubbles:true})); showAppView('library');");
+  await evaluate('new Promise(resolve => setTimeout(resolve, 900))');
+  await check('leavingChatCancelsPendingPrewarm', "uiFixture.calls.filter(call=>call==='prespawnClaude').length === 0");
+  await act('returnToConversationView();'); await settle();
+  await evaluate('new Promise(resolve => setTimeout(resolve, 900))');
+  await check('returningToNonemptyDraftDoesNotPrewarm', "activeView === 'chat' && inputEl.value === '准备下一轮的草稿' && uiFixture.calls.filter(call=>call==='prespawnClaude').length === 0");
+  await act("inputEl.dispatchEvent(new Event('input',{bubbles:true}));");
+  await waitFor("uiFixture.calls.filter(call=>call==='prespawnClaude').length === 1");
+  await check('typingInExistingChatPrewarmsOnceWithoutSending', "!isRunning && currentConv.turns.length === 2 && uiFixture.calls.filter(call=>call==='prespawnClaude').length === 1");
+  await act("inputEl.value = ''; inputEl.dispatchEvent(new Event('input',{bubbles:true}));");
 
   // Settings state and the same field nodes survive both category and main-page navigation.
   await click('#btnSettings'); await waitFor("activeView === 'settings' && document.getElementById('set-theme')?.dataset.value === 'light'");

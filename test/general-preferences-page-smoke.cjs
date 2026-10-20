@@ -4,7 +4,7 @@ const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
-const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp/settings-retirement-preferences');
+const root = path.resolve(__dirname, '..'), out = path.resolve(process.env.RELAY_PREFERENCES_SMOKE_OUT || path.join(root, '.codex-tmp/general-preferences-page'));
 fs.mkdirSync(out, { recursive: true }); app.setPath('userData', path.join(out, 'profile')); app.commandLine.appendSwitch('disable-gpu');
 let win, step = 'starting'; const checks = {}, failures = [];
 const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, checks, failures }, null, 2));
@@ -23,14 +23,14 @@ async function choose(key, value) { await reveal('#general-'+key); await act(`co
 async function capture(name) { await delay(150); fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
 function seed() {
   const base = window.api, clone = value => JSON.parse(JSON.stringify(value));
-  const state = window.prefsFixture = { gets: 0, diagnosticCalls: 0, holdDiagnostics: false, releaseDiagnostics: null, failDiagnostics: false, fullContextCalls: 0, hold: false, release: null, failRefresh: false, refreshOptions: [], folderMode: 'ok', steers: [], pauses: 0,
+  const state = window.prefsFixture = { gets: 0, diagnosticCalls: 0, holdDiagnostics: false, releaseDiagnostics: null, failDiagnostics: false, fullContextCalls: 0, hold: false, release: null, failRefresh: false, refreshOptions: [], folderMode: 'ok', migrationRetries: 0, migration: { running: false, pending: 0, migrated: 0, failed: 0 }, steers: [], pauses: 0,
     capabilities: {
       fileOpenTargets: [{ id: 'relay', label: 'Relay', available: true }, { id: 'system', label: '系统默认应用', available: true }, { id: 'vscode', label: 'VS Code', available: true }],
       agentEnvironments: [{ id: 'native', label: 'Windows 原生', available: true }, { id: 'wsl', label: 'WSL', available: false, reason: '示例环境未安装 Linux 运行时' }],
       terminalShells: [{ id: 'auto', label: '系统默认', available: true }, { id: 'powershell', label: 'Windows PowerShell', available: true }, { id: 'cmd', label: '命令提示符', available: true }, { id: 'wsl', label: 'WSL', available: true }],
     },
   };
-  const prefs = () => ({ workspaceRoot: '', defaultWorkspaceRoot: 'C:\\fixture-user\\RelayProjects', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', ...workspaceFixture.savedSettings().app });
+  const prefs = () => ({ scratchMigration: clone(state.migration), scratchRoot: '', defaultScratchRoot: 'C:\\fixture-user\\AppData\\Roaming\\Relay\\conversation-scratch', workspaceRoot: '', defaultWorkspaceRoot: 'C:\\fixture-user\\RelayProjects', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', ...workspaceFixture.savedSettings().app });
   window.api = new Proxy(base, { get(target, key) {
     if (key === 'settings') return {
       ...target.settings,
@@ -43,6 +43,8 @@ function seed() {
         runtime: { sessionState: 'running', catalog: { commands: ['goal'], agents: ['fixture-agent'], tools: ['Read', 'Edit'], plugins: ['fixture-plugin'] }, initialization: { readyMs: 235, hooksApplied: false, pluginsApplied: true }, timing: { firstVisibleMs: 650, mcpMs: 122 }, stderrCounts: { mcp: 2 } },
         routeTiming: [{ routeTier: 'opus', samples: 2, averageFirstVisibleMs: 650, averageRequestMs: 300 }] }; },
       async contextDetails() { state.fullContextCalls++; return { ok: true, sampledAt: new Date().toISOString(), estimated: true, totalTokens: 1280, categories: [{ name: '系统提示', tokens: 1024 }, { name: 'MCP 工具', tokens: 256, deferred: true }] }; },
+      async retryScratchMigration() { state.migrationRetries++; state.migration={running:true,pending:0,migrated:2,failed:0}; return {ok:true,queued:true,scratchMigration:clone(state.migration)}; },
+      async pickScratchRoot() { return state.folderMode === 'cancel' ? { ok: false, canceled: true } : { ok: true, path: 'E:\\Fixture Temporary Work' }; },
       async pickWorkspaceRoot() { return state.folderMode === 'cancel' ? { ok: false, canceled: true } : { ok: true, path: 'D:\\Fixture Workspace\\Relay Projects' }; },
     };
     if (key === 'steerClaude') return async request => {
@@ -69,7 +71,24 @@ app.whenReady().then(async () => {
   await check('generalOpensWithoutProbingOrNativeHistory', 'prefsFixture.gets===0&&prefsFixture.fullContextCalls===0');
   await evaluate("openSettings('workspace')"); await waitFor("prefsFixture.gets>=1&&!document.querySelector('[data-general-refresh]').disabled");
   await check('refreshIsAnAccessibleHeaderActionAndNotAFooterButton', "(()=>{const button=document.querySelector('[data-general-refresh]'),section=button.closest('.rgp-section'),heading=button.closest('.set-section-head'),b=button.getBoundingClientRect(),h=heading.getBoundingClientRect();return heading.contains(button)&&!!heading.textContent.trim()&&!section.querySelector('.rgp-feedback button')&&button.title==='重新检测'&&button.getAttribute('aria-label')==='重新检测'&&button.getAttribute('aria-busy')==='false'&&Math.abs(b.right-h.right)<1&&Math.abs((b.top+b.bottom)-(h.top+h.bottom))<2;})()");
-  await check('preferencesAreSeparatedByPurposeWithoutDuplicatingControls', "(()=>{const groups={workspace:['workspaceRoot','fileOpenTarget','agentEnvironment','terminalShell'],conversation:['followUpMode','maxParallelTasks']};return Object.entries(groups).every(([category,keys])=>keys.every(key=>document.querySelector('[data-general-row='+key+']')?.closest('.set-cat').dataset.cat===category))&&document.querySelectorAll('[data-general-row]').length===6&&!document.querySelector('[data-general-row=sdkSettingSources],[data-general-row=sdkTrustedProjectIds]')&&!document.querySelector('[data-cat=general] [data-general-row]')&&!document.querySelector('.rgp-section select');})()");
+  await check('preferencesAreSeparatedByPurposeWithoutDuplicatingControls', "(()=>{const groups={workspace:['workspaceRoot','scratchRoot','fileOpenTarget','agentEnvironment','terminalShell'],conversation:['followUpMode','maxParallelTasks']};return Object.entries(groups).every(([category,keys])=>keys.every(key=>document.querySelector('[data-general-row='+key+']')?.closest('.set-cat').dataset.cat===category))&&document.querySelectorAll('[data-general-row]').length===7&&!document.querySelector('[data-general-row=sdkSettingSources],[data-general-row=sdkTrustedProjectIds]')&&!document.querySelector('[data-cat=general] [data-general-row]')&&!document.querySelector('.rgp-section select');})()");
+  await check('scratchFolderExplainsMigrationAndDeferredActiveConversations', "document.querySelector('[data-general-row=scratchRoot] .rgp-label').textContent.includes('更改位置后自动迁移')&&document.querySelector('[data-general-row=scratchRoot] .rgp-label').textContent.includes('结束后迁移')&&document.querySelector('[data-scratch-migration-status]').hidden");
+  await act("prefsFixture.migration={running:true,pending:2,migrated:1,failed:0};");
+  await evaluate("openSettings('general')"); await evaluate("openSettings('workspace')");
+  await waitFor("!document.querySelector('[data-general-refresh]').disabled");
+  await check('reenteringWorkspaceSettingsRefreshesActualMigrationStatus', "document.querySelector('[data-scratch-migration-status]').textContent.includes('正在迁移')&&document.querySelector('[data-scratch-migration-status]').textContent.includes('2 个会话等待停止后迁移')&&!document.querySelector('[data-scratch-migration-status]').hidden");
+  await act("prefsFixture.migration={running:false,pending:0,migrated:2,failed:1,error:'示例目标磁盘不可用'};");
+  await click('[data-general-refresh]'); await waitFor("!document.querySelector('[data-general-refresh]').disabled");
+  await check('migrationFailureKeepsSavedSettingsAndReportsRetainedFiles', "document.querySelector('[data-scratch-migration-status]').textContent.includes('1 个会话待重试，原文件已保留')&&!document.querySelector('[data-scratch-migration-status]').textContent.includes('示例目标磁盘不可用')&&document.querySelector('[data-scratch-migration-error]').textContent==='示例目标磁盘不可用'&&!document.querySelector('[data-scratch-migration-details]').hidden&&!document.querySelector('[data-scratch-migration-details]').open&&workspaceFixture.settingsWrites.length===0");
+  await check('failedMigrationOffersAnEnabledRetry', "!document.querySelector('[data-scratch-migration-retry]').hidden&&!document.querySelector('[data-scratch-migration-retry]').disabled");
+  await click('[data-scratch-migration-details] summary');
+  await check('migrationFailureReasonCanBeExpanded', "document.querySelector('[data-scratch-migration-details]').open&&document.querySelector('[data-scratch-migration-error]').getBoundingClientRect().height>0");
+  await click('[data-scratch-migration-retry]');
+  await waitFor("prefsFixture.migrationRetries===1&&!document.querySelector('[data-general-refresh]').disabled");
+  await check('retryMigrationStartsInBackgroundWithoutWritingSettings', "document.querySelector('[data-scratch-migration-status]').textContent.includes('正在迁移')&&document.querySelector('[data-scratch-migration-retry]').hidden&&document.querySelector('[data-scratch-migration-details]').hidden&&!document.querySelector('[data-scratch-migration-details]').open&&workspaceFixture.settingsWrites.length===0&&!Object.hasOwn(generalPreferencesView.getPatch(),'scratchMigration')");
+  await act("prefsFixture.migration={running:false,pending:0,migrated:3,failed:0};");
+  await click('[data-general-refresh]'); await waitFor("!document.querySelector('[data-general-refresh]').disabled");
+  await check('completedMigrationShowsItsCountWithoutCreatingSettingsDrafts', "document.querySelector('[data-scratch-migration-status]').textContent==='已迁移 3 个会话。'&&!Object.hasOwn(generalPreferencesView.getPatch(),'scratchMigration')");
   await evaluate("openSettings('memory')");
   await waitFor("!!document.getElementById('memorySection').firstElementChild");
   await check('relayMemoryRemainsAvailableWithoutRetiredSdkMemoryControls', "!!document.getElementById('memorySection').firstElementChild&&!document.querySelector('[data-general-row=sdkMemoryMode],[data-general-row=sdkAutoDreamEnabled],[data-general-setting=sdkMemoryMode],[data-general-setting=sdkAutoDreamEnabled]')&&![...document.querySelectorAll('.rgp-heading')].some(node=>node.textContent.includes('SDK 记忆'))");
@@ -82,6 +101,11 @@ app.whenReady().then(async () => {
   await check('cancelingNativeFolderDialogKeepsTheDraft', "!Object.hasOwn(generalPreferencesView.getPatch(),'workspaceRoot')");
   await act("prefsFixture.folderMode='ok';document.querySelector('[data-general-choose-folder]').click();");
   await waitFor("generalPreferencesView.getPatch().workspaceRoot?.includes('Fixture Workspace')");
+  await check('scratchFolderShowsAuthoritativeDefault', "document.querySelector('[data-general-control=scratchRoot] .rgp-path').textContent.endsWith('conversation-scratch')&&document.querySelector('[data-general-control=scratchRoot] .rgp-path').textContent.startsWith('C:')");
+  await act("prefsFixture.folderMode='cancel';document.querySelector('[data-general-choose-folder=scratchRoot]').click();"); await delay(70);
+  await check('cancelingScratchFolderLeavesTaskFolderDraftIntact', "!Object.hasOwn(generalPreferencesView.getPatch(),'scratchRoot')&&generalPreferencesView.getPatch().workspaceRoot.includes('Fixture Workspace')");
+  await act("prefsFixture.folderMode='ok';document.querySelector('[data-general-choose-folder=scratchRoot]').click();");
+  await waitFor("generalPreferencesView.getPatch().scratchRoot?.includes('Fixture Temporary Work')");
   await choose('fileOpenTarget', 'vscode'); await choose('terminalShell', 'wsl'); await choose('followUpMode', 'queue');
   await choose('maxParallelTasks', '6');
   await check('parallelPresetIsANumericDraft', "generalPreferencesView.getPatch().maxParallelTasks===6&&workspaceFixture.settingsWrites.length===0");
@@ -92,7 +116,7 @@ app.whenReady().then(async () => {
   await waitFor("!settingsSaveBusy&&$('settingsHint').textContent.includes('拒绝')");
   await check('failedSavePreservesChoicesAndCommittedSendMode', "generalPreferencesView.getPatch().followUpMode==='queue'&&followUpMode==='steer'");
   await act("workspaceFixture.settingsWriteMode='ok';$('btnSettingsSave').click();"); await waitFor("!settingsSaveBusy&&followUpMode==='queue'");
-  await check('oneSaveCommitsAllEditedFieldsWithoutChangingProviderDefault', "workspaceFixture.savedSettings().app.workspaceRoot.includes('Fixture Workspace')&&workspaceFixture.savedSettings().app.fileOpenTarget==='vscode'&&workspaceFixture.savedSettings().app.terminalShell==='wsl'&&!Object.hasOwn(workspaceFixture.settingsWrites.at(-1).claude,'defaultModel')&&Object.keys(generalPreferencesView.getPatch()).length===0");
+  await check('oneSaveCommitsAllEditedFieldsWithoutChangingProviderDefault', "workspaceFixture.savedSettings().app.workspaceRoot.includes('Fixture Workspace')&&workspaceFixture.savedSettings().app.scratchRoot==='E:\\\\Fixture Temporary Work'&&workspaceFixture.savedSettings().app.fileOpenTarget==='vscode'&&workspaceFixture.savedSettings().app.terminalShell==='wsl'&&!Object.hasOwn(workspaceFixture.settingsWrites.at(-1).claude,'defaultModel')&&Object.keys(generalPreferencesView.getPatch()).length===0");
   await check('ordinarySaveDoesNotResubmitRetiredMemoryPreferences', "!Object.hasOwn(workspaceFixture.settingsWrites.at(-1).app,'sdkMemoryMode')&&!Object.hasOwn(workspaceFixture.settingsWrites.at(-1).app,'sdkAutoDreamEnabled')");
   await act("prefsFixture.hold=true;document.querySelector('[data-general-refresh]').click();"); await waitFor('!!prefsFixture.release');
   await check('refreshShowsBusyStateAndPreventsDuplicateRequests', "(()=>{const button=document.querySelector('[data-general-refresh]'),count=prefsFixture.gets;button.click();return button.disabled&&button.getAttribute('aria-busy')==='true'&&prefsFixture.gets===count&&prefsFixture.refreshOptions.at(-1).refresh===true&&document.querySelector('.rgp-feedback [role=status]').textContent.includes('正在检测');})()");
@@ -109,6 +133,8 @@ app.whenReady().then(async () => {
   await check('cancelRestoresSavedPreferences', "!Object.keys(generalPreferencesView.getPatch()).length");
   await act("document.querySelector('[data-general-reset-folder]').click();"); await evaluate('saveMainSettings()');
   await check('resetFolderPersistsDefaultSentinel', "workspaceFixture.savedSettings().app.workspaceRoot===''&&document.querySelector('.rgp-path').textContent.endsWith('RelayProjects')");
+  await act("document.querySelector('[data-general-reset-folder=scratchRoot]').click();"); await evaluate('saveMainSettings()');
+  await check('resetScratchFolderPersistsDefaultWithoutChangingTaskFolder', "workspaceFixture.savedSettings().app.scratchRoot===''&&workspaceFixture.savedSettings().app.workspaceRoot===''&&document.querySelector('[data-general-control=scratchRoot] .rgp-path').textContent.endsWith('conversation-scratch')");
   await choose('maxParallelTasks', '9'); await evaluate('saveMainSettings()');
   await check('nineConversationTierPersistsWithoutResettingWSLOrOtherPreferences', "workspaceFixture.savedSettings().app.maxParallelTasks===9&&workspaceFixture.savedSettings().app.terminalShell==='wsl'&&workspaceFixture.savedSettings().app.fileOpenTarget==='vscode'&&!Object.hasOwn(workspaceFixture.settingsWrites.at(-1).app,'agentEnvironment')");
   await reveal('[data-general-refresh]'); await act("document.querySelector('[data-general-refresh]').closest('.rgp-section').scrollIntoView({block:'start'});"); await capture('general-work-environment-light');

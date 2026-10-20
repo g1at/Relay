@@ -210,3 +210,15 @@ test('thinking progress reuses a single row and remains an estimate separate fro
   assert.equal(state.items.length,1);assert.match(state.items[0].detail,/约 100/);assert.equal(state.result,null);
   activity.ingest(state,{type:'assistant',message:{id:'answer',content:[{type:'text',text:'done'}]}});assert.equal(state.items.find(x=>x.id==='sdk-thinking-progress').status,'success');
 });
+
+test('agent-only assistant context snapshots never replace the main conversation context', () => {
+  const state = new NativeEventState();
+  state.observe({ type: 'assistant', context_usage: { model: 'main-model', total_tokens: 100, raw_max_tokens: 200000 } });
+  const before = state.snapshot().context;
+  for (const child of [{ agent_id: 'worker' }, { parent_tool_use_id: 'tool' }, { parentToolUseId: 'tool' }, { subagent_type: 'worker' }]) {
+    state.observe({ type: 'assistant', ...child, context_usage: { model: 'child-model', total_tokens: 10, raw_max_tokens: 200000 } });
+    assert.deepEqual(state.snapshot().context, before);
+  }
+  state.observe({ type: 'assistant', context_usage: { model: 'main-model', total_tokens: 150, raw_max_tokens: 200000 } });
+  assert.equal(state.snapshot().context.total_tokens, 150);
+});

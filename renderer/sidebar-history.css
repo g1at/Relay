@@ -63,3 +63,13 @@
 .sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del) { background: transparent; border: 0; border-radius: 5px; box-shadow: none; filter: none; color: var(--text-muted); transition: color .15s, background-color .15s; }
 .sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del):hover { background: var(--bg-hover); color: var(--text); box-shadow: none; }
 .sidebar .history-item :is(.hi-rename, .hi-pin, .hi-del):focus-visible { background: var(--bg-hover); outline: 1px solid var(--text-muted); outline-offset: -1px; box-shadow: none; }
+
+/* Running tasks keep their delete affordance visible but unavailable. */
+.sidebar .history-item .hi-tail[data-state="spin"] { display: inline-flex; align-items: center; gap: 4px; }
+.sidebar .history-item .hi-del:disabled { display: inline-flex; opacity: .35; cursor: not-allowed; background: transparent; color: var(--text-muted); }
+
+/* Pending cleanup is visible without blocking other conversations. */
+.sidebar .history-item.deleting { cursor: progress; }
+.sidebar .history-item.deleting :is(.hi-del, .hi-rename, .hi-pin) { display: none; }
+.sidebar .history-item.deleting .hi-title { cursor: progress; }
+.sidebar .history-item .hi-delete-status { display: inline-block; margin-left: 8px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }

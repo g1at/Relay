@@ -13,38 +13,72 @@ class LiveTurnControls {
 
   pendingResult(jobId) {
     for (const operation of this.conversations.values()) {
-      if (operation.jobId === jobId) return operation.promise;
+      if (operation.jobId === jobId) return this._result(operation);
     }
     return null;
   }
 
   _start(target, jobId, conversationId, execute) {
     const existing = this.operations.get(target);
-    if (existing && existing.jobId === jobId) return existing.promise;
-    const operation = { jobId, conversationId, hold: false, promise: null };
+    if (existing && existing.jobId === jobId) return this._result(existing);
+    const operation = { jobId, conversationId, hold: false, promise: null, responded: false };
     const release = () => {
       if (this.conversations.get(conversationId) === operation) this.conversations.delete(conversationId);
     };
     this.operations.set(target, operation);
     if (conversationId) this.conversations.set(conversationId, operation);
-    operation.promise = Promise.resolve().then(() => execute(operation, release)).finally(() => {
-      if (!operation.hold) release();
+    operation.release = release;
+    this._respond(operation, () => execute(operation, release));
+    return operation.promise;
+  }
+
+  _respond(operation, execute) {
+    operation.responded = false;
+    operation.promise = Promise.resolve().then(execute).finally(() => {
+      operation.responded = true;
+      if (!operation.hold) operation.release();
     });
     return operation.promise;
+  }
+
+  _result(operation) {
+    if (operation.finalResult) return Promise.resolve(operation.finalResult);
+    // Share concurrent clicks, but a previous bounded pending response is not
+    // permanent state. Reobserve the real exit and retry the owned stop path.
+    if (operation.responded && operation.hold && operation.refresh) {
+      return this._respond(operation, operation.refresh);
+    }
+    return operation.promise;
+  }
+
+  _requestClose(operation, release, request, message) {
+    operation.hold = true;
+    operation.refresh = () => this._requestClose(operation, release, request, message);
+    let pending;
+    try { pending = request(); }
+    catch (error) { pending = Promise.reject(error); }
+    if (!pending || typeof pending.then !== 'function') {
+      pending = Promise.reject(new Error('执行器无法确认停止'));
+    }
+    return this._closed(operation, release, pending, message);
   }
 
   async _closed(operation, release, pending, message) {
     // A bounded UI response must not turn an unconfirmed close into permission
     // to start another writer. The reservation survives until actual completion.
     operation.hold = true;
+    const success = { aborted: true, settled: true, preservedSession: false, fallback: true, ...(message ? { message } : {}) };
     const closed = Promise.resolve(pending).then((result) => {
       if (result && result.stopConfirmed === false) throw new Error('执行进程尚未确认停止');
+      operation.finalResult = success;
+      operation.hold = false;
       release();
       return result;
     });
+    closed.catch(() => {});
     try {
       await this.withTimeout(closed, '等待执行停止', 5000);
-      return { aborted: true, settled: true, preservedSession: false, fallback: true, ...(message ? { message } : {}) };
+      return success;
     } catch (error) {
       return { aborted: false, settled: false, preservedSession: false, fallback: true, pending: true,
         message: error.message || '执行尚未停止，请稍后重试' };
@@ -54,7 +88,7 @@ class LiveTurnControls {
   interrupt(session) {
     const jobId = session && session.jobId;
     const existing = session && this.operations.get(session);
-    if (existing && (existing.jobId === jobId || !jobId)) return existing.promise;
+    if (existing && (existing.jobId === jobId || !jobId)) return this._result(existing);
     if (!session || !jobId || session.busy === false) {
       return Promise.resolve({ aborted: false, settled: true, preservedSession: !!session && !session.dead, alreadyFinished: true });
     }
@@ -68,13 +102,11 @@ class LiveTurnControls {
         if (modePreparationPending) {
           // Canceling a local mode command closes the SDK Query asynchronously.
           // Wait for that close before allowing a new turn to reuse this session.
-          let closed;
-          try { closed = this.killSession(session, '暂停模式准备，回收未确认命令'); }
-          catch (_) {
-            operation.hold = true;
-            return { aborted: false, settled: false, preservedSession: false, message: '未能停止执行，请重试' };
-          }
-          return this._closed(operation, release, closed);
+          return this._requestClose(operation, release,
+            () => {
+              if (superseded()) throw new Error('原执行已被替换，不能停止新的任务');
+              return this.killSession(session, '暂停模式准备，回收未确认命令');
+            });
         }
         return { aborted: true, settled: true, preservedSession: true, preparingMcp: true };
       }
@@ -95,29 +127,23 @@ class LiveTurnControls {
         // Defense in depth if a legacy caller bypassed the admission gate.
         // An old timeout/receipt must never kill a newer turn on this Query.
         if (superseded()) return finished();
-        let closed;
-        try { closed = this.killSession(session, '中止控制失败，回退回收'); }
-        catch (_) {
-          operation.hold = true;
-          return { aborted: false, settled: false, preservedSession: false, message: '未能停止执行，请重试' };
-        }
-        return this._closed(operation, release, closed, error.message);
+        return this._requestClose(operation, release,
+          () => {
+            if (superseded()) throw new Error('原执行已被替换，不能停止新的任务');
+            return this.killSession(session, '中止控制失败，回退回收');
+          }, error.message);
       }
     });
   }
 
   stopOneShot(child, jobId, conversationId) {
     return this._start(child, jobId, conversationId, (operation, release) => {
-      let closed;
-      try {
+      return this._requestClose(operation, release, () => {
         const pending = child.kill('SIGTERM');
-        closed = typeof child.whenClosed === 'function' ? child.whenClosed() : pending;
+        const closed = typeof child.whenClosed === 'function' ? child.whenClosed() : pending;
         if (!closed || typeof closed.then !== 'function') throw new Error('执行器无法确认停止');
-      } catch (error) {
-        operation.hold = true;
-        return { aborted: false, settled: false, preservedSession: false, message: error.message };
-      }
-      return this._closed(operation, release, closed);
+        return closed;
+      });
     });
   }
 }

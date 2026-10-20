@@ -443,3 +443,61 @@ test('journal result recovery changes evidence only and does not replay into per
   assert.deepEqual({ eventOrder: restored.eventOrder, revision: restored.revision, current: JSON.stringify(restored.current), lastResult: JSON.stringify(restored.lastResult) }, before);
   assert.equal(output.finish(restored, { exitCode: 0, finalResult: terminal }, { supplements }), 'A\n\nB');
 });
+
+test('message lookup indexes a long live turn without rescanning old message IDs for every delta', () => {
+  const state = output.createState();
+  let oldIdReads = 0;
+  state.messages = Array.from({ length: 229 }, (_, index) => ({
+    get id() { oldIdReads += 1; return 'old-' + index; }, parent: '', contextEpoch: 0, blocks: [],
+  }));
+  output.ingest(state, stream('message_start', { message: { id: 'live' } }));
+  const setupReads = oldIdReads;
+  for (let index = 0; index < 3000; index++) {
+    output.ingest(state, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'x' } }));
+  }
+  assert.equal(oldIdReads, setupReads, 'streaming hits must not touch any older message ID');
+  assert.equal(output.textFor(state.messages.at(-1)), 'x'.repeat(3000));
+  assert.deepEqual(Object.keys(state), Object.keys(output.createState()), 'lookup cache adds no snapshot fields');
+  const restored = output.createState(output.serialize(state));
+  output.ingest(restored, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: ' restored' } }));
+  assert.equal(output.textFor(restored.messages.at(-1)), 'x'.repeat(3000) + ' restored');
+  assert.equal(output.textFor(state.messages.at(-1)), 'x'.repeat(3000));
+});
+
+test('message lookup remains scoped to parent and context epoch after native reset', () => {
+  const state = output.createState();
+  output.ingest(state, assistant('same-id', 'root before'));
+  output.ingest(state, assistant('same-id', 'child before', { parent_tool_use_id: 'child' }));
+  output.ingest(state, { type: 'conversation_reset', new_conversation_id: 'next-context', uuid: 'reset' });
+  output.ingest(state, assistant('same-id', 'root after'));
+  output.ingest(state, assistant('same-id', 'child after', { parent_tool_use_id: 'child' }));
+  assert.deepEqual(state.messages.map(message => [message.parent, message.contextEpoch, output.textFor(message)]), [
+    ['', 0, 'root before'], ['child', 0, 'child before'], ['', 1, 'root after'], ['child', 1, 'child after'],
+  ]);
+});
+
+test('message lookup follows retraction, reordering, same-length replacement and renamed IDs', () => {
+  const state = output.createState();
+  output.ingest(state, assistant('a', 'retired', { uuid: 'frame-a' }));
+  output.ingest(state, assistant('b', 'keep', { uuid: 'frame-b' }));
+  output.ingest(state, { type: 'system', subtype: 'model_refusal_fallback', retracted_message_uuids: ['frame-a'] });
+  output.ingest(state, assistant('a', 'replacement', { uuid: 'frame-new-a' }));
+  assert.deepEqual(state.messages.map(message => output.textFor(message)), ['keep', 'replacement']);
+  state.messages.reverse();
+  output.ingest(state, stream('message_start', { message: { id: 'a' } }));
+  output.ingest(state, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: ' reordered' } }));
+  assert.equal(output.textFor(state.messages[0]), 'replacement reordered');
+  const detached = state.messages[0];
+  state.messages[0] = { id: 'a', parent: '', contextEpoch: 0, blocks: [] };
+  output.ingest(state, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'fresh' } }));
+  assert.equal(output.textFor(state.messages[0]), 'fresh');
+  assert.equal(output.textFor(detached), 'replacement reordered', 'never append to a detached message');
+  state.messages[0].id = 'renamed';
+  output.ingest(state, stream('message_start', { message: { id: 'renamed' } }));
+  output.ingest(state, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: ' renamed' } }));
+  assert.equal(output.textFor(state.messages[0]), 'fresh renamed');
+  state.messages.splice(0, 1);
+  output.ingest(state, stream('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'after removal' } }));
+  assert.deepEqual(state.messages.map(message => message.id), ['b', 'renamed']);
+  assert.equal(output.textFor(state.messages.at(-1)), 'after removal');
+});

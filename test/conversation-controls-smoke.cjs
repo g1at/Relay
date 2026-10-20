@@ -15,7 +15,7 @@ const ev = code => win.webContents.executeJavaScript(code);
 const act = code => ev(`(() => { ${code}\n })()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const settle = () => delay(180);
-async function waitFor(code) { await ev(`new Promise((resolve,reject)=>{const end=Date.now()+5000;const check=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(check,20);};check();})`); }
+async function waitFor(code) { step = 'waiting: ' + code; save(); try { await ev(`new Promise((resolve,reject)=>{const end=Date.now()+5000;const check=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(check,20);};check();})`); } catch (error) { throw new Error('Timed out waiting for ' + code, { cause: error }); } }
 async function check(name, code) { step = name; checks[name] = !!await ev(code); save(); console.log(name+': '+checks[name]); if (!checks[name]) throw Error(name); }
 async function capture(name) { await settle(); fs.writeFileSync(path.join(out,name+'.png'),(await win.webContents.capturePage()).toPNG()); }
 app.whenReady().then(async () => {
@@ -30,9 +30,9 @@ app.whenReady().then(async () => {
         if(state.holdPause)await new Promise(resolve=>state.releasePause=resolve);
         window.controlReview.emit({jobId:id,type:'job-done',exitCode:0,finalResult:{type:'result',subtype:'success',terminal_reason:'aborted_streaming'}});
         return{paused:true,settled:true,preservedSession:true,jobId:id};};
-      if(key==='history')return new Proxy(target.history,{get(original,method){if(method==='save')return async conv=>{
-        if(state.holdSave&&conv.turns.at(-1)?.output?.status==='canceled'){state.holdSave=false;await new Promise(resolve=>state.releaseSave=resolve);}
-        return original.save(conv);
+      if(key==='history')return new Proxy(target.history,{get(original,method){if(method==='completeTurn')return async(...args)=>{
+        if(state.holdSave&&args[3]?.turn?.output?.status==='canceled'){state.holdSave=false;await new Promise(resolve=>state.releaseSave=resolve);}
+        return original.completeTurn(...args);
       };return original[method];}});
       return target[key];
     }});
@@ -41,6 +41,7 @@ app.whenReady().then(async () => {
   const page=path.join(out,'fixture.html');
   fs.writeFileSync(page,fs.readFileSync(path.join(root,'renderer/index.html'),'utf8').replace('<head>','<head><base href="'+pathToFileURL(path.join(root,'renderer')+path.sep).href+'"><script>'+fixture+seed+'</script>'));
   win=new BrowserWindow({width:1200,height:820,show:false,webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false}});
+  win.webContents.on('console-message', (_event, level, message) => { if (level >= 3) console.error('Renderer:', message); });
   await win.loadFile(page); win.showInactive();
   await waitFor('providerRoutingLoaded&&!restoringTaskLifecycle');
   await act(`controlReview.emit=event=>handleClaudeEvent({jobId:uiFixture.runId,...event});controlReview.message=(id,text)=>{controlReview.emit({type:'stream_event',event:{type:'message_start',message:{id}}});controlReview.emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});};`);
@@ -53,22 +54,22 @@ app.whenReady().then(async () => {
   await act(`$('input').value='';$('input').dispatchEvent(new Event('input',{bubbles:true}));`);
   await check('ClearingDraftRestoresPause','$("btnSend").title==="暂停当前任务"&&$("btnSend").classList.contains("is-stop")');
   await act(`controlReview.message('progress',${JSON.stringify('# 处理进度\n\n**正在检查**文件')});`); await settle();
-  await check('MarkdownRendersBeforeTerminalEvent','!!document.querySelector(".message.assistant.is-streaming h1")&&!!document.querySelector(".message.assistant.is-streaming strong")&&!currentConv.turns[0].assistant');
-  await check('PreviewIsNotDuplicatedInProcess','!document.querySelector(".conversation-narration")&&!document.querySelector(".message.assistant.is-streaming .assistant-copy")');
+  await check('MarkdownRendersInProcessBeforeTerminalEvent','!!document.querySelector(".conversation-narration h1")&&!!document.querySelector(".conversation-narration strong")&&!currentConv.turns[0].assistant');
+  await check('ProvisionalTextHasOneProcessAndNoFinalAnswer','document.querySelectorAll(".conversation-narration").length===1&&!document.querySelector(".message.assistant:not(.thinking-indicator)")&&!document.querySelector(".assistant-copy")');
   await act(`controlReview.emit({type:'assistant',message:{id:'progress',content:[{type:'text',text:${JSON.stringify('# 处理进度\n\n**正在检查**文件')}},{type:'tool_use',id:'read1',name:'Read',input:{file_path:'alpha.md'}}]}});controlReview.emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'read1',content:'alpha contents'}]}});`); await settle();
-  await check('ToolCallMovesProvisionalTextIntoRenderedProcess','!document.querySelector(".message.assistant.is-streaming")&&!!document.querySelector(".conversation-narration h1")&&!!document.querySelector(".conversation-narration strong")');
+  await check('ToolCallKeepsProvisionalTextInRenderedProcess','!document.querySelector(".message.assistant.is-streaming")&&!!document.querySelector(".conversation-narration h1")&&!!document.querySelector(".conversation-narration strong")');
   for(const n of [2,3]) await act(`controlReview.emit({type:'assistant',message:{id:'tool${n}',content:[{type:'tool_use',id:'read${n}',name:'Read',input:{file_path:'file-${n}.md'}}]}});controlReview.emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'read${n}',content:'contents ${n}'}]}});`);
   await settle();
   await check('RepeatedToolsAreOneCollapsedGroup','document.querySelectorAll(".process-tool-group").length===1&&document.querySelector(".process-tool-group-summary").getAttribute("aria-expanded")==="false"&&document.querySelector(".process-tool-group-count").textContent.includes("3")');
   const answer='# 完成结果\n\n**已完成** 文件整理。\n\n| 文件 | 状态 |\n| --- | --- |\n| alpha.md | 完成 |\n\n```js\n'+Array.from({length:22},(_,i)=>'const item'+i+' = '+i+';').join('\n')+'\n```\n';
   await act(`controlReview.answer=${JSON.stringify(answer)};controlReview.message('final',${JSON.stringify(answer.slice(0,-4))});`); await settle();
-  await check('OpenFenceStreamsAsFormattedCode','!!document.querySelector(".message.assistant.is-streaming pre code")&&!!document.querySelector(".message.assistant.is-streaming table")');
+  await check('OpenFenceStreamsAsFormattedCode','!!document.querySelector(".conversation-narration pre code")&&!!document.querySelector(".conversation-narration table")');
   await act(`controlReview.emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:${JSON.stringify(answer.slice(-4))}}}});`); await settle();
-  await act(`controlReview.body=document.querySelector('.message.assistant.is-streaming .body');controlReview.code=controlReview.body.querySelector('pre code');controlReview.heading=controlReview.body.querySelector('h1');controlReview.emit({type:'result',subtype:'success',result:controlReview.answer});`);
-  await check('ResultAloneDoesNotPersistFinal','runs.size===1&&!currentConv.turns[0].assistant');
+  await act(`controlReview.body=document.querySelector('.conversation-narration pre code').closest('.conversation-narration');controlReview.code=controlReview.body.querySelector('pre code');controlReview.heading=controlReview.body.querySelector('h1');controlReview.emit({type:'result',subtype:'success',result:controlReview.answer});`);
+  await check('ResultAloneKeepsProcessNodesWithoutPublishingFinal','runs.size===1&&!currentConv.turns[0].assistant&&controlReview.body.isConnected&&controlReview.body.querySelector("pre code")===controlReview.code&&controlReview.body.querySelector("h1")===controlReview.heading&&!document.querySelector(".assistant-copy")');
   await act(`controlReview.emit({type:'job-done',exitCode:0,finalResult:{type:'result',subtype:'success',result:controlReview.answer}});`);
   await waitFor('runs.size===0'); await settle();
-  await check('FinalConfirmationPreservesBodyAndCodeNodes','document.querySelector(".message.assistant .body")===controlReview.body&&controlReview.body.querySelector("pre code")===controlReview.code&&controlReview.body.querySelector("h1")===controlReview.heading');
+  await check('FinalConfirmationPromotesCompleteMarkdownOnce','(()=>{const body=document.querySelector(".message.assistant .body"),code=body?.querySelector("pre code"),heading=body?.querySelector("h1");if(!code||!heading||code.textContent!==controlReview.code.textContent||heading.textContent!==controlReview.heading.textContent)return false;controlReview.body=body;controlReview.code=code;controlReview.heading=heading;return !Array.from(document.querySelectorAll(".conversation-narration")).some(row=>row.querySelector("h1")?.textContent===heading.textContent)})()');
   await check('LongCodeDoesNotSuddenlyCollapseOnCompletion','!controlReview.code.closest("pre").classList.contains("collapsed")&&!!controlReview.body.querySelector(".code-copy")');
   await check('OnlyFinalAnswerVisibleAfterWorkCompletes','document.querySelectorAll(".message.assistant:not(.thinking-indicator)").length===1&&document.querySelector(".process-summary").getAttribute("aria-expanded")==="false"&&document.querySelectorAll(".assistant-copy").length===1');
   await check('HistoryContainsConfirmedAnswerOnly','currentConv.turns[0].assistant===controlReview.answer&&!currentConv.turns[0].activity.items.some(item=>item.result===controlReview.answer)');
@@ -92,7 +93,7 @@ app.whenReady().then(async () => {
   await waitFor('controlReview.launches.length===3');
   await check('ExplicitFollowupResumesSameSessionAndKeepsNewDraft','controlReview.launches[2][0]===controlReview.pendingPrompt&&controlReview.launches[2][1]==="synthetic-session"&&controlReview.launches[2][9]===controlReview.launches[1][9]&&$("input").value==="这是后续草稿"');
   await act(`controlReview.holdPause=false;$('input').value='';$('input').dispatchEvent(new Event('input',{bubbles:true}));$('btnSend').click();`); await waitFor('runs.size===0&&!conversationControls.size');
-  await check('PausePersistsAndExposesContinue','!!currentConv.paused&&$("btnSend").classList.contains("is-resume")&&$("conversationControlNote").hidden&&!$("conversationControlNote").textContent.trim()');
+  await check('PausePersistsAndExposesContinue','!!currentConv.paused&&$("btnSend").classList.contains("is-resume")&&(!$("conversationControlNote")||($("conversationControlNote").hidden&&!$("conversationControlNote").textContent.trim()))');
   await capture('paused-light');
   await ev('loadConversation(currentConv.id,null,{forceReload:true})');
   await check('PauseSurvivesHistoryReopen','!!currentConv.paused&&$("btnSend").title==="继续任务"');
@@ -104,7 +105,7 @@ app.whenReady().then(async () => {
   await act(`controlReview.origin=currentConv.id;startNewConv();$('input').value='另一个对话的草稿';controlReview.releasePause();`); await waitFor('!conversationControls.size');
   await check('NavigatingDuringManualPauseNeverRedirectsWork','!currentConv&&controlReview.launches.length===4&&$("input").value==="另一个对话的草稿"&&runs.size===0');
   await ev('loadConversation(controlReview.origin)');
-  await check('OriginalConversationRestoresManualPause','!!currentConv.paused&&$("conversationControlNote").hidden&&!$("conversationControlNote").textContent.trim()');
+  await check('OriginalConversationRestoresManualPause','!!currentConv.paused&&(!$("conversationControlNote")||($("conversationControlNote").hidden&&!$("conversationControlNote").textContent.trim()))');
   await act("controlReview.holdPause=false;controlReview.explicitFollowup=send({explicit:true,prompt:'用户确认继续原会话',files:[],skill:null});"); await waitFor('controlReview.launches.length===5');
   await check('ExplicitResumeTargetsOriginalConversation','controlReview.launches[4][9]===controlReview.origin&&controlReview.launches[4][0]==="用户确认继续原会话"');
   win.setSize(900,640); await act(`document.documentElement.dataset.theme='dark';document.body.dataset.theme='dark';`); await settle();

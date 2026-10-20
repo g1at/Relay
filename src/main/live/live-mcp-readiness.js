@@ -12,13 +12,17 @@ function mcpConfigKey(servers) {
   return createHash('sha256').update(JSON.stringify(stableValue(servers || {}))).digest('hex');
 }
 
+// Deferred servers have a ready discovery endpoint; connecting their unused
+// processes is deliberately outside the first-message critical path.
+const isReadyStatus = status => status === 'connected' || status === 'deferred';
+
 function publicMcpItems(statuses, expectedNames = []) {
   const items = new Map();
   for (const status of Array.isArray(statuses) ? statuses : []) {
     if (!status || typeof status.name !== 'string' || !status.name) continue;
     items.set(status.name, {
       name: status.name,
-      status: ['connected', 'failed', 'needs-auth', 'pending', 'disabled'].includes(status.status)
+      status: ['connected', 'deferred', 'failed', 'needs-auth', 'pending', 'disabled'].includes(status.status)
         ? status.status : 'unknown',
       toolCount: Array.isArray(status.tools) ? status.tools.length : null,
     });
@@ -139,7 +143,7 @@ class LiveMcpReadiness {
       });
     };
     const result = (code = null) => ({
-      ok: !code && expectedNames.every((name) => items.find((item) => item.name === name)?.status === 'connected'),
+      ok: !code && expectedNames.every((name) => isReadyStatus(items.find((item) => item.name === name)?.status)),
       items,
       code,
       timedOut: code === 'MCP_PREPARE_TIMEOUT',
@@ -225,7 +229,7 @@ class LiveMcpReadiness {
         }
         items = publicMcpItems(statuses, expectedNames);
         for (const item of items) {
-          if (item.status === 'connected') this.reconnectAttempts.delete(item.name);
+          if (isReadyStatus(item.status)) this.reconnectAttempts.delete(item.name);
         }
         const required = items.filter((item) => expectedNames.includes(item.name));
         // setMcpServers only replaces the dynamic collection. A settings-owned
@@ -256,7 +260,7 @@ class LiveMcpReadiness {
           toggled = true;
         }
         if (toggled) continue;
-        if (required.every((item) => item.status === 'connected') && !retired.length) return result();
+        if (required.every((item) => isReadyStatus(item.status)) && !retired.length) return result();
         if (!synced && required.some((item) => item.status === 'missing')) {
           await sync(true);
           continue;

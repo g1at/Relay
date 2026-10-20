@@ -14,6 +14,7 @@ function fixture() {
     getProjectComposer: () => null, syncComposerAction() {}, syncMcpReconnectButtons() {}, syncPermissionControl() {}, syncContextUsagePolling() {},
     renderAttachments() {}, hideSkillQuickPopup() {}, autoGrowInput() {}, scrollToBottom() {},
     isConvRunning: () => false, isMountedChatJob: () => false, newClientRunId: () => 'new-id',
+    syncHistoryDeletionAvailability() {},
     showToast: message => toasts.push(message),
     send: async payload => { sent.push(payload); return { ok: true }; },
     window: { api: { steerClaude: async payload => { receipts.push(payload); return { ok: false, code: 'UNKNOWN' }; } } },

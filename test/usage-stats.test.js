@@ -413,7 +413,7 @@ test('old aggregation indexes rebuild in the worker while their display snapshot
     usage({ resultId: 'late', modelUsage: { main: counters(50, 20, 40, 5) } }));
   const first = await refreshStats(options, null, NOW);
   const old = JSON.parse(JSON.stringify(first.index));
-  delete old.usage.aggregationVersion;
+  old.usage.aggregationVersion = 2;
   Object.values(old.usage.days)[0].models.main = counters(150, 60, 120, 15);
   const oldSnapshot = JSON.parse(JSON.stringify(first.snapshot));
   for (const value of Object.values(oldSnapshot.windows)) Object.assign(value.tokens, {
@@ -429,7 +429,22 @@ test('old aggregation indexes rebuild in the worker while their display snapshot
   await service.refresh({ force: true });
   assert.equal(service.snapshot.windows[7].tokens.totalTokens, 230, 'worker must replace the old inflated aggregation');
   const rebuiltIndex = JSON.parse(fs.readFileSync(path.join(options.cacheDir, 'usage-index-v1.json'), 'utf8'));
-  assert.equal(rebuiltIndex.usage.aggregationVersion, 2);
+  assert.equal(rebuiltIndex.usage.aggregationVersion, 3);
   assert.deepEqual(Object.values(rebuiltIndex.usage.days)[0].models.main, counters(100, 40, 80, 10));
 
+});
+
+test('missing inherited baseline coverage survives journal replay and does not fabricate zero usage', async t => {
+  const options = fixture(t);
+  appendUsage(options, usage({ resultId: 'baseline-unavailable', modelUsage: {}, usageIncomplete: true }));
+  const first = await refreshStats(options, null, NOW);
+  assert.equal(first.snapshot.windows[7].tokens.available, false);
+  assert.ok(first.snapshot.windows[7].coverage.warningCodes.includes('USAGE_BASELINE_UNAVAILABLE'));
+  appendUsage(options, usage({ resultId: 'later-known-delta', modelUsage: { model: counters(10, 2, 0, 0) }, usageIncomplete: true }));
+  const after = await refreshStats(options, first.index, NOW);
+  assert.equal(after.snapshot.windows[7].tokens.totalTokens, 12);
+  assert.equal(after.snapshot.windows[7].tokens.recordedResults, 1);
+  assert.ok(after.snapshot.windows[7].coverage.warningCodes.includes('USAGE_BASELINE_UNAVAILABLE'));
+  const replayed = await refreshStats(options, null, NOW);
+  assert.deepEqual(replayed.snapshot.windows[7], after.snapshot.windows[7]);
 });

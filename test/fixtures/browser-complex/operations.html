@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>AG Grid 33.3.2 complex Relay audit</title>
+<style>body{margin:14px;font:14px system-ui}button{padding:8px;margin:4px}#grid{height:420px;width:950px}.menu{position:absolute;z-index:5;background:white;border:1px solid;padding:8px}.modal{position:fixed;inset:80px 150px;background:white;border:2px solid #444;padding:30px;z-index:8}iframe{width:650px;height:100px}#status{display:inline-block}</style>
+<h2>Complex operations desk — 10,000 virtual rows</h2>
+<a href="/popup" target="_blank">Open linked record</a>
+<button id="filter" aria-haspopup="listbox">Status filter</button><span id="status">All statuses</span>
+<div id="choices" class="menu" role="listbox" hidden><div role="option" tabindex="0" data-status="Pending">Pending only</div><div role="option" tabindex="0" data-status="Approved">Approved only</div></div>
+<button id="review">Open asynchronous approval</button><button id="import">Import CSV</button><input id="csv" type="file" accept=".csv" hidden>
+<div id="grid"></div><p id="rowstate">Rows loading</p>
+<iframe title="Embedded account editor" src="/embedded"></iframe><div id="modal" class="modal" role="dialog" aria-label="Approval dialog" hidden></div>
+<div contenteditable aria-label="Rich text editor" style="border:1px solid;height:28px">Draft note</div><canvas width="400" height="80" aria-label="Drawing canvas" style="border:1px solid"></canvas>
+<script src="/ag-grid.js"></script><script>
+window.audit={loaded:false,status:'All',modal:false,uploaded:0,approved:false};
+const rows=Array.from({length:10000},(_,i)=>({id:i+1,company:'Company '+String(i+1).padStart(5,'0'),status:i%2?'Pending':'Approved',amount:i*17,region:'Region '+i%9,owner:'Analyst '+i%31,review:'Queue '+i%13,note:'Record '+i,category:'Category '+i%7}));
+const api=agGrid.createGrid(document.querySelector('#grid'),{theme:agGrid.themeQuartz,rowData:[],columnDefs:[{field:'id',width:85},{field:'company',width:155},{field:'status',width:110},{field:'amount',width:95},{field:'region',width:105},{field:'owner',width:120},{field:'review',width:100},{field:'note',width:130},{field:'category',width:130}],defaultColDef:{sortable:true,filter:true,resizable:true},rowBuffer:10,rowSelection:{mode:'singleRow'},onSelectionChanged:e=>document.querySelector('#rowstate').textContent='Selected '+(e.api.getSelectedRows()[0]?.id||'none')});window.auditApi=api;
+setTimeout(()=>{api.setGridOption('rowData',rows);audit.loaded=true;document.querySelector('#rowstate').textContent='10,000 records ready'},650);
+filter.onclick=()=>choices.hidden=!choices.hidden;
+choices.onclick=e=>{const value=e.target.dataset.status;if(!value)return;audit.status=value;document.querySelector('#status').textContent=value+' selected';choices.hidden=true;setTimeout(()=>{api.setGridOption('rowData',rows.filter(x=>x.status===value));fetch('/event?kind=filter&value='+value)},450)};
+review.onclick=()=>{setTimeout(async()=>{await fetch('/ready');modal.hidden=false;audit.modal=true;modal.innerHTML='<h3>Approval ready</h3><label>Reason <input aria-label="Approval reason"></label><button id="confirm">Confirm approval</button>';document.querySelector('#confirm').onclick=async()=>{await fetch('/approved',{method:'POST'});audit.approved=true;modal.hidden=true;document.querySelector('#rowstate').textContent='Approval completed'}},1200)};
+const canvas=document.querySelector('canvas');canvas.addEventListener('dblclick',()=>{audit.doubleClicked=true});canvas.addEventListener('contextmenu',e=>{e.preventDefault();audit.rightClicked=true});canvas.addEventListener('mouseenter',()=>{audit.hovered=true}); canvas.addEventListener('pointerdown',e=>{audit.dragStart=[e.offsetX,e.offsetY]}); canvas.addEventListener('pointerup',e=>{audit.dragEnd=[e.offsetX,e.offsetY]});
+document.querySelector('#import').onclick=()=>csv.click();csv.onchange=()=>{audit.uploaded=csv.files.length;audit.uploadedName=csv.files[0]?.name;fetch('/event?kind=upload')};
+</script>

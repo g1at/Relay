@@ -3,7 +3,8 @@
 const { randomUUID } = require('crypto');
 
 const PLAN_INSTRUCTIONS = '当前会话处于只读计划模式。只调查、澄清并在最终回复中给出计划；不要修改文件、执行命令、调用会产生副作用的工具或创建子代理。不要调用 ExitPlanMode 或写入计划文件。用户需要在 Relay 中明确切回普通模式后才能执行计划。';
-const PLAN_READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch', 'ToolSearch', 'AskUserQuestion', 'TaskGet', 'TaskList', 'mcp__relay-memory__list', 'mcp__relay-memory__read']);
+const PLAN_READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch', 'ToolSearch', 'AskUserQuestion', 'TaskGet', 'TaskList', 'mcp__relay-memory__list', 'mcp__relay-memory__read',
+  'mcp__relay-browser__tabs', 'mcp__relay-browser__observe', 'mcp__relay-browser__verify', 'mcp__relay-browser__screenshot', 'mcp__relay-browser__wait', 'mcp__relay-browser__diagnostics', 'mcp__relay-browser__downloads', 'mcp__relay-browser__frames', 'mcp__relay-browser__locate', 'mcp__relay-browser__evidence']);
 const PLAN_DENIAL = '当前对话是只读计划模式，此操作不会执行。请先完成文字计划，由用户在 Relay 中明确切回普通模式。';
 
 function modeError(code, message) { return Object.assign(new Error(message), { code }); }

@@ -37,6 +37,7 @@ function liveRun(jobId = 'new-user', { keepAlive = true, orchestrate = false } =
   const context = { TaskClock: require('../src/main/tasks/task-clock').TaskClock,
     sess, convId: sess.convId, liveResultDisposition,
     ...require('../src/main/sdk/sdk-session-observer'),
+    ...require('../src/main/sdk/sdk-session-diagnostic-event'),
     observer: new (require('../src/main/sdk/sdk-session-observer').SdkSessionObserver)(),
     routeTimingHistory: new (require('../src/main/sdk/sdk-session-observer').RouteTimingHistory)(),
     ...require('../src/main/sdk/sdk-task-resources'),
@@ -52,7 +53,7 @@ function liveRun(jobId = 'new-user', { keepAlive = true, orchestrate = false } =
   };
   require('./helpers/sdk-provenance-fixture')(context);
   vm.runInNewContext(`${source.slice(repairStart, repairStop)}\n${source.slice(finishStart, finishStop)}\n${source.slice(start, exitStop)}\nglobalThis.ingest = onMessage; globalThis.exit = onExit;`, context);
-  return { sess, events, pushes, ingest: context.ingest, exit: context.exit };
+  return { sess, events, pushes, observer: context.observer, ingest: context.ingest, exit: context.exit };
 }
 
 function streamStart(userMessageId, messageId = 'reply') {
@@ -71,6 +72,28 @@ function orphanResult(extra = {}) {
     origin: { kind: 'task-notification' }, num_turns: 0, duration_api_ms: 0, result: '', ...extra,
   });
 }
+
+test('rejected old replies cannot contaminate current timing or recovery diagnostics', () => {
+  const { observer, events, ingest } = liveRun();
+  ingest({ type: 'system', subtype: 'init', session_id: 'same-session', plugin_errors: [{ plugin: 'inline[0]', type: 'generic-error' }] });
+  observer.beginTurn();
+  ingest({ type: 'stream_event', session_id: 'same-session', user_message_uuid: 'old-user',
+    resume_reason: 'host_draining', first_text_post_ms: 999,
+    event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'stale' } } });
+  ingest(success({ session_id: 'same-session', user_message_uuid: 'old-user', startup_failure_reason: 'proxy_invalid' }));
+  assert.equal(observer.snapshot().timing.firstVisibleMs, undefined);
+  assert.equal(observer.snapshot().diagnostics.recovery, undefined);
+  assert.equal(observer.snapshot().diagnostics.startupFailure, undefined);
+  ingest(streamStart('new-user'));
+  ingest({ type: 'stream_event', session_id: 'same-session',
+    event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'current' } } });
+  ingest(success({ session_id: 'same-session', result: 'done' }));
+  const result = events.find(event => event.type === 'result');
+  assert.equal(typeof result.relay_diagnostics.timing.hostFirstTextMs, 'number');
+  assert.equal(result.relay_diagnostics.recovery, undefined);
+  assert.equal(result.relay_diagnostics.startupFailure, undefined);
+  assert.equal(result.relay_diagnostics.pluginErrors.count, 1);
+});
 
 for (const [label, terminal] of [
   ['permission denial', { permission_denials: [{ tool_name: 'Agent' }] }],
@@ -343,4 +366,31 @@ test('legacy SDK replies without UUID still complete and missing fields do not m
   ingest(success({ result: 'legacy reply' }));
   assert.equal(sess.busy, false);
   assert.equal(events.at(-1).finalResult.result, 'legacy reply');
+});
+
+test('real live dispatch filters old agent runs before both task state and activity publication', () => {
+  const { sess, events, ingest } = liveRun();
+  ingest(streamStart('new-user'));
+  const start = run_id => ({ type: 'system', subtype: 'task_started', task_id: 'resumed-agent', run_id, task_type: 'local_agent', description: 'Run ' + run_id });
+  ingest(start('001')); ingest(start('002'));
+  const boundary = events.length;
+  ingest({ ...start('001'), subtype: 'task_updated', patch: { status: 'failed', error: 'Old failed' } });
+  ingest({ ...start('001'), subtype: 'task_notification', status: 'failed', summary: 'Old failed' });
+  ingest({ type: 'user', origin: { kind: 'task-notification', runId: '001' },
+    message: { content: '<task-notification><task-id>resumed-agent</task-id><status>failed</status></task-notification>' } });
+  assert.equal(events.length, boundary, 'old events never reach renderer, persistence or resource consumers');
+  assert.equal(sess.asyncAgentTracker.size, 1); assert.equal(sess.backgroundTaskTracker.size, 1);
+  ingest({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'resumed-agent', run_id: '001', task_type: 'local_agent', description: 'Old snapshot' }] });
+  assert.equal(events.at(-1).tasks[0].run_id, '002');
+  global.window = {}; delete require.cache[require.resolve('../renderer/activity-stream')]; require('../renderer/activity-stream');
+  const activity = global.window.RelayActivity, state = activity.createState();
+  for (const event of events) activity.ingest(state, event);
+  const item = state.items.find(item => item.taskId === 'resumed-agent');
+  assert.equal(item.status, 'running'); assert.equal(item.title, 'Run 002');
+  ingest(success({ result: 'waiting on newest generation' }));
+  assert.equal(sess.busy, true);
+  ingest({ ...start('002'), subtype: 'task_notification', status: 'completed', summary: 'Current complete' });
+  ingest(success({ result: 'All complete' }));
+  assert.equal(sess.busy, false);
+  assert.equal(events.filter(event => event.type === 'job-done').length, 1);
 });

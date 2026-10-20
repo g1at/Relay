@@ -141,10 +141,15 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.model-switch-popup .model-effort-slider-shell { padding: 0 1px 2px; }
-.model-switch-popup .model-effort-range-wrap { height: 26px; container-type: inline-size; }
+.model-switch-popup .model-effort-slider-shell {
+  --effort-control-size: 32px;
+  --effort-thumb-size: 28px;
+  --effort-thumb-inset: calc(var(--effort-control-size) / 2);
+  padding: 0 1px 2px;
+}
+.model-switch-popup .model-effort-range-wrap { height: var(--effort-control-size); container-type: inline-size; }
 .model-switch-popup .model-effort-track {
-  inset: 3px 1px;
+  inset: 4px 1px;
   border: 0;
   background: var(--surface-inset, var(--bg-hover));
 }
@@ -194,10 +199,10 @@
   animation: relay-model-spark 3s ease-in-out var(--spark-delay) infinite;
 }
 .model-switch-popup .model-effort-range,
-.model-switch-popup .model-effort-range::-webkit-slider-runnable-track { height: 26px; }
+.model-switch-popup .model-effort-range::-webkit-slider-runnable-track { height: var(--effort-control-size); }
 .model-switch-popup .model-effort-range::-webkit-slider-thumb {
-  width: 26px;
-  height: 26px;
+  width: var(--effort-control-size);
+  height: var(--effort-control-size);
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -209,9 +214,9 @@
 .model-effort-thumb {
   position: absolute;
   z-index: 4;
-  top: 1px;
-  width: 24px;
-  height: 24px;
+  top: calc((var(--effort-control-size) - var(--effort-thumb-size)) / 2);
+  width: var(--effort-thumb-size);
+  height: var(--effort-thumb-size);
   box-sizing: border-box;
   border: 1px solid #dedee1;
   border-radius: 50%;
@@ -233,7 +238,7 @@
   transition: left 0s linear, transform .2s cubic-bezier(.2, .8, .2, 1), border-color .18s ease, box-shadow .18s ease;
 }
 .model-switch-popup .model-effort-range { touch-action: none; }
-.model-switch-popup .model-effort-dots { inset-inline: 13px; }
+.model-switch-popup .model-effort-dots { inset-inline: var(--effort-thumb-inset); }
 .model-switch-popup .model-effort-dot {
   width: 3px;
   height: 3px;

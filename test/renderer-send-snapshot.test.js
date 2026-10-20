@@ -14,7 +14,7 @@ const ID_B = '10000000-0000-4000-8000-000000000002';
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function harness() {
-  const saves = [], dispatched = [], ui = [], removed = [], toasts = [], permissionWrites = [];
+  const saves = [], dispatched = [], ui = [], removed = [], toasts = [], permissionWrites = [], historyStates = [];
   let counter = 10;
   const context = {
     console, Map, Set, Date, setTimeout: () => 1,
@@ -49,6 +49,7 @@ function harness() {
     refreshConversationIndex: () => ui.push({ type: 'index', conv: context.currentConv }),
     emitConversationChanged: (id) => ui.push({ type: 'changed', id, conv: context.currentConv }),
     refreshHistoryList: async () => {},
+    syncHistoryDeletionAvailability(id) { historyStates.push({ id, pending: context.pendingConversationSends.has(id), running: context.runs.has(id) }); },
     window: { RelayTaskContinuity: require('../renderer/task-continuity'), api: {
       permissions: {
         get: async id => ({ ok: true, conversationId: id, permissionMode: 'acceptEdits', revision: 1 }),
@@ -62,11 +63,14 @@ function harness() {
   const metadataStart = source.indexOf('function applyPermissionMetadata(');
   const metadataEnd = source.indexOf('\nfunction syncPermissionControl', metadataStart);
   vm.runInContext(source.slice(metadataStart, metadataEnd), context);
+  const pendingStart = source.indexOf('function setPendingConversationSend(');
+  const pendingEnd = source.indexOf('\nfunction syncHistoryTaskDeletionState', pendingStart);
+  vm.runInContext(source.slice(pendingStart, pendingEnd), context);
   vm.runInContext(sendSource, context, { filename: 'app.js:send' });
   const getterStart = source.indexOf('window.relayConversationWorkspace = () => (');
   const getterEnd = source.indexOf('\n});', getterStart);
   vm.runInContext(source.slice(getterStart, getterEnd + 4), context);
-  return { context, saves, dispatched, ui, removed, toasts, permissionWrites,
+  return { context, saves, dispatched, ui, removed, toasts, permissionWrites, historyStates,
     send: (options) => context.send(options),
     resolve: (index = 0) => saves[index].pending.resolve({ id: saves[index].conv.id, updatedAt: `saved-${index}` }),
     switchToNew() {
@@ -335,4 +339,22 @@ test('late successful admission during pause finalization does not delete the ne
   launch.resolve({ jobId: run.jobId }); await sending;
   assert.equal(h.context.currentConv.paused.runId, run.jobId);
   assert.equal(h.saves.length, savesBefore, 'finalization owns the pending history save');
+});
+
+test('send immediately publishes pending deletion availability and releases it only after save failure settles', async () => {
+  const h = harness(), pending = h.send();
+  assert.deepEqual(h.historyStates, [{ id: ID_A, pending: true, running: false }]);
+  h.saves[0].pending.reject(Error('synthetic initial write failure'));
+  assert.equal((await pending).ok, false);
+  assert.deepEqual(h.historyStates.at(-1), { id: ID_A, pending: false, running: false });
+});
+test('send keeps deletion unavailable throughout permission binding and transfers it to the admitted run', async () => {
+  const h = harness(), binding = deferred();
+  h.context.window.api.permissions.set = () => binding.promise;
+  const sending = h.send(); h.resolve(); await new Promise(setImmediate);
+  assert.deepEqual(h.historyStates, [{ id: ID_A, pending: true, running: false }]);
+  assert.equal(h.dispatched.length, 0);
+  binding.resolve({ ok: true, conversationId: ID_A, permissionMode: 'acceptEdits', revision: 2 });
+  assert.equal((await sending).ok, true);
+  assert.deepEqual(h.historyStates.at(-1), { id: ID_A, pending: false, running: true });
 });

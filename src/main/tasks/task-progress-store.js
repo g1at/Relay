@@ -137,14 +137,31 @@ class TaskProgressStore {
     const processing = (async () => {
       if (entry.deleted) return;
       await this._hydrate(entry);
-      while (!entry.deleted && entry.queue.length) {
-        // Remove only after successful reduction; a read failure must retain its batch.
-        this._apply(entry, entry.queue[0]); entry.queue.shift();
+      let consumed = 0;
+      try {
+        while (!entry.deleted && consumed < entry.queue.length) {
+          // Keep failed/unprocessed receipts for retry, without shifting the
+          // remaining backlog on every event. Release processed payloads early.
+          this._apply(entry, entry.queue[consumed]);
+          entry.queue[consumed++] = null;
+          // A replay burst must allow other runs, reads and removals to reach
+          // the worker. Barriers still await this complete reduction promise.
+          if (consumed % 256 === 0 && consumed < entry.queue.length) {
+            await new Promise(resolve => setImmediate(resolve));
+          }
+        }
+      } finally {
+        entry.queue.splice(0, consumed);
       }
     })();
     entry.processing = processing;
     return processing.finally(() => {
       if (entry.processing === processing) entry.processing = null;
+      // A terminal write may finish while reduction yields over duplicate old
+      // receipts. Those receipts do not make the snapshot dirty, so no later
+      // write will run its normal eviction check once the queue has drained.
+      if (!entry.deleted && entry.terminal && !entry.dirty && !entry.queue.length && !entry.writing
+          && this.entries.get(entry.runId) === entry) this.entries.delete(entry.runId);
       if (!entry.deleted && (entry.dirty || entry.queue.length)) this._schedule(entry.terminal ? 0 : this.flushIntervalMs);
     });
   }

@@ -378,6 +378,7 @@ class TaskLedger {
     if (filters.terminal === true) runs = runs.filter((run) => isTerminalState(run.state));
     if (filters.terminal === false) runs = runs.filter((run) => !isTerminalState(run.state));
     if (filters.kind != null) runs = runs.filter((run) => run.kind === filters.kind);
+    if (filters.conversationId != null) runs = runs.filter((run) => run.source?.conversationId === filters.conversationId);
     runs = [...runs].sort(compareRunsNewestFirst);
     if (Number.isSafeInteger(filters.limit) && filters.limit >= 0) {
       runs = runs.slice(0, filters.limit);

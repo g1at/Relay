@@ -1,6 +1,7 @@
 'use strict';
 
 const { RUN_STATES, isTerminalState } = require('./task-protocol');
+const { diagnosticsFromEvent, mergeDiagnostics, hasDiagnostics } = require('../sdk/sdk-diagnostic-details');
 
 // 将 Claude SDK 的底层事件压缩成任务中心所需的稳定语义。
 // 这里不决定“有后台 Agent 的 result 是否为最终结果”——该判断仍由现有
@@ -41,6 +42,8 @@ function summarizeResultText(value, max = 240) {
 }
 
 function resultError(event) {
+  const startup = diagnosticsFromEvent(event).startupFailure;
+  if (startup) return `${startup.message} ${startup.suggestion}`;
   if (/^aborted_/.test(String(event && event.terminal_reason || ''))) return 'Claude 执行已中止';
   if (Array.isArray(event && event.errors) && event.errors.length) {
     return compactText(event.errors.join('\n')) || '执行出错';
@@ -88,6 +91,8 @@ function isAmbientTask(event) {
 
 function resultSdkMetadata(event) {
   const sdk = {};
+  const diagnostics = diagnosticsFromEvent(event);
+  if (hasDiagnostics(diagnostics)) sdk.diagnostics = diagnostics;
   const assign = (key, value) => {
     if (value !== undefined && value !== null && value !== '') sdk[key] = value;
   };
@@ -115,7 +120,7 @@ function resultSdkMetadata(event) {
  * @returns {{ kind: 'noop' } | { kind: 'update', patch: object } |
  *   { kind: 'terminal', status: string, details: object }}
  */
-function normalizeClaudeTaskEvent(event, currentRun = {}, now = new Date().toISOString()) {
+function normalizeClaudeTaskEventBase(event, currentRun = {}, now = new Date().toISOString()) {
   if (!event || typeof event !== 'object') return { kind: 'noop' };
   const currentState = currentRun && (currentRun.state || currentRun.status);
   if (isTerminalState(currentState)) return { kind: 'noop' };
@@ -347,6 +352,46 @@ function normalizeClaudeTaskEvent(event, currentRun = {}, now = new Date().toISO
   }
 
   return { kind: 'noop' };
+}
+
+// Attach advisory diagnostics after existing task-state decisions. A recovery
+// notice or delivery index never becomes a completion/failure signal.
+function normalizeClaudeTaskEvent(event, currentRun = {}, now = new Date().toISOString()) {
+  if (!event || isTerminalState(currentRun.state || currentRun.status)
+      || event.parent_tool_use_id || event.parentToolUseId || event.agent_id || event.subagent_type) return normalizeClaudeTaskEventBase(event, currentRun, now);
+  const execution = currentRun.execution || {};
+  const firstInit = event.type === 'system' && event.subtype === 'init' && !execution.diagnosticSessionId;
+  // The host may seed execution.sessionId with a resume source. The first
+  // native init establishes the actual (possibly forked) session identity.
+  const sessionId = firstInit ? event.session_id || execution.sessionId : execution.diagnosticSessionId || execution.sessionId;
+  const epoch = Number.isSafeInteger(execution.diagnosticEpoch) ? execution.diagnosticEpoch : 0;
+  // The outer runtime also filters foreign frames; keep the persisted summary
+  // independent of that routing assumption, including old post-/clear frames.
+  if (sessionId && event.session_id && sessionId !== event.session_id
+      || event.type !== 'conversation_reset' && Number.isSafeInteger(event.context_epoch) && event.context_epoch !== epoch) return { kind: 'noop' };
+  if (event.type === 'conversation_reset') {
+    if (!event.new_conversation_id || event.new_conversation_id === sessionId) return { kind: 'noop' };
+    return { kind: 'update', patch: { execution: { ...execution, sessionId: event.new_conversation_id,
+      diagnosticSessionId: event.new_conversation_id, diagnosticEpoch: epoch + 1, diagnostics: { version: 1 } } } };
+  }
+  const final = event.type === 'job-done' ? event.finalResult : null;
+  if (final && (final.parent_tool_use_id || final.parentToolUseId || final.agent_id || final.subagent_type
+      || sessionId && final.session_id && sessionId !== final.session_id
+      || Number.isSafeInteger(final.context_epoch) && final.context_epoch !== epoch)) {
+    // job-done itself is still authoritative; ignore only the foreign nested
+    // payload (and a DTO possibly derived from it), not its exit/error signal.
+    event = { ...event };
+    delete event.finalResult; delete event.relay_diagnostics;
+  }
+  const action = normalizeClaudeTaskEventBase(event, currentRun, now);
+  const diagnostics = diagnosticsFromEvent(event);
+  if (!hasDiagnostics(diagnostics) && !firstInit) return action;
+  const update = { diagnosticEpoch: epoch,
+    ...(sessionId || event.session_id ? { diagnosticSessionId: sessionId || event.session_id } : {}),
+    ...(hasDiagnostics(diagnostics) ? { diagnostics: mergeDiagnostics(execution.diagnostics, diagnostics) } : {}) };
+  if (action.kind === 'noop') return { kind: 'update', patch: { execution: { ...execution, ...update } } };
+  const target = action.kind === 'terminal' ? 'details' : 'patch';
+  return { ...action, [target]: { ...action[target], execution: { ...execution, ...action[target].execution, ...update } } };
 }
 
 module.exports = {

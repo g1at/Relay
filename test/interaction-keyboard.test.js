@@ -9,9 +9,9 @@ const source = fs.readFileSync(path.join(__dirname, '../renderer/interaction-sur
 const start = source.indexOf('  function onShellKeydown(');
 const end = source.indexOf('  function focusDecision(', start);
 
-function fixture(kind = 'permission') {
+function fixture(kind = 'permission', permission = {}) {
   const decisions = [], moves = [];
-  const interaction = { id: 'synthetic-decision', kind };
+  const interaction = { id: 'synthetic-decision', kind, permission };
   const state = { items: new Map([[interaction.id, interaction]]), currentId: interaction.id, busyIds: new Set() };
   const mount = { hidden: false };
   let menuOpen = false;
@@ -53,6 +53,20 @@ test('Enter from the permission title allows exactly once, never for the session
   assert.equal(f.decisions.length, 1);
   assert.equal(f.decisions[0].action, 'allow_once');
   assert.equal(event.prevented, true); assert.equal(event.stopped, true);
+});
+
+test('defaultToNo makes Enter from a permission title decline without interrupting the task', () => {
+  const f = fixture('permission', { defaultToNo: true });
+  const event = f.key('Enter');
+  assert.deepEqual(f.decisions, [{ id: 'synthetic-decision', action: 'deny' }]);
+  assert.equal(event.prevented, true); assert.equal(event.stopped, true);
+});
+
+test('defaultToNo exposes no digit or single-letter approval shortcut and respects deliberate control focus', () => {
+  const f = fixture('permission', { defaultToNo: true });
+  for (const key of ['1', '2', 'y', 'Y', ' ']) f.key(key);
+  f.key('Enter', { target: { closest: () => ({ control: 'explicit allow button' }) } });
+  assert.equal(f.decisions.length, 0);
 });
 
 test('IME composition and held keys never submit or dismiss a decision', () => {

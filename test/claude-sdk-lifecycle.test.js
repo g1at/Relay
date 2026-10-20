@@ -197,3 +197,58 @@ test('一次性恢复忽略无 UUID 的零轮后台通知结果，等待真正�
   assert.equal(emitted.some((event) => event.subtype === 'task_notification'), false);
   assert.equal(emitted.filter((event) => event.type === 'result').length, 1);
 });
+
+test('无router的一次性任务不在批量后台完成的空回执处截断后续总结', async () => {
+  const emitted = [];
+  let closed = false;
+  const receipt = { type: 'result', subtype: 'success', is_error: false,
+    origin: { kind: 'task-notification' }, num_turns: 0, result: '',
+    duration_api_ms: 1700, queued_turn_count: 0, result_index: 2 };
+  const final = { ...receipt, num_turns: 1, result: 'shared model call final answer', result_index: 3 };
+  async function* messages() {
+    try {
+      for (const index of [1, 2]) yield { type: 'system', subtype: 'task_started',
+        task_id: `batch-${index}`, tool_use_id: `call-${index}`, task_type: 'local_agent' };
+      yield { type: 'result', subtype: 'success', result: 'agents running', queued_turn_count: 0 };
+      for (const index of [1, 2]) yield { type: 'system', subtype: 'task_notification', task_id: `batch-${index}`, status: 'completed' };
+      yield receipt;
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: final.result }] } };
+      yield final;
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: 'must not consume after final' }] } };
+    } finally { closed = true; }
+  }
+  assert.strictEqual(await consumeOneShotMessages(messages(), event => emitted.push(event)), final);
+  assert.equal(closed, true);
+  assert.equal(emitted.some(event => event.result_index === 2), true, 'one-shot observers still see the intermediate receipt');
+  assert.equal(emitted.at(-1).result, final.result);
+  assert.equal(emitted.length, 8);
+});
+
+test('零轮空正文成功和本地命令正常结束，后台来源的错误和取消也不会被吞掉', async () => {
+  const base = { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, duration_api_ms: 1900 };
+  for (const extra of [{}, { local_command: 'clear' },
+    { origin: { kind: 'task-notification' }, local_command: 'clear' },
+    { origin: { kind: 'task-notification' }, subtype: 'error_during_execution', is_error: true },
+    { origin: { kind: 'task-notification' }, terminal_reason: 'aborted_streaming' }]) {
+    const terminal = { ...base, ...extra }; const emitted = [];
+    async function* messages() { yield terminal; yield { type: 'assistant', message: { content: [] } }; }
+    assert.strictEqual(await consumeOneShotMessages(messages(), event => emitted.push(event)), terminal);
+    assert.equal(emitted.length, 1, JSON.stringify(extra));
+  }
+});
+
+test('one-shot publication drops old run completions and waits for the current agent generation', async () => {
+  const emitted = [];
+  async function* messages() {
+    yield { type: 'assistant', user_message_uuid: 'main', message: { content: [{ type: 'text', text: 'Starting work' }] } };
+    for (const run_id of ['001', '002']) yield { type: 'system', subtype: 'task_started', task_id: 'agent', run_id, task_type: 'local_agent' };
+    yield { type: 'system', subtype: 'task_notification', task_id: 'agent', run_id: '001', status: 'failed', summary: 'Old run failed' };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'Waiting for current run' };
+    yield { type: 'system', subtype: 'task_notification', task_id: 'agent', run_id: '002', status: 'completed' };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'Current run delivered' };
+  }
+  const result = await consumeOneShotMessages(messages(), event => emitted.push(event), { userMessageId: 'main' });
+  assert.equal(result.result, 'Current run delivered');
+  assert.equal(emitted.some(event => event.subtype === 'task_notification' && event.run_id === '001'), false);
+  assert.equal(emitted.filter(event => event.type === 'result').length, 2);
+});

@@ -1,5 +1,6 @@
 'use strict';
 const { NativeEventState } = require('./sdk-native-events');
+const { diagnosticsFromEvent, mergeDiagnostics, hasDiagnostics } = require('./sdk-diagnostic-details');
 
 // Diagnostics deliberately retain names, booleans and durations, never account,
 // environment, prompts, tool arguments, hook bodies or raw stderr.
@@ -19,6 +20,7 @@ class SdkSessionObserver {
     this.capabilities = [];
     this.stderrCounts = {};
     this.timing = {};
+    this.diagnostics = { version: 1 };
     this.foregroundTools = new Map();
     this.finishedToolIds = new Set();
     this.native = new NativeEventState();
@@ -33,7 +35,12 @@ class SdkSessionObserver {
     this.catalog.agents = names(result.agents);
     return this.snapshot();
   }
-  beginTurn() { this.turnStartedAt = this.now(); this.timing = {}; this.foregroundTools.clear(); this.finishedToolIds.clear(); }
+  beginTurn() {
+    this.turnStartedAt = this.now(); this.timing = {};
+    // Plugin loading belongs to this Query; recovery/timings belong to a turn.
+    this.diagnostics = { version: 1, ...(this.diagnostics.pluginErrors ? { pluginErrors: this.diagnostics.pluginErrors } : {}) };
+    this.foregroundTools.clear(); this.finishedToolIds.clear();
+  }
   preparation(value = {}) {
     for (const key of ['startupMs', 'modeMs', 'mcpMs', 'totalMs']) {
       if (Number.isFinite(value[key]) && value[key] >= 0) this.timing[key] = value[key];
@@ -49,18 +56,27 @@ class SdkSessionObserver {
     if (text) this.stderrCounts[category] = (this.stderrCounts[category] || 0) + 1;
   }
   observe(event) {
-    if (!event || event.parent_tool_use_id || event.parentToolUseId || event.agent_id) return false;
+    if (!event || event.parent_tool_use_id || event.parentToolUseId || event.agent_id || event.subagent_type) return false;
+    if (event.type !== 'conversation_reset' && Number.isSafeInteger(event.context_epoch) && event.context_epoch !== this.epoch) return false;
     if (event.type === 'conversation_reset') {
-      if (!event.new_conversation_id || (this.sessionId && event.session_id !== this.sessionId)) return false;
+      if (!event.new_conversation_id || event.new_conversation_id === this.sessionId || (this.sessionId && event.session_id !== this.sessionId)) return false;
       this.sessionId = event.new_conversation_id;
       this.epoch++;
       this.timing = {};
+      this.diagnostics = { version: 1 };
       this.foregroundTools.clear();
       this.finishedToolIds.clear();
       this.state = 'idle';
       return true;
     }
     if (this.sessionId && event.session_id && event.session_id !== this.sessionId) return false;
+    const diagnostics = diagnosticsFromEvent(event);
+    // Most streaming frames carry no new diagnostics; do not repeatedly copy
+    // plugin summaries or replay the same recovery reason for every token.
+    if (hasDiagnostics(diagnostics) && Object.keys(diagnostics).some(key => key !== 'version'
+        && JSON.stringify(diagnostics[key]) !== JSON.stringify(this.diagnostics[key]))) {
+      this.diagnostics = mergeDiagnostics(this.diagnostics, diagnostics);
+    }
     this.native.observe(event);
     const blocks = event.type === 'assistant' ? event.message?.content
       : event.type === 'stream_event' && event.event?.type === 'content_block_start' ? [event.event.content_block] : [];
@@ -109,9 +125,15 @@ class SdkSessionObserver {
     return true;
   }
   snapshot() {
+    const hostTiming = {};
+    for (const [source, target] of [['startupMs', 'hostStartupMs'], ['modeMs', 'hostModeMs'], ['mcpMs', 'hostMcpMs'],
+      ['totalMs', 'hostPreparationMs'], ['firstVisibleMs', 'hostFirstTextMs']]) {
+      if (this.timing[source] !== undefined) hostTiming[target] = this.timing[source];
+    }
+    const diagnostics = mergeDiagnostics(this.diagnostics, { timing: hostTiming });
     return JSON.parse(JSON.stringify({ sessionId: this.sessionId, epoch: this.epoch, sessionState: this.state,
       initialization: this.initialization, catalog: this.catalog, capabilities: this.capabilities,
-      timing: this.timing, stderrCounts: this.stderrCounts, native: this.native.snapshot() }));
+      timing: this.timing, diagnostics, stderrCounts: this.stderrCounts, native: this.native.snapshot() }));
   }
 }
 

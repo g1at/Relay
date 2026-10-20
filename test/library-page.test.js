@@ -42,7 +42,7 @@ test('parallel sources preserve the newest local filter and deduplicate Windows 
   const all = h.context.refreshLibrary(); await tick();
   h.set("libState.fileType = 'pdf'; libState.query = 'report'");
   h.requests.images[0].resolve({ ok: true, items: [file('C:\\images\\photo.png')] });
-  h.requests.files[0].resolve({ ok: true, items: [file('c:/images/photo.png', 'image'), file('C:/docs/report.pdf', 'pdf')] });
+  h.requests.files[0].resolve({ ok: true, items: [file('c:/images/photo.png', 'image'), file('C:/docs/report.pdf', 'pdf', { kind: 'output' })] });
   await all;
   assert.deepEqual(h.read('filteredLibraryItems().map(item => item.name)'), ['report.pdf']);
   assert.equal(h.read('libraryItems().length'), 2);
@@ -134,4 +134,60 @@ test('normalization ignores malformed paths and does not invent conversation pro
   const normalized = h.context.normalizeLibraryItems([null, { path: 123 }, { path: '' }, { path: '/synthetic/note.md', type: 'document' }], 'files');
   assert.equal(normalized.length, 1); assert.equal(normalized[0].name, 'note.md');
   assert.equal(Object.hasOwn(normalized[0], 'conversationId'), false);
+  assert.equal(normalized[0].kind, 'legacy');
+});
+
+test('default results show registered outputs while process and old files remain separately discoverable', async () => {
+  const h = harness();
+  await h.load('files', [file('/workspace/outputs/report.pdf', 'pdf', { kind: 'output', conversationId: 'task-1' }),
+    file('/scratch/check.py', 'code', { kind: 'process' }), file('/project/old-report.md'),
+    file('/project/unknown-kind.md', 'document', { kind: 'unexpected' })]);
+  assert.deepEqual(h.read('filteredLibraryItems().map(item => item.name)'), ['report.pdf']);
+  assert.equal(h.read('filteredLibraryItems()[0].conversationId'), 'task-1');
+  h.set("libState.kind = 'process'");
+  assert.deepEqual(h.read('filteredLibraryItems().map(item => item.name)'), ['check.py']);
+  h.set("libState.kind = 'legacy'");
+  assert.deepEqual(h.read('filteredLibraryItems().map(item => item.name)'), ['old-report.md', 'unknown-kind.md']);
+});
+
+test('type and search filters remain scoped to the selected purpose', async () => {
+  const h = harness();
+  await h.load('files', [file('/workspace/outputs/report.pdf', 'pdf', { kind: 'output' }),
+    file('/scratch/report.pdf', 'pdf', { kind: 'process' }), file('/project/report.pdf', 'pdf')]);
+  h.set("libState.fileType = 'pdf'; libState.query = 'report'; libState.kind = 'process'");
+  assert.deepEqual(h.read('filteredLibraryItems().map(item => item.path)'), ['/scratch/report.pdf']);
+  h.set("libState.query = 'project'");
+  assert.deepEqual(h.read('filteredLibraryItems()'), []);
+});
+
+test('generated image deduplication does not promote a known scratch file into outputs', async () => {
+  const h = harness();
+  await h.load('files', [file('C:/scratch/draft.png', 'image', { kind: 'process', conversationId: 'task-2' })]);
+  await h.load('images', [file('c:\\scratch\\draft.png'), file('/images/delivered.png')]);
+  assert.deepEqual(h.read('filteredLibraryItems().map(item => item.name)'), ['delivered.png']);
+  h.set("libState.kind = 'process'");
+  assert.equal(h.read('filteredLibraryItems()[0].generatedImage'), true);
+  assert.equal(h.read('filteredLibraryItems()[0].conversationId'), 'task-2');
+});
+
+test('partial scans retain their status until a complete successful refresh replaces it', async () => {
+  const h = harness();
+  const pending = h.context.loadLibrarySource('files', true); await tick();
+  h.requests.files.at(-1).resolve({ ok: true, items: [file('/outputs/report.pdf', 'pdf', { kind: 'output' })], truncated: true, warnings: ['unreadable-directory'] });
+  await pending;
+  assert.equal(h.read('libSources.files.truncated'), true);
+  assert.equal(h.read('libSources.files.warnings.length'), 1);
+  await h.load('files', []);
+  assert.equal(h.read('libSources.files.truncated'), false);
+  assert.deepEqual(h.read('libSources.files.warnings'), []);
+});
+
+test('explicit delivered directories open normally but cannot invoke file deletion', async () => {
+  const h = harness();
+  await h.load('files', [file('/workspace/outputs/site', 'other', { kind: 'output', isDirectory: true })]);
+  const directory = h.context.filteredLibraryItems()[0];
+  assert.equal(directory.isDirectory, true);
+  await h.context.openLibraryFile(directory); assert.deepEqual(h.calls.opened, ['/workspace/outputs/site']);
+  await h.context.deleteLibraryItem(directory); assert.deepEqual(h.calls.deleted, []);
+  assert.match(h.calls.toasts.at(-1), /文件夹/); assert.equal(h.read('libraryItems().length'), 1);
 });

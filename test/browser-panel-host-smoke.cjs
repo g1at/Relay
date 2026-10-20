@@ -2,7 +2,7 @@
 
 // Run with Electron, never with a user's real Relay profile. Loopback-only
 // pages exercise Chromium views, isolation, navigation and cleanup offline.
-const { app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
+const { BaseWindow, app, BrowserWindow, WebContentsView, session, webContents } = require('electron');
 const http = require('node:http'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const assert = require('node:assert/strict');
 const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
@@ -37,7 +37,7 @@ async function run() {
   await app.whenReady();
   window = new BrowserWindow({ width: 940, height: 700, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
   await window.loadURL('data:text/html,<title>Host fixture</title><body style="margin:0;background:%23eee">Local Relay fixture</body>');
-  host = createBrowserPanelHost({ owner: window, WebContentsView, session, shell: { openExternal: async () => { throw Error('No external browsing in fixture'); } }, onEvent: value => events.push(value) });
+  host = createBrowserPanelHost({ BaseWindow, owner: window, WebContentsView, session, shell: { openExternal: async () => { throw Error('No external browsing in fixture'); } }, onEvent: value => events.push(value) });
   const first = await host.invoke({ action: 'create', url: base + '/first' });
   assert.equal(first.ok, true);
   await host.invoke({ action: 'setBounds', rect: { x: 440, y: 90, width: 460, height: 530 } });
@@ -103,7 +103,7 @@ async function run() {
     extraOwners.push(owner);
     await owner.loadURL('data:text/html,<title>Lifecycle fixture</title>');
     if (beforeHost) beforeHost(owner);
-    const panel = createBrowserPanelHost({ owner, WebContentsView, session }); extraHosts.push(panel);
+    const panel = createBrowserPanelHost({ BaseWindow, owner, WebContentsView, session }); extraHosts.push(panel);
     const created = await panel.invoke({ action: 'create', url: base + '/' + name });
     await waitFor(() => panel.state(created.id).tab.title === 'Fixture /' + name && !panel.state(created.id).tab.loading, 'Lifecycle page did not finish');
     const children = webContents.getAllWebContents().filter(contents => panel.ownsWebContents(contents));

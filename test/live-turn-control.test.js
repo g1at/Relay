@@ -107,6 +107,63 @@ test('bounded close timeout reports failure and keeps admission blocked until la
   assert.equal(h.controls.isStopping('conversation'), false);
 });
 
+test('repeated pause after a pending response reobserves closure and retries only the owned stop', async () => {
+  let waits = 0;
+  const h = harness({ withTimeout: (promise, label) => label === '等待执行停止' && ++waits === 1
+    ? Promise.reject(Error('synthetic timeout')) : promise });
+  const first = h.controls.interrupt(h.session); h.receipt.reject(Error('synthetic unavailable control'));
+  assert.equal((await first).pending, true); assert.equal(h.calls.kill, 1);
+  const refreshed = h.controls.pendingResult('old-job');
+  assert.notEqual(refreshed, first);
+  assert.equal(h.controls.pendingResult('old-job'), refreshed);
+  assert.equal(h.controls.interrupt(h.session), refreshed);
+  await tick(); assert.equal(h.calls.kill, 2); assert.equal(h.calls.interrupt, 1);
+  assert.equal(h.controls.isStopping('conversation'), true);
+  h.close.resolve({ stopConfirmed: true });
+  assert.equal((await refreshed).settled, true);
+  assert.equal(h.controls.isStopping('conversation'), false);
+  assert.equal((await h.controls.interrupt(h.session)).settled, true);
+});
+
+test('stop request failure remains retryable and false stop confirmation never releases admission', async () => {
+  let attempts = 0;
+  const h = harness({ killSession: () => {
+    attempts++;
+    if (attempts === 1) throw Error('synthetic signal failure');
+    if (attempts === 2) return Promise.resolve({ stopConfirmed: false });
+    return h.close.promise;
+  } });
+  h.receipt.reject(Error('synthetic interrupt failure'));
+  assert.equal((await h.controls.interrupt(h.session)).settled, false);
+  assert.equal((await h.controls.pendingResult('old-job')).settled, false);
+  assert.equal(h.controls.isStopping('conversation'), true);
+  const retry = h.controls.pendingResult('old-job'); await tick();
+  assert.equal(attempts, 3); h.close.resolve({ stopConfirmed: true });
+  assert.equal((await retry).settled, true); assert.equal(h.controls.isStopping('conversation'), false);
+});
+
+test('retrying an old timed-out pause cannot signal a newer run', async () => {
+  const h = harness({ withTimeout: (promise, label) => label === '等待执行停止'
+    ? Promise.reject(Error('synthetic timeout')) : promise });
+  h.receipt.reject(Error('synthetic interrupt failure'));
+  await h.controls.interrupt(h.session); h.session.jobId = 'new-job';
+  assert.equal((await h.controls.pendingResult('old-job')).settled, false);
+  assert.equal(h.calls.kill, 1);
+  h.close.resolve({ stopConfirmed: true }); await tick();
+});
+
+test('one-shot pending stop can retry without duplicating concurrent attempts', async () => {
+  let waits = 0, stops = 0;
+  const h = harness({ withTimeout: (promise, label) => label === '等待执行停止' && ++waits === 1
+    ? Promise.reject(Error('synthetic timeout')) : promise });
+  const child = { kill() { stops++; return h.close.promise; }, whenClosed: () => h.close.promise };
+  assert.equal((await h.controls.stopOneShot(child, 'one-shot', 'conversation')).pending, true);
+  const retry = h.controls.pendingResult('one-shot');
+  assert.equal(h.controls.stopOneShot(child, 'one-shot', 'conversation'), retry);
+  await tick(); assert.equal(stops, 2);
+  h.close.resolve({ stopConfirmed: true }); assert.equal((await retry).settled, true);
+});
+
 for (const receipt of ['reject', 'queued']) {
   test(`a late ${receipt} from an old pause cannot kill a newer run`, async () => {
     const h = harness(), pending = h.controls.interrupt(h.session);

@@ -115,12 +115,23 @@ app.whenReady().then(async () => {
         if(method==='save')return async conv=>{
           // IPC structured-clones an argument immediately, before async work.
           const snapshot=clone(conv);state.saves.push(snapshot);
-          if(state.holdFinalSave&&snapshot.turns.at(-1)?.output?.status==='complete'){
-            state.holdFinalSave=false;await new Promise(resolve=>state.releaseFinalSave=resolve);
-          }
           // The production history writer preserves backend-owned supplements.
           mergeHistory(snapshot,await original.load(snapshot.id));
           return original.save(snapshot);
+        };
+        if(method==='completeTurn')return async(id,runId,ts,payload)=>{
+          const snapshot=clone(payload);
+          if(state.holdFinalSave&&snapshot.turn?.output?.status==='complete'){
+            state.holdFinalSave=false;await new Promise(resolve=>state.releaseFinalSave=resolve);
+          }
+          if(snapshot.turn){
+            const pending={id,turns:[{runId,...snapshot.turn}]};
+            mergeHistory(pending,await original.load(id));
+            snapshot.turn=pending.turns[0];delete snapshot.turn.runId;
+          }
+          const result=await original.completeTurn(id,runId,ts,snapshot);
+          if(result.conversation)state.saves.push(clone(result.conversation));
+          return result;
         };
         return original[method];
       }});

@@ -1,4 +1,5 @@
 'use strict';
+const { isDeepStrictEqual } = require('node:util');
 const UUID = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 const clone = value => JSON.parse(JSON.stringify(value));
 const HOST_FIELDS = ['sdkSessionContext', 'sdkLastMessageUuid', 'sdkForkPoint', 'sdkAgentIds', 'sdkToolUseIds', 'forkedFromRunId', 'sdkUserMessageId', 'nativeMessageUuids'];
@@ -32,24 +33,35 @@ function applyProvenance(record, session, configDir, { complete = false } = {}) 
   if (session?.nativeContextReady === false) return false;
   const scope = sessionContext(session, configDir);
   if (!record || !scope) return false;
-  delete record.sdkResumeRejected;
-  record.sdkSessionContext = scope;
-  record.sessionId = scope.sessionId;
+  let changed = false;
+  const set = (target, key, value) => {
+    if (!isDeepStrictEqual(target[key], value)) { target[key] = value; changed = true; }
+  };
+  const remove = (target, key) => {
+    if (Object.hasOwn(target, key)) { delete target[key]; changed = true; }
+  };
+  // Compare only the small host-owned fields, using their persisted JSON shape.
+  // Optional undefined launch fields disappear on disk and must not cause a
+  // fresh whole-conversation write on each identical native notification.
+  const storedScope = clone(scope);
+  remove(record, 'sdkResumeRejected');
+  set(record, 'sdkSessionContext', storedScope);
+  set(record, 'sessionId', scope.sessionId);
   if (scope.routing?.runtimeFingerprint && scope.routing.runtimeFingerprintVersion) {
-    record.sdkRuntimeFingerprint = scope.routing.runtimeFingerprint;
-    record.sdkRuntimeFingerprintVersion = scope.routing.runtimeFingerprintVersion;
+    set(record, 'sdkRuntimeFingerprint', scope.routing.runtimeFingerprint);
+    set(record, 'sdkRuntimeFingerprintVersion', scope.routing.runtimeFingerprintVersion);
   }
-  if (record.pendingSdkFork && record.pendingSdkFork.targetSessionId === scope.sessionId) delete record.pendingSdkFork;
+  if (record.pendingSdkFork && record.pendingSdkFork.targetSessionId === scope.sessionId) remove(record, 'pendingSdkFork');
   const turn = record.turns?.find(item => item.runId === session.jobId);
   if (turn) {
-    turn.sdkSessionContext = clone(scope);
-    turn.sdkAgentIds = [...(session.sdkProvenance?.agentIds || [])];
-    turn.sdkToolUseIds = [...(session.sdkProvenance?.toolUseIds || [])];
-    if (session.sdkProvenance?.lastMessageUuid) turn.sdkLastMessageUuid = session.sdkProvenance.lastMessageUuid;
-    else { delete turn.sdkLastMessageUuid; delete turn.sdkForkPoint; }
-    if (complete && turn.sdkLastMessageUuid) turn.sdkForkPoint = turn.sdkLastMessageUuid;
+    set(turn, 'sdkSessionContext', clone(storedScope));
+    set(turn, 'sdkAgentIds', [...(session.sdkProvenance?.agentIds || [])]);
+    set(turn, 'sdkToolUseIds', [...(session.sdkProvenance?.toolUseIds || [])]);
+    if (session.sdkProvenance?.lastMessageUuid) set(turn, 'sdkLastMessageUuid', session.sdkProvenance.lastMessageUuid);
+    else { remove(turn, 'sdkLastMessageUuid'); remove(turn, 'sdkForkPoint'); }
+    if (complete && turn.sdkLastMessageUuid) set(turn, 'sdkForkPoint', turn.sdkLastMessageUuid);
   }
-  return true;
+  return changed;
 }
 function protectSdkMetadata(incoming, saved) {
   // Renderer history saves own presentation, never native transcript identity.

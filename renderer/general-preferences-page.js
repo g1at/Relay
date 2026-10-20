@@ -1,6 +1,6 @@
 (function (root) {
   'use strict';
-  const defaults = { sdkRuntimePreferences: {}, workspaceRoot: '', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', maxParallelTasks: 2 };
+  const defaults = { sdkRuntimePreferences: {}, workspaceRoot: '', scratchRoot: '', fileOpenTarget: 'relay', agentEnvironment: 'native', terminalShell: 'auto', followUpMode: 'steer', maxParallelTasks: 2 };
   const parallelPresets = [2, 6, 9, 0];
   function normalizeParallelLimit(value) {
     if (!Number.isSafeInteger(value) || value < 0) return defaults.maxParallelTasks;
@@ -9,6 +9,7 @@
   }
   const fields = [
     ['workspaceRoot', '无项目任务文件夹', '新建的非项目对话按会话分类保存；已有文件保持原位。', 'folder'],
+    ['scratchRoot', '会话临时文件夹', '临时脚本和中间文件，随会话删除。更改位置后自动迁移，运行中的会话结束后迁移。', 'folder'],
     ['fileOpenTarget', '默认文件打开位置', '选择打开本地文件和文件夹的应用。', 'file'],
     ['agentEnvironment', '智能体环境', '选择新任务的运行环境；正在执行的任务保持当前环境。', 'environment'],
     ['terminalShell', '集成终端 Shell', '新建终端时使用的 Shell，已有终端保持不变。', 'terminal'],
@@ -48,12 +49,24 @@
     retry.addEventListener('click', () => void refresh(true));
     workspace.heading.append(retry);
     const slots = new Map();
-    const destinations = { workspaceRoot: workspace, fileOpenTarget: workspace, agentEnvironment: workspace, terminalShell: workspace,
+    let scratchMigrationStatus, scratchMigrationDetails, scratchMigrationError, scratchMigrationRetry, scratchRetryPending = false;
+    const destinations = { workspaceRoot: workspace, scratchRoot: workspace, fileOpenTarget: workspace, agentEnvironment: workspace, terminalShell: workspace,
       followUpMode: conversation, maxParallelTasks: conversation };
     for (const [key, label, description, icon] of fields) {
       const row = node('div', 'set-row rgp-row'); row.dataset.generalRow = key;
       const symbol = node('div', 'set-icon'); symbol.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[icon]}</svg>`;
       const text = node('div', 'rgp-label'); text.append(node('label', '', label), node('p', '', description));
+      if (key === 'scratchRoot') {
+        scratchMigrationStatus = node('p', 'rgp-migration-status'); scratchMigrationStatus.dataset.scratchMigrationStatus = '';
+        scratchMigrationStatus.setAttribute('role', 'status'); scratchMigrationStatus.setAttribute('aria-live', 'polite');
+        scratchMigrationStatus.hidden = true; text.append(scratchMigrationStatus);
+        scratchMigrationDetails = node('details', 'rgp-migration-details'); scratchMigrationDetails.dataset.scratchMigrationDetails = '';
+        scratchMigrationError = node('p', ''); scratchMigrationError.dataset.scratchMigrationError = '';
+        scratchMigrationDetails.append(node('summary', '', '查看原因'), scratchMigrationError);
+        scratchMigrationDetails.hidden = true; text.append(scratchMigrationDetails);
+        scratchMigrationRetry = node('button', 'rgp-button', '重试迁移'); scratchMigrationRetry.type = 'button';
+        scratchMigrationRetry.dataset.scratchMigrationRetry = ''; scratchMigrationRetry.hidden = true; text.append(scratchMigrationRetry);
+      }
       const controls = node('div', 'rgp-controls'); controls.dataset.generalControl = key;
       row.append(symbol, text, controls); destinations[key].panel.append(row); slots.set(key, controls);
     }
@@ -102,18 +115,57 @@
       });
       dropdowns.set(key, { popup, trigger }); slot.replaceChildren(wrapper);
     }
-    const folder = slots.get('workspaceRoot'), folderName = node('span', 'rgp-path'), choose = node('button', 'rgp-button', '更改'), reset = node('button', 'rgp-button rgp-reset', '恢复默认');
-    choose.type = reset.type = 'button'; choose.dataset.generalChooseFolder = ''; reset.dataset.generalResetFolder = '';
-    folder.append(folderName, choose, reset);
-    function renderFolder() { folderName.textContent = draft.workspaceRoot || snapshot?.preferences?.defaultWorkspaceRoot || 'RelayProjects'; folderName.title = folderName.textContent; reset.hidden = !draft.workspaceRoot; }
-    choose.addEventListener('click', async () => {
-      if (choose.disabled || typeof api?.pickWorkspaceRoot !== 'function') return;
-      choose.disabled = true;
-      try { const result = await api.pickWorkspaceRoot(); if (disposed) return; if (result?.ok && result.path) { change('workspaceRoot', result.path); renderFolder(); } else if (!result?.canceled) status.textContent = result?.error || '文件夹选择失败'; }
-      catch (error) { if (!disposed) status.textContent = error.message || '文件夹选择失败'; }
-      finally { if (!disposed) choose.disabled = false; }
+    const folders = [
+      ['workspaceRoot', 'pickWorkspaceRoot', 'defaultWorkspaceRoot'],
+      ['scratchRoot', 'pickScratchRoot', 'defaultScratchRoot'],
+    ].map(([key, picker, defaultKey]) => {
+      const folder = slots.get(key), label = fields.find(field => field[0] === key)[1];
+      const folderName = node('span', 'rgp-path'), choose = node('button', 'rgp-button', '更改'), reset = node('button', 'rgp-button rgp-reset', '恢复默认');
+      choose.type = reset.type = 'button'; choose.dataset.generalChooseFolder = key; reset.dataset.generalResetFolder = key;
+      choose.setAttribute('aria-label', '更改' + label); reset.setAttribute('aria-label', '恢复默认' + label);
+      folder.append(folderName, choose, reset);
+      let picking = false;
+      function renderFolder() {
+        folderName.textContent = draft[key] || snapshot?.preferences?.[defaultKey] || '正在读取…';
+        folderName.title = folderName.textContent; reset.hidden = !draft[key]; choose.disabled = picking || typeof api?.[picker] !== 'function';
+      }
+      choose.addEventListener('click', async () => {
+        if (picking || typeof api?.[picker] !== 'function') return;
+        picking = true; renderFolder();
+        try { const result = await api[picker](); if (disposed) return; if (result?.ok && result.path) { change(key, result.path); status.textContent = ''; } else if (!result?.canceled) status.textContent = result?.error || '文件夹选择失败'; }
+        catch (error) { if (!disposed) status.textContent = error.message || '文件夹选择失败'; }
+        finally { picking = false; if (!disposed) renderFolder(); }
+      });
+      reset.addEventListener('click', () => { change(key, ''); renderFolder(); });
+      return renderFolder;
     });
-    reset.addEventListener('click', () => { change('workspaceRoot', ''); renderFolder(); });
+    function renderScratchMigration() {
+      const migration = snapshot?.preferences?.scratchMigration;
+      const count = key => Number.isSafeInteger(migration?.[key]) && migration[key] > 0 ? migration[key] : 0;
+      const messages = [];
+      if (migration?.running) messages.push('正在迁移…');
+      if (count('pending')) messages.push(count('pending') + ' 个会话等待停止后迁移。');
+      if (count('failed')) messages.push(count('failed') + ' 个会话待重试，原文件已保留。');
+      if (!migration?.running && !count('pending') && !count('failed') && count('migrated')) messages.push('已迁移 ' + count('migrated') + ' 个会话。');
+      scratchMigrationStatus.textContent = messages.join(' '); scratchMigrationStatus.hidden = !messages.length;
+      scratchMigrationError.textContent = count('failed') && typeof migration.error === 'string' ? migration.error.trim() : '';
+      scratchMigrationDetails.hidden = !scratchMigrationError.textContent;
+      if (scratchMigrationDetails.hidden) scratchMigrationDetails.open = false;
+      scratchMigrationRetry.hidden = !count('failed');
+      scratchMigrationRetry.disabled = scratchRetryPending || typeof api?.retryScratchMigration !== 'function';
+      scratchMigrationRetry.setAttribute('aria-busy', String(scratchRetryPending));
+    }
+    scratchMigrationRetry.addEventListener('click', async () => {
+      if (scratchRetryPending || typeof api?.retryScratchMigration !== 'function') return;
+      scratchRetryPending = true; renderScratchMigration();
+      try {
+        const result = await api.retryScratchMigration(); if (disposed) return;
+        if (!result?.ok) throw Error(result?.error || '无法重试迁移，请稍后再试。');
+        if (snapshot && result.scratchMigration) snapshot.preferences.scratchMigration = result.scratchMigration;
+        renderScratchMigration(); await refresh();
+      } catch (error) { if (!disposed) status.textContent = error.message || '无法重试迁移，请稍后再试。'; }
+      finally { scratchRetryPending = false; if (!disposed) renderScratchMigration(); }
+    });
     function renderParallel() {
       select('maxParallelTasks', parallelPresets.map(value => ({ id: String(value), label: value === 0 ? '不限制' : value + ' 个' })), {
         value: String(draft.maxParallelTasks),
@@ -124,7 +176,8 @@
     function render() {
       if (disposed) return;
       if ([...dropdowns.values()].some(value => !value.popup.hidden)) root.closeCustomSelect();
-      renderFolder(); choose.disabled = !api?.pickWorkspaceRoot;
+      folders.forEach(renderFolder => renderFolder());
+      renderScratchMigration();
       select('fileOpenTarget', snapshot?.capabilities?.fileOpenTargets || [{ id: 'relay', label: 'Relay', available: false }, { id: 'system', label: '系统默认应用', available: false }]);
       select('agentEnvironment', snapshot?.capabilities?.agentEnvironments || [{ id: 'native', label: '系统原生', available: false }]);
       select('terminalShell', snapshot?.capabilities?.terminalShells || [{ id: 'auto', label: '系统默认', available: false }]);
@@ -132,7 +185,7 @@
       renderParallel();
     }
     async function refresh(force = false) {
-      if (disposed || pending || (snapshot && !force) || typeof api?.get !== 'function') return;
+      if (disposed || pending || typeof api?.get !== 'function') return;
       const own = ++revision; pending = true; retry.disabled = true; retry.setAttribute('aria-busy', 'true'); status.textContent = '正在检测可用环境…';
       try {
         const result = await api.get({ refresh: force }); if (disposed || own !== revision) return;

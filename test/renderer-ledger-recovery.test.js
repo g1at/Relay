@@ -17,7 +17,9 @@ const laterTurn = () => ({
 
 function recoveryFixture(turns, tasks, events = []) {
   const h = harness('plain'), c = h.context;
-  Object.assign(h.conv, { kind: 'chat', updatedAt: 'synthetic-original-order', turns: clone(turns) });
+  Object.assign(h.conv, { kind: 'chat', updatedAt: 'synthetic-original-order', turns: clone(turns).map((turn, index) => ({
+    ...turn, ts: turn.ts || new Date(Date.UTC(2026, 8, 28, 9, 0, index)).toISOString(),
+  })) });
   c.runs.clear(); c.jobToConv.clear(); c.currentConv = null;
   const saved = [], registered = [], warnings = [];
   Object.assign(c, {
@@ -26,11 +28,21 @@ function recoveryFixture(turns, tasks, events = []) {
     bufferedClaudeEvents: [], bufferedTaskLifecycleEvents: [],
     TERMINAL_LEDGER_STATES: new Set(['succeeded', 'failed', 'canceled', 'interrupted']),
     handleTaskLifecycleEvent: async () => {},
+    historyTaskEventRevision: 0, syncHistoryTaskDeletionSnapshot() {},
     console: { ...console, warn: (...args) => warnings.push(args), error: (...args) => warnings.push(args) },
   });
+  c.window.api.history.load = async () => h.conv;
   c.window.api.history.save = async (value) => {
-    saved.push(clone(value));
-    return { updatedAt: `synthetic-save-${saved.length}` };
+    const next = { ...clone(value), updatedAt: `synthetic-save-${saved.length + 1}` };
+    Object.assign(h.conv, next); saved.push(clone(next));
+    return { updatedAt: next.updatedAt };
+  };
+  const completeTurn = c.window.api.history.completeTurn;
+  c.window.api.history.completeTurn = async (...args) => {
+    const completed = await completeTurn(...args);
+    if (completed.error) return completed;
+    await c.window.api.history.save(completed.conversation);
+    return { ...completed, updatedAt: h.conv.updatedAt, conversation: clone(h.conv) };
   };
   c.window.api.tasks = {
     snapshot: async () => ({ ok: true, epoch: 'synthetic-new-instance', items: tasks }),

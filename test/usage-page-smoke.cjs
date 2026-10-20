@@ -75,6 +75,19 @@ app.whenReady().then(async () => {
   await check('emptyWorkerSnapshotNeverClaimsZeroUsage', "[...document.querySelectorAll('[data-usage-metric]')].every(node=>node.textContent==='—')&&document.querySelector('.relay-usage-page').dataset.usageState==='refreshing'");
   await act("usageFixture.mode='ready';usageFixture.emit();"); await waitFor("document.querySelector('[data-usage-metric=tokens]').textContent==='75,000'");
   await check('completedSnapshotShowsFourMetricsAndOneConsistentDateRange', "document.querySelector('[data-usage-metric=messages]').textContent===usageFixture.snapshot(30).totals.messages.toLocaleString('zh-CN')&&document.querySelectorAll('.rup-heatmap-cell[data-usage-date]').length===30&&document.querySelector('.relay-usage-page').dataset.usageDisplayedDays==='30'&&document.querySelectorAll('[data-usage-model]').length===7");
+  await check('recordedTokenCoverageDoesNotAddPersistentStatusOrNotice', "document.querySelector('[data-usage-coverage]').hidden&&document.querySelector('[data-usage-coverage]').textContent===''&&document.querySelector('[data-usage-status]').hidden&&document.querySelector('[data-usage-status]').textContent===''&&document.querySelector('[data-usage-metric=tokens]').closest('article').textContent.includes('已记录 Token')");
+  await act("usageFixture.overrides[30]=usageFixture.snapshot(30,{coverage:{history:'complete',warningCodes:['USAGE_BASELINE_UNAVAILABLE','USAGE_RECORDS_PARTIAL']}});usageFixture.emit();");
+  await waitFor("document.querySelector('[data-usage-coverage]').textContent.includes('缺少起始用量')");
+  await check('missingBaselineAndRecordWarningsAreExplicitWithoutChangingUsageTotals', "(()=>{const notice=document.querySelector('[data-usage-coverage]');return !notice.hidden&&notice.textContent.includes('统计可能偏低')&&notice.textContent.includes('部分用量记录暂不可用')&&!notice.textContent.includes('USAGE_')&&document.querySelector('[data-usage-metric=tokens]').textContent==='75,000'&&document.querySelector('[data-usage-status]').hidden})()");
+  await screenshot('usage-coverage-warning');
+  await act("usageFixture.mode='fail';"); await click('[data-usage-refresh]');
+  await waitFor("document.querySelector('.relay-usage-page').dataset.usageState==='error'");
+  await check('failedRefreshKeepsTheCoverageWarningForTheDisplayedSnapshot', "!document.querySelector('[data-usage-coverage]').hidden&&document.querySelector('[data-usage-coverage]').textContent.includes('缺少起始用量')&&document.querySelector('[data-usage-status]').textContent.includes('保留已有统计')&&document.querySelector('[data-usage-metric=tokens]').textContent==='75,000'");
+  await act("usageFixture.mode='ready';usageFixture.overrides[30]=usageFixture.snapshot(30);usageFixture.overrides[30].tokens.coverage='complete';usageFixture.emit();");
+  await waitFor("document.querySelector('[data-usage-coverage]').hidden");
+  await check('completeSnapshotClearsOldWarningsWithoutLeavingAnEmptyVisibleNotice', "document.querySelector('[data-usage-coverage]').textContent===''&&document.querySelector('[data-usage-status]').hidden&&document.querySelector('[data-usage-status]').textContent===''&&document.querySelector('[data-usage-metric=tokens]').textContent==='75,000'");
+  await act("delete usageFixture.overrides[30];usageFixture.emit();");
+  await waitFor("document.querySelector('.relay-usage-page').dataset.usageState==='ready'&&document.querySelector('[data-usage-coverage]').hidden");
   await check('singleDayPeakIsAnExactRecordedValueWithItsDateWithinTheThirtyDayRange', "usageFixture.peakMatches(usageFixture.snapshot(30))&&document.querySelector('[data-usage-metric=tokens]').textContent==='75,000'&&document.querySelectorAll('[data-usage-metric]').length===4");
   await check('fourBreakdownCardsKeepAbbreviatedValuesAndCenterLabelsAndValues', "(()=>{const keys=['inputTotalTokens','outputTokens','cacheHitRate','cacheReadTokens'],values=['56K','19K','11.4%','6.4K'];return keys.every((key,index)=>{const value=document.querySelector('[data-usage-part='+key+']'),card=value.closest('.rup-token-part'),label=card.querySelector('h4');return value.textContent===values[index]&&getComputedStyle(card).textAlign==='center'&&getComputedStyle(label).justifyContent==='center'&&getComputedStyle(value).textAlign==='center'})})()");
   await check('cacheHitRateReplacesTheCreationCardAndExplainsItsDenominator', "!document.querySelector('[data-usage-part=cacheCreationTokens]')&&document.querySelector('[data-usage-part=cacheHitRate]').closest('article').textContent.includes('缓存命中率')&&document.querySelector('[data-usage-part=cacheHitRate]').title.includes('不包含输出')");
@@ -186,5 +199,11 @@ app.whenReady().then(async () => {
   await check('reportedTotalsCardsAndLabelsFitNarrowSettings',
     "(()=>{const page=document.querySelector('.relay-usage-page');return page.scrollWidth<=page.clientWidth+1&&[...document.querySelectorAll('.rup-token-part,.rup-token-part h4,.rup-token-part strong')].every(node=>node.scrollWidth<=node.clientWidth+1)})()");
   await screenshot('usage-reported-values-narrow');
+  await act("usageFixture.overrides[30].coverage.warningCodes=['USAGE_BASELINE_UNAVAILABLE','USAGE_RECORDS_PARTIAL'];usageFixture.emit();");
+  await waitFor("document.querySelector('[data-usage-coverage]').textContent.includes('缺少起始用量')");
+  await check('coverageWarningsWrapWithinNarrowSettingsAndKeepRecordedNumbers',
+    "(()=>{const notice=document.querySelector('[data-usage-coverage]'),page=document.querySelector('.relay-usage-page');return !notice.hidden&&notice.scrollWidth<=notice.clientWidth+1&&page.scrollWidth<=page.clientWidth+1&&document.querySelector('[data-usage-metric=tokens]').textContent==='379,155,005'})()");
+  await act("document.querySelector('[data-usage-coverage]').scrollIntoView({block:'center'});");
+  await screenshot('usage-coverage-warning-narrow');
   step = 'completed'; save(); clearTimeout(deadline); win.destroy(); app.exit(0);
 }).catch(async error => { failures.push(String(error.stack || error)); save(); console.error(error.stack); try { if (win && !win.isDestroyed()) { await screenshot('failure'); console.error(await evaluate('JSON.stringify(uiFixture.errors)')); } } catch (_) {} clearTimeout(deadline); app.exit(1); });

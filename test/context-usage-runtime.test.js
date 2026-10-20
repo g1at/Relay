@@ -32,6 +32,7 @@ function host() {
     readSupportedModels: async () => { throw Error('unrelated model catalog unavailable'); },
     ipcMain: { handle(name, fn) { assert.equal(name, 'claude:runtimeInfo'); handler = fn; } },
   });
+  require('./helpers/conversation-lifecycle-fixture')(context);
   for (const name of ['compactContextUsage', 'contextRuntimeKey', 'readLiveContextUsage', 'persistConversationContextUsage']) vm.runInContext(declaration(main, name), context);
   const start = main.indexOf("ipcMain.handle('claude:runtimeInfo'");
   const end = main.indexOf('// IPC:空闲常驻会话原地切换模型和 effort。', start);

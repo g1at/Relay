@@ -23,7 +23,6 @@
 const path = require('path');
 const { resourcePath, unpackedPath } = require('../app/paths');
 const fs = require('fs');
-const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const { randomUUID } = require('crypto');
 const { version: RELAY_VERSION } = require('../../../package.json');
@@ -49,6 +48,10 @@ let runtimeEnvironmentAdapter = null;
 const runtimeMcpMappers = new WeakMap();
 const runtimeTaskFilePolicies = new WeakMap();
 const { withDrainedExit } = require('./sdk-process-adapter');
+const { SdkProcessSupervisor } = require('./sdk-process-supervisor');
+const { spawnManagedSdkProcess } = require('./sdk-process-tree');
+const { createRuntimeClosure } = require('./sdk-runtime-closure');
+const { bundledClaudeVersion } = require('./sdk-runtime-version');
 const { createRuntimeMcpMapper } = require('./host-stdio-mcp');
 
 // The host supplies an environment adapter; each Query captures its prepared
@@ -67,7 +70,7 @@ async function prepareRuntimeOptions(options, onSpawn, onPrepared) {
   if (canceled()) throw new Error('Claude launch canceled');
   if (!prepared || typeof prepared !== 'object') throw new Error('Claude runtime preparation failed');
   runtimeTaskFilePolicies.get(options)?.prepare({ cwd: prepared.cwd,
-    scratchDir: prepared.env?.RELAY_SCRATCH_DIR });
+    scratchDir: prepared.env?.RELAY_SCRATCH_DIR, outputDir: prepared.env?.RELAY_OUTPUT_DIR });
   if (adapter && typeof adapter.prepareMcpServers === 'function') {
     const environment = prepared.env && prepared.env.RELAY_AGENT_ENVIRONMENT || 'native';
     runtimeMcpMappers.set(prepared, createRuntimeMcpMapper(prepared.mcpServers,
@@ -75,7 +78,7 @@ async function prepareRuntimeOptions(options, onSpawn, onPrepared) {
   }
   if (typeof prepared.spawnClaudeCodeProcess === 'function') {
     const spawnProcess = prepared.spawnClaudeCodeProcess;
-    prepared.spawnClaudeCodeProcess = opts => withDrainedExit(spawnProcess(opts));
+    prepared.spawnClaudeCodeProcess = opts => withDrainedExit(spawnProcess(opts), { onStderr: prepared.stderr });
   }
   return prepared;
 }
@@ -135,7 +138,7 @@ function isRelayProviderEnvKey(key) {
     || key.startsWith('ANTHROPIC_CUSTOM_MODEL_OPTION');
 }
 
-const RUNTIME_PATH_ENV_KEYS = new Set(['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR']);
+const RUNTIME_PATH_ENV_KEYS = new Set(['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR', 'RELAY_OUTPUT_DIR']);
 function buildRelayRuntimeEnv(runtimeEnv = {}) {
   const env = { ...process.env };
   const explicitPaths = new Set(Object.keys(runtimeEnv || {}).map(key => key.toUpperCase()).filter(key => RUNTIME_PATH_ENV_KEYS.has(key)));
@@ -145,12 +148,16 @@ function buildRelayRuntimeEnv(runtimeEnv = {}) {
   for (const key of Object.keys(env)) {
     const normalized = key.toUpperCase();
     if (isRelayProviderEnvKey(normalized) || Object.hasOwn(RETRY_ENV, normalized) || normalized === 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'
+      || normalized === 'CLAUDE_CODE_STARTUP_FAILURE_RESULTS'
       || explicitPaths.has(normalized) || (inheritedHostAuthKey && normalized === inheritedHostAuthKey.toUpperCase())) delete env[key];
   }
   Object.assign(env, RETRY_ENV);
   if (runtimeEnv && typeof runtimeEnv === 'object') {
     for (const [key, value] of Object.entries(runtimeEnv)) {
       const normalized = key.toUpperCase();
+      // Structured startup errors are part of Relay's event contract. Keep
+      // one host-owned value, including on case-insensitive Windows launches.
+      if (normalized === 'CLAUDE_CODE_STARTUP_FAILURE_RESULTS') continue;
       const targetKey = isRelayProviderEnvKey(normalized) || Object.hasOwn(RETRY_ENV, normalized) || normalized === 'CLAUDE_CODE_DISABLE_AUTO_MEMORY' || RUNTIME_PATH_ENV_KEYS.has(normalized) ? normalized : key;
       if (value === undefined || value === null || value === '') delete env[targetKey];
       else env[targetKey] = String(value);
@@ -164,6 +171,7 @@ function buildRelayRuntimeEnv(runtimeEnv = {}) {
   // Relay owns long-term memory; caller and shell values cannot restore SDK writes.
   env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
   env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
+  env.CLAUDE_CODE_STARTUP_FAILURE_RESULTS = '1';
   env.CLAUDE_AGENT_SDK_CLIENT_APP = `relay/${RELAY_VERSION}`;
   return env;
 }
@@ -255,17 +263,19 @@ function bundledExecutable() {
 // 把 Relay 的调用参数翻译成 SDK Options。一次性与常驻共用，保证两条路行为一致
 // （这正是原来 buildClaudeArgs 的职责）。
 function buildOptions({
-  cwd, validWorkingDir, agentProjectRoot, scratchDir, model, effort, sessionId, forkSession, resumeSessionAt, forkSessionId, resumeDropsTurn,
+  cwd, validWorkingDir, agentProjectRoot, scratchDir, outputDir = cwd, model, effort, sessionId, forkSession, resumeSessionAt, forkSessionId, resumeDropsTurn,
   permissionMode, mcpServers, mcpServersFactory, appendSystemPrompt, memoryDir, onSpawn, abortController,
   canUseTool, disallowAskUserQuestion = false, enableFileCheckpointing = false, tools, runtimeEnv,
   executionMode, executionModeState, runtimePolicy, nativeAgent, onElicitation, stderr, onInstructionsLoaded,
   perTaskStopAffordance = false, outputFormat, mcpPermissionOverrides, onUserDialog, supportedDialogKinds,
   onNativeHook, plugins, customSystemPrompt, onToolProposal, onMemoryTool, includeRelayInstructions = true,
 }, sdk) {
-  const fileInstructions = taskFileInstructions(cwd, scratchDir);
+  const fileInstructions = taskFileInstructions(cwd, scratchDir, outputDir);
   const relayInstructions = includeRelayInstructions ? relayInstructionsPrompt(runtimePolicy?.relayInstructions) : '';
   appendSystemPrompt = [appendSystemPrompt, relayInstructions, fileInstructions].filter(Boolean).join('\n\n');
-  const sessionEnv = scratchDir ? { ...runtimeEnv, TEMP: scratchDir, TMP: scratchDir, TMPDIR: scratchDir, RELAY_SCRATCH_DIR: scratchDir } : runtimeEnv;
+  const sessionEnv = { ...runtimeEnv,
+    ...(scratchDir ? { TEMP: scratchDir, TMP: scratchDir, TMPDIR: scratchDir, RELAY_SCRATCH_DIR: scratchDir } : {}),
+    ...(outputDir ? { RELAY_OUTPUT_DIR: outputDir } : {}) };
   const additionalDirectories = [];
   if (scratchDir) additionalDirectories.push(scratchDir);
   if (memoryDir) additionalDirectories.push(memoryDir);
@@ -300,7 +310,7 @@ function buildOptions({
   if (typeof onMemoryTool === 'function') options.hooks.PreToolUse.push({ hooks: [onMemoryTool] });
   if (typeof onToolProposal === 'function') options.hooks.PreToolUse.push({ hooks: [onToolProposal] });
   if (relayInstructions || fileInstructions) {
-    const taskFiles = createTaskFilePolicy({ cwd, scratchDir, relayInstructions, getExecutionMode,
+    const taskFiles = createTaskFilePolicy({ cwd, scratchDir, outputDir, relayInstructions, getExecutionMode,
       signal: abortController?.signal });
     options.hooks.PreToolUse.push({ hooks: [taskFiles.delegate] });
     if (fileInstructions) {
@@ -320,8 +330,10 @@ function buildOptions({
     options.supportedDialogKinds = [...supportedDialogKinds];
   }
   if (Array.isArray(plugins) && plugins.length) options.plugins = plugins;
-  if (typeof onNativeHook === 'function') for (const hook of ['SessionStart', 'StopFailure', 'Elicitation', 'ConfigChange', 'CwdChanged', 'FileChanged', 'PostToolUse']) {
-    options.hooks[hook] = [...(options.hooks[hook] || []), { hooks: [async (input, toolUseId, context) => {
+  if (typeof onNativeHook === 'function') for (const hook of ['SessionStart', 'StopFailure', 'Elicitation', 'ConfigChange', 'CwdChanged', 'FileChanged', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+    options.hooks[hook] = [...(options.hooks[hook] || []), {
+      ...(['PreToolUse', 'PostToolUseFailure'].includes(hook) ? { matcher: 'Write|Edit|NotebookEdit|MultiEdit' } : {}),
+      hooks: [async (input, toolUseId, context) => {
       // Observers never grant permission or change the tool's result.
       try {
         const result = await onNativeHook(input, toolUseId, context);
@@ -342,6 +354,12 @@ function buildOptions({
   // 任务仍可显式禁用 AskUserQuestion，避免出现没有 UI 消费者的永久等待。
   if (disallowAskUserQuestion) options.disallowedTools = [...new Set([...(options.disallowedTools || []), 'AskUserQuestion'])];
   if (Array.isArray(tools)) options.tools = tools;
+  // SDK 0.3.268 limits default task-board tools by model family. Preserve the
+  // ordinary Relay tool set for host-routed models without auto-approving it.
+  // Explicit tool restrictions and an explicit environment opt-out still win.
+  if (options.tools === undefined && options.env.CLAUDE_CODE_ENABLE_TODO_TOOLS === undefined) {
+    options.env.CLAUDE_CODE_ENABLE_TODO_TOOLS = '1';
+  }
   if (typeof canUseTool === 'function' || typeof executionModeState === 'function' || getExecutionMode().kind === 'plan'
       || typeof mcpPermissionOverrides === 'function' || Object.keys(mcpPermissionOverrides || {}).length) {
     options.canUseTool = (name, input, sdkOptions) => policy.canUseTool(name, input, { ...sdkOptions,
@@ -382,7 +400,7 @@ function buildOptions({
   // ChildProcess 已满足 SDK 的 SpawnedProcess 接口，直接返回即可。
   if (onSpawn) {
     options.spawnClaudeCodeProcess = (spawnOpts) => {
-      const child = spawn(spawnOpts.command, spawnOpts.args, {
+      const child = spawnManagedSdkProcess(spawnOpts.command, spawnOpts.args, {
         cwd: spawnOpts.cwd,
         env: spawnOpts.env,
         signal: spawnOpts.signal,
@@ -497,34 +515,56 @@ function oneShotTerminalError(terminal) {
   return String(terminal.result || terminal.error || permissionDenialError(terminal) || subtype || 'Claude 执行失败');
 }
 
+function processSupervisor() {
+  return new SdkProcessSupervisor({ onLifecycle: event => {
+    // Lifecycle metadata only; never prompts, commands or stderr contents.
+    console.warn('[sdk:process] %s', JSON.stringify(event));
+  } });
+}
+
 function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimePrepared, taskStartedAt, taskRun, ...rest }) {
   const taskClock = new TaskClock({ startedAt: taskStartedAt, taskRun });
   const mcpPermissions = new McpPermissionOverrides(rest.mcpPermissionOverrides);
   const attachments = snapshotAttachments(files);
-  const observeUsage = createUsageObserver(onUsage);
-  let resolveClosed;
-  const closedPromise = new Promise((resolve) => { resolveClosed = resolve; });
+  const observeUsage = createUsageObserver(onUsage, { inheritedCounters: !!rest.sessionId });
   const abortController = new AbortController();
   let child = null;
   let retryGuard;
-  const emit = (evt) => { try { onEvent(stripAttachmentImageData(taskClock.stamp(evt))); } catch (e) { console.error('[sdk] emit 失败: %s type=%s', e.message, evt && evt.type); } };
+  let exitCode = 0, terminalError = null, terminal = null, runtimeMapper, diagnosticLog;
+  let finished = false;
+  const nativeProcess = processSupervisor();
+  const emit = (evt) => { if (finished) return; try { onEvent(stripAttachmentImageData(taskClock.stamp(evt))); } catch (e) { console.error('[sdk] emit 失败: %s type=%s', e.message, evt && evt.type); } };
+  const closure = createRuntimeClosure({ getMapper: () => runtimeMapper,
+    onPending: code => console.warn('[sdk:process] %s', code),
+    onClosed: native => {
+      observeUsage.close(); diagnosticLog?.close();
+      const code = abortController.signal.aborted ? -1 : exitCode;
+      emit({ type: 'job-done', exitCode: code,
+        ...(terminalError ? { error: terminalError } : {}),
+        ...(terminal ? { finalResult: sanitizeResultPermissionDenials(terminal) } : {}),
+        ...(abortController.signal.aborted ? { aborted: true } : {}) });
+      finished = true;
+      return { exitCode: code, nativeExitCode: native.exitCode };
+    },
+  });
+  const finish = native => closure.finish(native);
 
   const handle = {
-    get pid() { return child ? child.pid : null; },
+    get pid() { return child ? (child.relayProcessTree ? child.sdkPid : child.pid) : null; },
     get taskStartedAt() { return taskClock.startedAt; },
-    kill() { observeUsage.stop(); if (retryGuard) retryGuard.cancel(); try { abortController.abort(); } catch (_) {} return closedPromise; },
-    whenClosed() { return closedPromise; },
+    kill() {
+      observeUsage.stop(); retryGuard?.cancel();
+      nativeProcess.stop().then(finish);
+      try { abortController.abort(); } catch (_) {}
+      return closure.whenClosed();
+    },
+    whenClosed() { return closure.whenClosed(); },
   };
 
   (async () => {
-    let exitCode = 0;
-    let terminalError = null;
-    let terminal = null;
-    let runtimeMapper;
-    let diagnosticLog;
     try {
       const sdk = await loadSdk();
-      const onSpawn = (c) => { child = c; };
+      const onSpawn = (c) => { child = c; nativeProcess.attach(c); };
       const built = buildMcpSessionOptions({ ...rest, mcpPermissionOverrides: () => mcpPermissions.snapshot(), abortController, onSpawn }, sdk);
       if (built.options.debug) { diagnosticLog = createDiagnosticLog({ onSummary: rest.onDiagnosticSummary }); built.options.debugFile = diagnosticLog.file; }
       const baseMcpServers = built.baseMcpServers;
@@ -536,6 +576,11 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
       const queryReady = new Promise((resolve) => { resolveQuery = resolve; });
       const prepareMcp = rest.mcpServers && !(Array.isArray(rest.tools) && rest.tools.length === 0);
       const queryPrompt = (async function* oneShotInput() {
+            if (rest.sessionId && typeof onUsage === 'function') {
+              const activeQuery = await queryReady;
+              await activeQuery.initializationResult();
+              await observeUsage.prepareBaseline(activeQuery, { signal: abortController.signal });
+            }
             if (Object.keys(mcpPermissions.snapshot()).length) {
               const activeQuery = await queryReady;
               await activeQuery.initializationResult();
@@ -553,7 +598,14 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
                     mapped => { if (abortController.signal.aborted) throw new Error('MCP_PREPARE_CANCELED'); return activeQuery.setMcpServers(mapped); }, args[0]);
                   if (method === 'setMcpServers') args = [await mapMcpServers(args[0])];
                   if (abortController.signal.aborted) throw new Error('MCP_PREPARE_CANCELED');
-                  return activeQuery[method](...args);
+                  if (method === 'reconnectMcpServer' && mapMcpServers.handlesReconnect?.(args[0])) {
+                    await mcpPermissions.apply(activeQuery, { force: true });
+                    return mapMcpServers.connectUpstream(args[0], () => activeQuery.mcpServerStatus());
+                  }
+                  const result = await activeQuery[method](...args);
+                  if (method === 'reconnectMcpServer' || method === 'toggleMcpServer') await mcpPermissions.apply(activeQuery, { force: true });
+                  return method === 'mcpServerStatus' && mapMcpServers.decorateStatus
+                    ? mapMcpServers.decorateStatus(result) : result;
                 };
                 return method === 'mcpServerStatus' ? mcpControlQueue.read(operation) : mcpControlQueue.run(operation);
               };
@@ -582,14 +634,18 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
             };
           })();
       const query = sdk.query({ prompt: queryPrompt, options });
+      mapMcpServers.setStatusReader?.(() => query.mcpServerStatus());
       observeUsage.attach(query);
       resolveQuery(query);
       retryGuard = new SdkRetryGuard({ interrupt: () => interruptFailedConnection(query, retryGuard.capabilities), signal: abortController.signal,
         enabled: options.env.CLAUDE_CODE_RETRY_WATCHDOG === '1' });
       const guardedMessages = (async function* () {
         for await (const event of query) {
+          if (finished || abortController.signal.aborted) break;
           observeUsage(event);
-          yield await retryGuard.observe(TaskClock.normalizeEvent(event));
+          const observed = await retryGuard.observe(TaskClock.normalizeEvent(event));
+          if (finished || abortController.signal.aborted) break;
+          yield observed;
         }
       })();
       try {
@@ -613,18 +669,9 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
         exitCode = -1;
       }
     } finally {
-      observeUsage.close();
-      diagnosticLog?.close();
-      if (runtimeMapper && runtimeMapper.close) await runtimeMapper.close();
-      // 显式收尾：result 事件可能因异常退出而缺失，前端只认 job-done
-      emit({
-        type: 'job-done',
-        exitCode: abortController.signal.aborted ? -1 : exitCode,
-        ...(terminalError ? { error: terminalError } : {}),
-        ...(terminal ? { finalResult: sanitizeResultPermissionDenials(terminal) } : {}),
-        ...(abortController.signal.aborted ? { aborted: true } : {}),
-      });
-      resolveClosed({ exitCode: abortController.signal.aborted ? -1 : exitCode });
+      nativeProcess.markSpawnSettled();
+      // Query completion does not prove that its captured native child exited.
+      await finish(await nativeProcess.stop());
     }
   })();
 
@@ -636,7 +683,7 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
 // SDK 的流式输入要一个 AsyncIterable，这里用一个「推送队列」把它转成命令式的 push(text)。
 function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntimePrepared, ...rest }) {
   const mcpPermissions = new McpPermissionOverrides(rest.mcpPermissionOverrides);
-  const observeUsage = createUsageObserver(onUsage);
+  const observeUsage = createUsageObserver(onUsage, { inheritedCounters: !!rest.sessionId });
   const abortController = new AbortController();
   let child = null;
   let queryInstance = null;
@@ -651,8 +698,9 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
   let inputEnvironment = 'native';
   let baseMcpServers = {};
   let closed = false;
-  let resolveClosed;
-  const closedPromise = new Promise((resolve) => { resolveClosed = resolve; });
+  let finalized = false, diagnosticLog;
+  let exitCode = 0, error;
+  const nativeProcess = processSupervisor();
   let resolveQuery;
   let rejectQuery;
   const queryReady = new Promise((resolve, reject) => {
@@ -706,6 +754,7 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
       if (closed || !query) throw new Error('Claude 会话已关闭');
       const result = await query.initializationResult();
       await mcpPermissions.apply(query, { names: rest.sessionId ? Object.keys(rest.mcpServers || {}) : [] });
+      await observeUsage.prepareBaseline(query, { signal: abortController.signal });
       if (!closed && typeof onInitialized === 'function') onInitialized(result);
       return query;
     });
@@ -740,9 +789,18 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
   const mcpControlQueue = new McpControlQueue();
   const mcpControl = (method, ...args) => {
     const operation = async () => {
+      // The CLI reconnect method only supports process/remote MCPs. This host
+      // owns deferred SDK bridges, so reconnect their upstream directly after
+      // verifying native registration and applying the current permissions.
+      await ready();
+      if (method === 'reconnectMcpServer' && mapLiveMcpServers.handlesReconnect?.(args[0])) {
+        await mcpPermissions.apply(await ready(), { force: true });
+        return mapLiveMcpServers.connectUpstream(args[0], () => control('mcpServerStatus'));
+      }
       const result = await control(method, ...args);
       if (method === 'reconnectMcpServer' || method === 'toggleMcpServer') await mcpPermissions.apply(await ready(), { force: true });
-      return result;
+      return method === 'mcpServerStatus' && mapLiveMcpServers.decorateStatus
+        ? mapLiveMcpServers.decorateStatus(result) : result;
     };
     return method === 'mcpServerStatus' ? mcpControlQueue.read(operation) : mcpControlQueue.run(operation);
   };
@@ -772,8 +830,21 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
     permissionMode: rest.permissionMode || 'default', executionMode: rest.executionMode, resumed: !!rest.sessionId,
   });
 
+  const closure = createRuntimeClosure({ getMapper: () => mapLiveMcpServers,
+    onPending: code => console.warn('[sdk:process] %s', code),
+    onClosed: native => {
+      closed = true; finalized = true; queue.length = 0; wake();
+      observeUsage.close(); diagnosticLog?.close(); execution.close();
+      if (executionError) { exitCode = -1; error = executionError; }
+      if (abortController.signal.aborted) exitCode = -1;
+      try { onExit(exitCode, error); } catch (_) {}
+      return { exitCode, nativeExitCode: native.exitCode, error: error || null };
+    },
+  });
+  const finish = native => closure.finish(native);
+
   const session = {
-    get pid() { return child ? child.pid : null; },
+    get pid() { return child ? (child.relayProcessTree ? child.sdkPid : child.pid) : null; },
     // 投递一轮用户输入。SDK 侧会把它作为 user 消息喂给常驻进程。
     push(text, metadata = {}) {
       if (!execution.beforePush(text, metadata)) return false;
@@ -785,6 +856,9 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
     },
     // 回收时撤回本地未发送内容，并通过 AbortController 结束 Query。只停当前轮用 interrupt。
     kill() {
+      // Observe the actual child even if the Query is stuck or already closed.
+      // A repeated stop may retry a native signal that previously failed.
+      nativeProcess.stop().then(finish);
       if (!closed) {
         observeUsage.stop();
         retryGuard.cancel();
@@ -792,12 +866,12 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
         execution.close();
         queue.length = 0;
         wake();
-        try { abortController.abort(); } catch (_) {}
       }
-      // 文件回退超时等安全路径需要等到 Query 真正结束后才能释放工作区锁。
-      return closedPromise;
+      try { abortController.abort(); } catch (_) {}
+      // Release admission only after the captured OS process actually exits.
+      return closure.whenClosed();
     },
-    whenClosed() { return closedPromise; },
+    whenClosed() { return closure.whenClosed(); },
     whenReady,
     // 常驻会话控制：中止当前轮但保留 Query/MCP，及运行时能力、模型与上下文控制。
     interrupt() {
@@ -858,12 +932,9 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
   };
 
   (async () => {
-    let exitCode = 0;
-    let error;
-    let diagnosticLog;
     try {
       const sdk = await loadSdk();
-      const onSpawn = (c) => { child = c; };
+      const onSpawn = (c) => { child = c; nativeProcess.attach(c); };
       const built = buildMcpSessionOptions({ ...rest, mcpPermissionOverrides: () => mcpPermissions.snapshot(), executionModeState: () => execution.mode,
         abortController, onSpawn }, sdk);
       if (built.options.debug) { diagnosticLog = createDiagnosticLog({ onSummary: rest.onDiagnosticSummary }); built.options.debugFile = diagnosticLog.file; }
@@ -883,14 +954,16 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
       if (!Object.entries(built.options.mcpServers || {}).some(([name, config]) => config && config.type !== 'sdk'
         && rest.mcpServers?.[name] !== config)) mcpReadiness.adoptInitialServers(rest.mcpServers || {});
       queryInstance = sdk.query({ prompt: inputStream(), options });
+      mapLiveMcpServers.setStatusReader?.(() => queryInstance.mcpServerStatus());
       observeUsage.attach(queryInstance);
       resolveQuery(queryInstance);
       // Observe initialize even when no caller asks for a control method.
       ready().catch(() => {});
       for await (const raw of queryInstance) {
+        if (finalized || abortController.signal.aborted) break;
         observeUsage(raw);
         const msg = execution.observe(await retryGuard.observe(TaskClock.normalizeEvent(raw)));
-        if (!msg) continue;
+        if (!msg || finalized || abortController.signal.aborted) continue;
         // 常驻会话与 one-shot 使用同一条拒绝清单脱敏边界，避免 tool_input/tool_use_id
         // 在 main 进程写入原始流事件日志后才被任务归一化层发现。
         try { onMessage(stripAttachmentImageData(annotateError(sanitizeNativeEvent(sanitizeResultPermissionDenials(msg))))); }
@@ -912,14 +985,9 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
         }
       }
     } finally {
-      observeUsage.close();
-      diagnosticLog?.close();
       closed = true;
-      execution.close();
-      if (mapLiveMcpServers.close) await mapLiveMcpServers.close();
-      if (executionError) { exitCode = -1; error = executionError; }
-      try { onExit(exitCode, error); } catch (_) {}
-      finally { resolveClosed({ exitCode, error: error || null }); }
+      nativeProcess.markSpawnSettled();
+      await finish(await nativeProcess.stop());
     }
   })();
 
@@ -992,19 +1060,6 @@ function runText({
       }
     })();
   });
-}
-
-// 内置运行时的版本。取自 SDK package.json 的 claudeCodeVersion 字段
-// SDK 与其内置 CLI 同包发布，避免把全局安装版本误当成 Relay 实际运行版本。
-function bundledClaudeVersion() {
-  try {
-    return require('@anthropic-ai/claude-agent-sdk/package.json').claudeCodeVersion || '';
-  } catch (_) {
-    try {
-      const p = resourcePath('node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json');
-      return JSON.parse(fs.readFileSync(p, 'utf8')).claudeCodeVersion || '';
-    } catch (_) { return ''; }
-  }
 }
 
 async function runStructured({ prompt, cwd, model, runtimeEnv, schema, validate, timeoutMs = 30000, onUsage, runtimePolicy }) {

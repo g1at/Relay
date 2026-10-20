@@ -1,7 +1,7 @@
 'use strict';
 // Loopback-only streamed HTML pauses in a parser-blocking script. Measurements
 // come from the page itself before DOMContentLoaded, including its first paint.
-const { app, BrowserWindow, WebContentsView, session } = require('electron');
+const { BaseWindow, app, BrowserWindow, WebContentsView, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
 const { attachBrowserPageScrollbars } = require('../src/main/browser/browser-page-scrollbars');
@@ -65,7 +65,7 @@ app.whenReady().then(async () => {
   release('control-1'); await until(() => !control.webContents.isLoading(), 'control load finish');
   await until(() => control.webContents.executeJavaScript('getComputedStyle(document.documentElement,"::-webkit-scrollbar").width==="9px"'), 'control style catches up');
   check('oldLifecycleOnlyFixesScrollbarAfterLoad', true); control.webContents.close({ waitForBeforeUnload: false }); owner.contentView.removeChildView(control); control = null;
-  host = createBrowserPanelHost({ owner, WebContentsView, session });
+  host = createBrowserPanelHost({ BaseWindow, owner, WebContentsView, session });
   const created = await host.invoke({ action: 'create', url: base + '/slow?id=fixed' });
   await host.invoke({ action: 'setBounds', rect: { x: 0, y: 0, width: 640, height: 680 } });
   await host.invoke({ action: 'visibility', id: created.id, visible: true });

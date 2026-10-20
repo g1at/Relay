@@ -49,8 +49,8 @@ test('the default and explicit official repository accept current releases', asy
   assert.deepEqual(await createInstallManifest({ ...f, repository: 'g1at/Relay' }), manifest);
 });
 
-test('legacy releases require an explicit repository and stop at version 3.0.1', async t => {
-  for (const version of ['3.0.0', '3.0.1']) {
+test('legacy releases require an explicit repository and stop at version 3.0.2', async t => {
+  for (const version of ['3.0.0', '3.0.1', '3.0.2']) {
     const f = await fixture(t, { version, repository: 'g1at/relay-updates' });
     await assert.rejects(createInstallManifest(f), /Release URL/);
     const manifest = await createInstallManifest({ ...f, repository: 'g1at/relay-updates' });
@@ -59,9 +59,9 @@ test('legacy releases require an explicit repository and stop at version 3.0.1',
     assert.equal(manifest.installer.url, f.release.assets[0].browser_download_url);
     assert.equal(manifest.installer.sha256, f.sha256);
   }
-  for (const version of ['3.0.2', '3.1.0', '4.0.0', '9007199254740993.0.0']) {
+  for (const version of ['3.0.3', '3.1.0', '4.0.0', '9007199254740993.0.0']) {
     const f = await fixture(t, { version, repository: 'g1at/relay-updates' });
-    await assert.rejects(createInstallManifest({ ...f, repository: 'g1at/relay-updates' }), /through 3\.0\.1/);
+    await assert.rejects(createInstallManifest({ ...f, repository: 'g1at/relay-updates' }), /through 3\.0\.2/);
   }
 });
 
@@ -147,7 +147,7 @@ test('CLI repository selection is explicit, allow-listed, and enforces the legac
   const current = await fixture(t, { version: '3.0.2' });
   let result = runCli(current, ['--repository', 'g1at/Relay']);
   assert.equal(result.status, 0, result.stderr);
-  for (const version of ['3.0.0', '3.0.1']) {
+  for (const version of ['3.0.0', '3.0.1', '3.0.2']) {
     const legacy = await fixture(t, { version, repository: 'g1at/relay-updates' });
     result = runCli(legacy);
     assert.notEqual(result.status, 0);
@@ -156,10 +156,10 @@ test('CLI repository selection is explicit, allow-listed, and enforces the legac
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(await fs.readFile(legacy.outputPath, 'utf8')).installer.url, legacy.release.assets[0].browser_download_url);
   }
-  const tooNew = await fixture(t, { version: '3.0.2', repository: 'g1at/relay-updates' });
+  const tooNew = await fixture(t, { version: '3.0.3', repository: 'g1at/relay-updates' });
   result = runCli(tooNew, ['--repository', 'g1at/relay-updates']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /through 3\.0\.1/);
+  assert.match(result.stderr, /through 3\.0\.2/);
   await assert.rejects(fs.stat(tooNew.outputPath), { code: 'ENOENT' });
   const required = ['--release-json', 'release.json', '--installer', 'installer.exe', '--output', 'manifest.json'];
   assert.equal(parseArguments(required).repository, 'g1at/Relay');

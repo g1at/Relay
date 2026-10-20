@@ -178,6 +178,7 @@ let permissionEventsReady = false;
 let workspaceDraftId = null;
 window.relayConversationWorkspace = () => ({
   conversationId: currentConv && currentConv.id || (workspaceDraftId ||= newClientRunId()),
+  isDraft: !currentConv?.id,
   title: currentConv && currentConv.title || '新对话',
   workingDir: currentWorkingDir && currentWorkingDir.path || null,
   projectId: currentProjectId,
@@ -236,7 +237,7 @@ function isConvRunning(convId) { return !!(convId && (runs.has(convId) || cvJobs
 // 事件所属会话是否正是当前所看的会话(决定要不要动 DOM)
 function isMountedChatJob(jobId) {
   const convId = jobToConv.get(jobId);
-  return !!(convId && currentConv && currentConv.id === convId);
+  return !!(activeView === 'chat' && convId && currentConv && currentConv.id === convId);
 }
 
 // ── 对话快捷索引（竖向钢琴键） ──
@@ -451,7 +452,7 @@ function appendActivityState(state, collapsed = false, options = {}) {
   if (!state || !window.RelayActivity) return null;
   const welcome = document.querySelector('.welcome');
   if (welcome) welcome.remove();
-  const el = window.RelayActivity.createElement(state, { collapsed, collapseOnComplete: true, ...options });
+  const el = window.RelayActivity.createElement(state, { collapsed, deferCollapsed: collapsed, collapseOnComplete: true, ...options });
   const subagents = document.createElement('button');
   subagents.type = 'button'; subagents.className = 'session-subagents'; subagents.textContent = '子智能体记录';
   subagents.title = '按需查看这轮任务的原生子智能体历史';
@@ -564,23 +565,56 @@ function activityStateForTurn(turn) {
   return state;
 }
 function activityOutputItems(output, activityItems = []) {
-  const existing = Array.isArray(activityItems) ? activityItems : [];
-  return window.RelayAssistantOutput.processItems(output, { includeChildren: true }).filter((item) => {
-    if (item.type !== 'narration') return true;
-    const child = output.messages.find((message) => message.parent
-      && item.id.startsWith(`output:${message.parent}:${message.id}:`));
-    if (!child) return true;
-    // 流式子文本先显示在过程区；同一内容已进入子任务详情后，仅保留一份可见结果。
-    return !existing.some((task) => (task.type === 'task' || task.type === 'tool')
-      && task.toolUseId === child.parent && task.result && String(task.result).includes(item.result));
-  });
+  // Child prose belongs to its task inspector, including before the complete
+  // assistant frame arrives. Never project it as anonymous main narration.
+  const owners = new Map(), groups = new Map();
+  const ownerKey = (epoch, owner) => JSON.stringify([Number(epoch || 0), owner]);
+  for (const task of Array.isArray(activityItems) ? activityItems : []) {
+    if ((task.type !== 'task' && task.type !== 'tool') || task.outputOwned) continue;
+    delete task.childOutput;
+    const aliases = [task.toolUseId, ...(task.taskToolUseIds || []),
+      /^(Agent|Task)$/.test(task.toolName || '') ? task.id : null,
+      task.taskId ? 'agent:' + task.taskId : null].filter(Boolean);
+    for (const alias of aliases) owners.set(ownerKey(task.contextEpoch, alias), task);
+  }
+  for (const message of output.messages) {
+    if (!message.parent) continue;
+    const text = window.RelayAssistantOutput.textFor(message);
+    if (!text) continue;
+    const key = ownerKey(message.contextEpoch, message.parent);
+    const task = owners.get(key);
+    const groupKey = task || key;
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = { task, parent: message.parent, order: message.order, texts: [] };
+      groups.set(groupKey, group);
+    }
+    group.texts.push(text);
+  }
+  const items = window.RelayAssistantOutput.processItems(output);
+  const bounded = value => value.length > 8000 ? value.slice(0, 8000) + '\n…（内容过长，已截断）' : value;
+  for (const [key, group] of groups) {
+    const text = bounded(group.texts.join('\n\n'));
+    if (group.task) {
+      // Complete child frames already populate the task result. Streaming-only
+      // content gets its own detail section without changing receipt/status.
+      if (!group.texts.every(value => String(group.task.result || '').includes(value))) group.task.childOutput = text;
+    } else {
+      items.push({ id: 'output:child-task:' + key, type: 'task', title: '子 Agent 输出',
+        detail: '子任务执行过程', result: text, toolUseId: group.parent,
+        status: output.status === 'running' ? 'running' : 'success', outputOwned: true, order: group.order });
+    }
+  }
+  return items;
 }
+
 function outputStateForRun(run) {
   if (!run.outputState) run.outputState = window.RelayAssistantOutput.createState(run.turn.output);
   return run.outputState;
 }
 function syncRunOutputActivity(run, onView) {
   if (run.outputRenderTimer) { clearTimeout(run.outputRenderTimer); run.outputRenderTimer = null; }
+  run.outputPresentationDirty = !onView;
   const output = outputStateForRun(run);
   // A streamed message may still be followed by tools, another SDK round or an
   // in-turn requirement. Keep one process presentation until job-done confirms
@@ -597,13 +631,25 @@ function syncRunOutputActivity(run, onView) {
   }
 }
 function scheduleRunOutputActivity(run, onView, force = false) {
-  if (force) { syncRunOutputActivity(run, onView); return; }
+  // Ingestion is immediate and lossless; only presentation is deferred. Hidden
+  // conversations rebuild their projection on navigation or terminal persistence.
+  run.outputPresentationDirty = true;
+  if (!onView) {
+    if (run.outputRenderTimer) { clearTimeout(run.outputRenderTimer); run.outputRenderTimer = null; }
+    return;
+  }
+  if (force) { syncRunOutputActivity(run, true); return; }
   if (run.outputRenderTimer) return;
   run.outputRenderTimer = setTimeout(() => {
     run.outputRenderTimer = null;
-    if (runForJob(run.jobId) !== run || run.finishing) return;
-    syncRunOutputActivity(run, isMountedChatJob(run.jobId));
+    if (runForJob(run.jobId) !== run || run.finishing || !isMountedChatJob(run.jobId)) return;
+    syncRunOutputActivity(run, true);
   }, 100);
+}
+function flushVisibleRunPresentation() {
+  const run = currentConv && runs.get(currentConv.id);
+  if (!run || !run.outputPresentationDirty || !isMountedChatJob(run.jobId)) return;
+  syncRunOutputActivity(run, true);
 }
 function savedAssistantDisplay(turn) {
   // 早期协作的 assistant 是派活、子结果和 PM 所有发言的聚合日志，并非最终答案。
@@ -710,6 +756,7 @@ function renderSupplementTimeline(run, history = false) {
       if (!view.bubble || !view.bubble.isConnected) view.bubble = appendMessage('assistant', segment.text, null, { streaming: true });
       const bubble = view.bubble, body = bubble.querySelector('.body');
       bubble.dataset.turn = String(run.turnIndex ?? 0);
+      window.RelayTurnDeliveryReferences?.stampOwner(bubble, run.convId || currentConv?.id, run.turn, run.turnIndex);
       bubble.dataset.raw = segment.text;
       const displayText = segment.displayText ?? segment.text;
       bubble.dataset.displayRaw = displayText;
@@ -747,6 +794,8 @@ function renderSupplementTimeline(run, history = false) {
     if (node.nextSibling !== before) messagesEl.insertBefore(node, before);
     before = node;
   }
+  window.relayTurnDeliverables?.render(run.turn, { conversationId: run.convId || currentConv?.id,
+    turnIndex: run.turnIndex, before: timeline.end });
   run.activityEl = null; run.outputBubble = latestBubble;
   // Ordering is now final: the earliest process owns the task header even
   // when the last/current segment is empty or belongs to a resumed run.
@@ -1188,6 +1237,69 @@ const HIST_ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 // 历史列表交互一次性委托到容器:点击行打开会话、点铅笔重命名、点图钉置顶、点 × 删除。
 //   省掉每行 addEventListener —— 列表越长收益越大,且增量更新时不必反复重绑。
 let _histDelegated = false;
+const pendingHistoryDeletions = new Set();
+const HISTORY_DELETE_RUNNING_NOTICE = '对话正在运行，请等待完成或手动暂停后再删除。';
+const historyActiveTaskOwners = new Map(); // nonterminal runId -> conversationId
+const historyActiveTasksByConversation = new Map();
+const HISTORY_ACTIVE_TASK_STATES = new Set(['queued', 'starting', 'running', 'waiting_user', 'stopping']);
+let historyTaskEventRevision = 0;
+function isHistoryDeletionBlocked(id) { return isConvRunning(id) || pendingConversationSends.has(id) || historyActiveTasksByConversation.has(id) || conversationControls.has(id); }
+function syncHistoryDeletionAvailability(id) {
+  for (const row of historyEl.querySelectorAll('.history-item')) if (row.dataset.id === id) syncHistoryRowStatus(row);
+}
+function setPendingConversationSend(id, pending) {
+  if (pending) pendingConversationSends.add(id); else pendingConversationSends.delete(id);
+  syncHistoryDeletionAvailability(id);
+}
+function syncHistoryTaskDeletionState(task, changed = null) {
+  if (!task?.runId) return;
+  const state = String(task.state || task.status || '').toLowerCase();
+  const active = HISTORY_ACTIVE_TASK_STATES.has(state), terminal = TERMINAL_LEDGER_STATES.has(state);
+  if (!active && !terminal) return;
+  const previous = historyActiveTaskOwners.get(task.runId);
+  const owner = active && typeof task.source?.conversationId === 'string' && task.source.conversationId || null;
+  if (active && !owner) return; // Never infer a mini/scheduled task's conversation.
+  if (previous === owner) return;
+  const affected = new Set([previous, owner].filter(Boolean));
+  if (previous) {
+    const runs = historyActiveTasksByConversation.get(previous);
+    runs?.delete(task.runId);
+    if (!runs?.size) historyActiveTasksByConversation.delete(previous);
+    historyActiveTaskOwners.delete(task.runId);
+  }
+  if (owner) {
+    historyActiveTaskOwners.set(task.runId, owner);
+    if (!historyActiveTasksByConversation.has(owner)) historyActiveTasksByConversation.set(owner, new Set());
+    historyActiveTasksByConversation.get(owner).add(task.runId);
+  }
+  for (const id of affected) { if (changed) changed.add(id); else syncHistoryDeletionAvailability(id); }
+}
+function syncHistoryTaskDeletionSnapshot(tasks) {
+  const affected = new Set(historyActiveTasksByConversation.keys());
+  historyActiveTaskOwners.clear(); historyActiveTasksByConversation.clear();
+  for (const task of tasks) syncHistoryTaskDeletionState(task, affected);
+  for (const id of affected) syncHistoryDeletionAvailability(id);
+}
+function setHistoryDeletionPending(id, pending) {
+  if (pending) pendingHistoryDeletions.add(id); else pendingHistoryDeletions.delete(id);
+  syncHistoryDeletionAvailability(id);
+}
+function syncHistoryRowStatus(li, running = isConvRunning(li.dataset.id)) {
+  const deleting = pendingHistoryDeletions.has(li.dataset.id);
+  const deleteBlocked = running || isHistoryDeletionBlocked(li.dataset.id);
+  li.classList.toggle('deleting', deleting);
+  if (deleting) li.setAttribute('aria-busy', 'true'); else li.removeAttribute('aria-busy');
+  const tail = li.querySelector('.hi-tail');
+  const want = deleting ? 'deleting' : deleteBlocked ? 'spin' : 'del';
+  if (tail.dataset.state !== want) {
+    tail.dataset.state = want;
+    tail.innerHTML = deleting
+      ? '<span class="hi-delete-status" role="status">正在删除…</span><button type="button" class="hi-del" title="正在删除" aria-label="删除会话" disabled>×</button>'
+      : deleteBlocked ? `<span class="hi-spinner" title="正在回复中"></span><button type="button" class="hi-del" title="${HISTORY_DELETE_RUNNING_NOTICE}" aria-label="删除会话：${HISTORY_DELETE_RUNNING_NOTICE}" disabled>×</button>`
+      : '<button type="button" class="hi-del" title="删除" aria-label="删除会话">×</button>';
+  }
+  for (const button of li.querySelectorAll('button')) button.disabled = deleting || (deleteBlocked && button.classList.contains('hi-del'));
+}
 function ensureHistoryDelegation() {
   if (_histDelegated || !historyEl) return;
   _histDelegated = true;
@@ -1195,7 +1307,7 @@ function ensureHistoryDelegation() {
     const li = e.target.closest('.history-item');
     if (!li) return;
     const id = li.dataset.id;
-    if (!id) return;
+    if (!id || pendingHistoryDeletions.has(id)) return;
     const isCreate = li.dataset.kind === 'create';
     // 图钉:置顶/取消置顶
     if (e.target.closest('.hi-pin')) {
@@ -1248,17 +1360,28 @@ function ensureHistoryDelegation() {
     // 删除
     if (e.target.closest('.hi-del')) {
       e.stopPropagation();
+      if (isHistoryDeletionBlocked(id)) { syncHistoryRowStatus(li); showToast(HISTORY_DELETE_RUNNING_NOTICE); return; }
       const title = li.querySelector('.hi-title')?.textContent || '该会话';
       const ok = await customConfirm({
         title: '删除会话',
-        message: `「${title}」将被永久删除，无法恢复。`,
+        message: `将永久删除「${title}」及其专属临时目录中的全部文件。项目文件和临时目录之外的交付文件会保留，由你手动清理。`,
         confirmText: '删除', cancelText: '取消', danger: true,
       });
-      if (!ok) return;
-      await window.api.history.delete(id);
-      composerDrafts.delete(id); supplementDrafts.delete(id);
-      if (currentConv && currentConv.id === id) startNewConv();
-      await refreshHistoryList();
+      if (!ok || pendingHistoryDeletions.has(id)) return;
+      // A task can start while confirmation is open; deletion must never stop it.
+      if (isHistoryDeletionBlocked(id)) { syncHistoryRowStatus(li); showToast(HISTORY_DELETE_RUNNING_NOTICE); return; }
+      setHistoryDeletionPending(id, true);
+      try {
+        const result = await window.api.history.delete(id);
+        if (!result?.ok) { showToast(result?.code === 'CONVERSATION_RUNNING' ? HISTORY_DELETE_RUNNING_NOTICE : result?.error || '删除失败，临时文件可能仍被占用，请稍后重试'); return; }
+        composerDrafts.delete(id); supplementDrafts.delete(id);
+        if (currentConv && currentConv.id === id) startNewConv();
+        if (currentCreateConv && currentCreateConv.id === id) newCreateConv();
+        if (result.cleanupWarning) showToast(result.cleanupWarning);
+        else showToast(result.fileCleanup?.removedPaths?.length ? '会话及其临时文件已删除。' : '会话已删除。');
+        await refreshHistoryList();
+      } catch (error) { showToast(error.message || '删除失败，请稍后重试'); }
+      finally { setHistoryDeletionPending(id, false); }
       return;
     }
     // 行本体:打开会话
@@ -1311,15 +1434,8 @@ function updateHistoryRow(li, it) {
   const rn = li.querySelector('.hi-rename');
   if (rn && !rn.firstChild) rn.innerHTML = HIST_ICON_EDIT;   // 铅笔 SVG 一次性填充
 
-  // 尾部:运行中显示转圈,否则显示删除按钮。只在两态切换时重写,避免每帧重建。
-  const tail = li.querySelector('.hi-tail');
-  const want = running ? 'spin' : 'del';
-  if (tail.dataset.state !== want) {
-    tail.dataset.state = want;
-    tail.innerHTML = running
-      ? '<span class="hi-spinner" title="正在回复中"></span>'
-      : '<button class="hi-del" title="删除">×</button>';
-  }
+  // 运行和删除状态都按会话保留，列表刷新时不会丢失等待反馈。
+  syncHistoryRowStatus(li, running);
 }
 
 async function refreshHistoryList() {
@@ -1330,12 +1446,14 @@ async function refreshHistoryList() {
   ensureHistoryDelegation();
   window.RelaySidebarHistory.reconcile(historyEl, items, {
     buildRow: buildHistoryRow, updateRow: updateHistoryRow, projects,
+    isRunning: isConvRunning,
     projectHeader: composer ? composer.header : undefined,
   });
 }
 
 // jumpTo(可选):{ turnIndex, side } —— 从搜索结果跳转时,打开会话后滚动到命中的那条消息并高亮。
 async function loadConversation(id, jumpTo = null, { forceReload = false } = {}) {
+  window.relayComposerPrewarm?.cancel();
   const navigationIntent = ++pageNavigationVersion;
   const isCurrentNavigation = () => navigationIntent === pageNavigationVersion;
   // 主页面之间往返时复用已挂载的对话，不重读历史、不重建流、不触发预启动。
@@ -1398,32 +1516,11 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
   chatTitle.textContent = conv.title || '历史会话';
   if (conv.forkedFrom) appendMessage('system', '此分支与原对话共享工作目录；聊天记录独立，文件不会自动回退。');
 
-  // 预启动这个对话的常驻 claude 进程:用户读历史/打字的这几秒,正好用来连 MCP,
-  //   等他真发消息时工具已经全就位(不预启动的话首轮模型会看到一个没有 MCP 工具的世界)。
-  //   fire-and-forget:失败无害,发送时主进程会自己 spawn。
-  if (prespawnSessionRoute) {
-    try {
-      window.api.prespawnClaude(
-        id,
-        currentSessionId,
-        currentMode,
-        runtimeModelForValue(currentModel),
-        currentEffort,
-        currentAgent,
-        currentWorkingDir && currentWorkingDir.path ? currentWorkingDir.path : null,
-        prespawnSessionRoute,
-      )
-        .then(() => refreshClaudeRuntimeInfo(id))
-        .catch(() => {});
-    } catch (_) {}
-  }
-
   // 这个会话是否正在后台跑?(有 run 即在跑)
   const run = runs.get(id);
   const turns = conv.turns || [];
-  const lastIdx = turns.length - 1;
-  const liveTurnIndex = run && Number.isSafeInteger(run.turnIndex) && run.turnIndex >= 0 && run.turnIndex <= lastIdx
-    ? run.turnIndex : lastIdx;
+  const liveTurnIndex = run ? turns.findIndex(turn => turn?.runId === run.jobId
+    && (!run.turn.ts || turn.ts === run.turn.ts)) : -1;
 
   // ── 渲染所有已存 turns ──
   //   若该会话正在跑,最后一个 turn 的 saved 内容是空占位,改用 run.turn 的内存内容渲染。
@@ -1440,7 +1537,7 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
 
     if (hasSupplementTimeline(isLiveTurn ? run.turn : turn)) {
       if (!isLiveTurn) {
-        renderSupplementTimeline({ turn, turnIndex: i, outputState: window.RelayAssistantOutput.createState(turn.output),
+        renderSupplementTimeline({ turn, turnIndex: i, convId: conv.id, jobId: turn.runId, outputState: window.RelayAssistantOutput.createState(turn.output),
           activityState: activityStateForTurn(turn) }, true);
         appendSavedTurnError(turn, i);
         if (turn.outputNotice) appendMessage('system', turn.outputNotice);
@@ -1467,15 +1564,20 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
       appendLegacyOutputDiagnostics(display.diagnostics);
       if (display.text) appendOrUpdateAssistant(display.text, false, { ts: turn.assistantTs });
       // appendOrUpdateAssistant 不返回元素;此处它刚新建的气泡就是 currentAssistantBubble
-      if (currentAssistantBubble) currentAssistantBubble.dataset.turn = i;
+      if (currentAssistantBubble) {
+        currentAssistantBubble.dataset.turn = i;
+        window.RelayTurnDeliveryReferences?.stampOwner(currentAssistantBubble, conv.id, turn, i);
+      }
       currentAssistantBubble = null;
     }
     if (!isLiveTurn) appendSavedTurnError(turn, i);
     if (!isLiveTurn && turn.outputNotice) appendMessage('system', turn.outputNotice);
+    if (!isLiveTurn) window.relayTurnDeliverables?.render(turn, { conversationId: conv.id, turnIndex: i });
   }
 
   // ── 正在跑:把该 run 后台累积的 thinking/工具/文本补渲染出来,并接回流式气泡 ──
   if (run) {
+    window.RelayTurnDeliverables?.applySnapshot(turns[liveTurnIndex]?.deliverables, { conversation: conv, run });
     if (run.outputState) syncRunOutputActivity(run, false);
     currentSessionId = run.sessionId || currentSessionId;
     // 所有会话接回同一份过程状态；子 Agent 与中间文字只在过程区显示。
@@ -1583,8 +1685,11 @@ async function finishRunUnsafe(jobId, doneEvt) {
   if (!run || run.finishing) return;
   run.finishing = true;
   const convId = run.convId;
-  const wasViewing = currentConv && currentConv.id === convId;
+  const wasViewing = isMountedChatJob(jobId);
   const isStillViewing = () => !!(currentConv && currentConv.id === convId);
+  // A covered chat keeps its conversation identity, but its transcript must
+  // catch up once after the final snapshot has been saved.
+  if (isStillViewing() && !wasViewing) run.recoveryRerender = true;
   // A completed final answer can win the race with the user's pause click.
   const terminalResult = doneEvt && doneEvt.finalResult;
   const naturallyFinished = run.pauseRequested && terminalResult
@@ -1669,13 +1774,22 @@ async function finishRunUnsafe(jobId, doneEvt) {
   }
   if (wasViewing && failed && !willAutoRecover) showRunError(run, run.turn.error);
 
-  // 拿到目标 conv(优先内存里的 currentConv,否则从 disk 读)
-  let conv;
-  if (currentConv && currentConv.id === convId) {
-    conv = currentConv;
-  } else {
-    conv = await window.api.history.load(convId);
+  // A renderer snapshot can predate another window's send or a recovered turn.
+  // Resolve this run in current history, then let the host patch only its outcome.
+  let conv = await window.api.history.load(convId);
+  const identity = { runId: jobId, source: { conversationId: convId },
+    metadata: { turnIndex: run.turnIndex, turnTs: run.turn.ts } };
+  let located = taskTurnLocation(conv, identity);
+  if (conv && !located) {
+    const recovered = await window.api.history.recoverTurn(convId, jobId);
+    if (recovered?.ok) {
+      conv = recovered.conversation || await window.api.history.load(convId);
+      located = taskTurnLocation(conv, identity);
+      if (located) run.recoveryRerender = true;
+    }
   }
+  if (!conv || !located) throw new Error('无法确认本轮原始消息，未覆盖其他消息；请在任务中心核对执行记录。');
+  run.turnIndex = located.index;
 
   // ── 兜底:--resume 撞 "No conversation found" → 自动降级为新会话重跑一次 ──
   //   触发条件:本轮带着 sessionId 去 resume、却失败、且 stderr 明确是会话找不到。
@@ -1684,74 +1798,72 @@ async function finishRunUnsafe(jobId, doneEvt) {
   //   (不再 --resume)。用 run.autoRetried 防止无限重试 —— 只自动救一次。
   //   willAutoRecover 已在上面算好(sessionGone && sessionId && !autoRetried)。
   if (failed && willAutoRecover && conv) {
+    const reset = await window.api.history.completeTurn(convId, jobId, run.turn.ts, { retryWithoutResume: true });
+    if (!reset || reset.ok === false || reset.error) throw new Error(reset?.error || '无法安全准备会话重试');
+    conv = reset.conversation || await window.api.history.load(convId);
+    if (!conv) throw new Error('重试前无法读取对话');
     runs.delete(convId);
     jobToConv.delete(jobId);
-    conv.sessionId = null;
-    // 弹掉失败的占位 turn(send 时压入、assistant 为空),重跑会重新压入一条
-    const lastT = conv.turns[conv.turns.length - 1];
-    const failedUser = lastT ? lastT.user : '';
-    const failedFiles = lastT ? (lastT.files || []) : [];
-    const failedSkill = lastT ? (lastT.skill || null) : null;
-    if (lastT && !lastT.assistant) conv.turns.pop();
-    await window.api.history.save(conv);
     if (isStillViewing()) {
+      currentConv = conv;
       appendMessage('system', '会话已失效，正在自动重新开始（已带上前面的对话继续）…');
     }
-    await relaunchWithoutResume(conv, failedUser, failedFiles, failedSkill, Date.parse(run.turn.ts),
+    await relaunchWithoutResume(conv, run.turn.user || '', run.turn.files || [], run.turn.skill || null, Date.parse(run.turn.ts),
       { taskRun: run.taskRun, inputKind: run.turn.inputKind, retryOfRunId: jobId });
     return;
   }
 
   if (conv) {
-    if (run.pauseRequested && explicitlyAborted) conv.paused = { runId: jobId, at: new Date().toISOString() };
+    const payload = {};
+    if (run.pauseRequested && explicitlyAborted) payload.paused = { runId: jobId, at: new Date().toISOString() };
     else if (failed && window.RelayTaskContinuity?.isResume(run.turn)) {
-      conv.paused = { runId: jobId, at: new Date(run.turn.taskRun.segmentFinishedAt).toISOString() };
+      payload.paused = { runId: jobId, at: new Date(run.turn.taskRun.segmentFinishedAt).toISOString() };
     }
     if (!failed && !explicitlyAborted) {
-      if (conv.paused && conv.paused.runId === run.resumedPauseId) delete conv.paused;
-      if (run.carryContextReason && conv.carryContextOnNextTurn === run.carryContextReason) delete conv.carryContextOnNextTurn;
+      if (run.resumedPauseId) payload.clearPausedRunId = run.resumedPauseId;
+      if (run.carryContextReason) payload.clearCarryContextReason = run.carryContextReason;
     }
-    // 更新本运行对应的 turn。恢复任务必须使用账本里的 turnIndex，
-    // 否则用户在刷新期间又添加了新轮时，会把终态正文写到错误的末轮。
-    const assistantTs = run.turn.assistant ? new Date().toISOString() : null;
+    // Replay must retain the actual finish time, not the time history was opened.
+    const finishedAt = [doneEvt?.relay_task_finished_at, run.turn.taskRun?.segmentFinishedAt]
+      .find(value => Number.isFinite(value) && value > 0 && Number.isFinite(new Date(value).getTime()));
+    const assistantTs = run.turn.assistant
+      ? new Date(finishedAt ?? Date.now()).toISOString() : null;
     run.turn.assistantTs = assistantTs;
-    const targetIndex = Number.isSafeInteger(run.turnIndex)
-      && run.turnIndex >= 0 && run.turnIndex < conv.turns.length
-      ? run.turnIndex : conv.turns.length - 1;
-    const targetTurn = conv.turns[targetIndex];
-    if (targetTurn) {
-      if (run.turn.supplements) targetTurn.supplements = run.turn.supplements.map(input => ({ ...input }));
-      targetTurn.assistant = run.turn.assistant;
-      targetTurn.output = run.turn.output;
-      targetTurn.error = run.turn.error;
-      targetTurn.status = run.turn.status;
-      if (run.turn.taskRun) targetTurn.taskRun = run.turn.taskRun;
-      if (run.turn.inputKind === 'resume') targetTurn.inputKind = 'resume';
-      targetTurn.outputNotice = run.turn.outputNotice || null;
-      if (assistantTs) targetTurn.assistantTs = assistantTs;
-      targetTurn.thinking  = run.turn.thinkingList.join('\n\n--- 下一段思考 ---\n\n') || null;
-      if (run.activityState && window.RelayActivity) {
-        targetTurn.activity = window.RelayActivity.serialize(run.activityState);
-      }
-      // 保留旧协作日志以兼容存量数据；新运行只写统一的 output/activity。
-      if (run.turn.chat && run.turn.chat.length) targetTurn.chat = run.turn.chat;
-    }
+    payload.turn = {
+      assistant: run.turn.assistant, output: run.turn.output, error: run.turn.error, status: run.turn.status,
+      outputNotice: run.turn.outputNotice || null, assistantTs,
+      thinking: run.turn.thinkingList.join('\n\n--- 下一段思考 ---\n\n') || null,
+    };
+    if (run.turn.supplements) payload.turn.supplements = run.turn.supplements.map(input => ({ ...input }));
+    if (run.turn.taskRun) payload.turn.taskRun = run.turn.taskRun;
+    if (run.turn.inputKind === 'resume') payload.turn.inputKind = 'resume';
+    if (run.activityState && window.RelayActivity) payload.turn.activity = window.RelayActivity.serialize(run.activityState);
+    if (run.turn.chat && run.turn.chat.length) payload.turn.chat = run.turn.chat;
     // 仅成功轮写回 sessionId;失败轮保持原 sessionId(可能为空 → 下一轮当新对话重开,不会撞幽灵 session)
     if (!failed && run.sessionId) {
-      conv.sessionId = run.sessionId;
-      if (run.sessionProviderId) conv.sessionProviderId = run.sessionProviderId;
-      conv.sessionProviderRevision = Number(run.sessionProviderRevision || conv.sessionProviderRevision || 0);
-      conv.sessionRouteTier = run.sessionRouteTier || conv.sessionRouteTier || run.sessionModel;
-      conv.sessionAgentEnvironment = run.sessionAgentEnvironment || 'native';
+      payload.session = {
+        sessionId: run.sessionId,
+        ...(run.sessionProviderId ? { sessionProviderId: run.sessionProviderId } : {}),
+        sessionProviderRevision: Number(run.sessionProviderRevision || conv.sessionProviderRevision || 0),
+        sessionRouteTier: run.sessionRouteTier || conv.sessionRouteTier || run.sessionModel,
+        sessionAgentEnvironment: run.sessionAgentEnvironment || 'native',
+      };
     }
-    const saved = await window.api.history.save(conv);
-    conv.updatedAt = saved.updatedAt;
-    if (isStillViewing() && assistantTs && currentAssistantBubble && currentAssistantBubble.isConnected) {
+    const saved = await window.api.history.completeTurn(convId, jobId, run.turn.ts, payload);
+    if (!saved || saved.ok === false || saved.error) throw new Error(saved?.error || '本轮记录保存失败');
+    conv = saved.conversation || await window.api.history.load(convId);
+    if (isStillViewing() && conv) currentConv = conv;
+    if (isStillViewing() && activeView === 'chat' && assistantTs && currentAssistantBubble && currentAssistantBubble.isConnected) {
       appendMessageTime(currentAssistantBubble, assistantTs);
     }
   }
 
+  // The host persists structured deliveries independently of the answer. This
+  // refresh is best effort and must never delay or fail terminal cleanup.
+  void window.relayTurnDeliverables?.refresh(convId, jobId);
+
   // 清理 run
+  if (isStillViewing() && activeView !== 'chat') run.recoveryRerender = true;
   runs.delete(convId);
   jobToConv.delete(jobId);
 
@@ -1759,7 +1871,7 @@ async function finishRunUnsafe(jobId, doneEvt) {
   if (isStillViewing()) {
     if (!failed && run.sessionId) currentSessionId = run.sessionId;  // 失败轮不更新,避免下一轮 resume 幽灵 session
     setRunning(false);
-    if (explicitlyAborted && !run.pauseRequested) appendMessage('system', '已中止');
+    if (activeView === 'chat' && explicitlyAborted && !run.pauseRequested) appendMessage('system', '已中止');
   }
   await refreshHistoryList();
   refreshClaudeRuntimeInfo(convId).catch(() => {});
@@ -1797,6 +1909,10 @@ async function finishRun(jobId, doneEvt) {
     const replacement = runs.get(convId);
     if (currentConv && currentConv.id === convId && !replacement) {
       setRunning(false);
+      // Saving can fail while a settings/library page covers this transcript.
+      // Preserve the already-finished answer in its mounted chat before dropping
+      // the run. This one exceptional projection must not reload stale history.
+      syncRunOutputActivity(run, true);
       appendMessage('error', `任务已经结束，但本轮记录未能完整保存：${(error && error.message) || '未知错误'}`);
     }
     try { await refreshHistoryList(); } catch (_) {}
@@ -2000,11 +2116,17 @@ async function relaunchWithoutResume(conv, userText, files, skill = null, taskSt
   };
   runs.set(convId, run);
   jobToConv.set(clientRunId, convId);
+  refreshHistoryList();
 
-  const result = await window.api.runClaude(
-    promptToSend, null, mode, filesToSend, modelToSend, effortToSend,
-    agentName, workingDirPath, orchAgents, convId, true, clientRunId, convId, { userPrompt, taskStartedAt: startedAt, taskRun, ...(inputKind ? { inputKind } : {}), retryOfRunId: continuity?.retryOfRunId, turnRef: { index: turnIndex, ts: turn.ts } }, sessionRouteForRun, conv.executionMode || { kind: 'default' },
-  );
+  let result;
+  try {
+    result = await window.api.runClaude(
+      promptToSend, null, mode, filesToSend, modelToSend, effortToSend,
+      agentName, workingDirPath, orchAgents, convId, true, clientRunId, convId, { userPrompt, taskStartedAt: startedAt, taskRun, ...(inputKind ? { inputKind } : {}), retryOfRunId: continuity?.retryOfRunId, turnRef: { index: turnIndex, ts: turn.ts } }, sessionRouteForRun, conv.executionMode || { kind: 'default' },
+    );
+  } catch (error) {
+    result = { error: error && error.message || '自动重试启动失败' };
+  }
   if (!result || result.error) {
     run.launchError = result && result.error || '任务启动失败';
     if (runs.get(convId) === run) runs.delete(convId);
@@ -2028,6 +2150,7 @@ async function relaunchWithoutResume(conv, userText, files, skill = null, taskSt
       appendMessage('error', (result && result.error) || '自动重试启动失败');
       setRunning(false);
     }
+    refreshHistoryList();
     return;
   }
   if (runs.get(convId) === run) {
@@ -2169,9 +2292,10 @@ function taskHasEmptyInterruptedProgress(task, turn) {
     && !turn?.chat?.length;
 }
 
-function taskTurnLocation(conv, task, { allowLastFallback = false } = {}) {
+function taskTurnLocation(conv, task) {
   if (!conv || !Array.isArray(conv.turns) || !conv.turns.length || !task) return null;
   const source = taskSource(task);
+  if (source.conversationId && source.conversationId !== conv.id) return null;
   const metadata = task.metadata && typeof task.metadata === 'object' ? task.metadata : {};
   const preferredIndex = Number.isSafeInteger(source.turnIndex)
     ? source.turnIndex : (Number.isSafeInteger(metadata.turnIndex) ? metadata.turnIndex : null);
@@ -2180,23 +2304,24 @@ function taskTurnLocation(conv, task, { allowLastFallback = false } = {}) {
     if (!turn) return false;
     if (turn.runId && task.runId && turn.runId !== task.runId) return false;
     if (preferredTs && turn.ts && turn.ts !== preferredTs) return false;
-    return true;
+    // An index is a hint, never identity. Older turns without a runId may
+    // still be matched by their exact send timestamp, but never by position.
+    return !!(task.runId && turn.runId === task.runId)
+      || !!(preferredTs && turn.ts === preferredTs);
   };
   if (preferredIndex != null && preferredIndex >= 0 && preferredIndex < conv.turns.length
       && accepts(conv.turns[preferredIndex])) {
     return { index: preferredIndex, turn: conv.turns[preferredIndex], exact: true };
   }
   if (task.runId) {
-    const byRunId = conv.turns.findIndex((turn) => turn && turn.runId === task.runId);
+    const byRunId = conv.turns.findIndex((turn) => turn && turn.runId === task.runId && accepts(turn));
     if (byRunId >= 0) return { index: byRunId, turn: conv.turns[byRunId], exact: true };
   }
   if (preferredTs) {
     const byTs = conv.turns.findIndex((turn) => turn && turn.ts === preferredTs && accepts(turn));
     if (byTs >= 0) return { index: byTs, turn: conv.turns[byTs], exact: true };
   }
-  if (!allowLastFallback) return null;
-  const index = conv.turns.length - 1;
-  return { index, turn: conv.turns[index], exact: false };
+  return null;
 }
 
 function taskErrorText(task, fallback = '任务未完成') {
@@ -2302,6 +2427,7 @@ async function handleTaskLifecycleEvent(event, { settleNow = false } = {}) {
   }
   const task = taskRunFromEvent(event) || (event && event.runId ? event : null);
   if (!task || !task.runId) return;
+  syncHistoryTaskDeletionState(task);
   if (taskIsCreation(task)) {
     if (taskIsTerminal(task)) {
       if (settleNow) await reconcileCreationTask(task);
@@ -2320,6 +2446,7 @@ async function handleTaskLifecycleEvent(event, { settleNow = false } = {}) {
 
 if (window.api.tasks && typeof window.api.tasks.onEvent === 'function') {
   window.api.tasks.onEvent((event) => {
+    historyTaskEventRevision++;
     if (restoringTaskLifecycle) bufferedTaskLifecycleEvents.push(event);
     else void handleTaskLifecycleEvent(event);
   });
@@ -2339,6 +2466,7 @@ async function restoreActiveRunsFromLedger() {
     snapshot = await window.api.tasks.snapshot({ limit: 2000 });
     if (!snapshot || snapshot.ok === false) return;
     const ledgerTasks = Array.isArray(snapshot.items) ? snapshot.items : [];
+    syncHistoryTaskDeletionSnapshot(ledgerTasks);
     for (const task of ledgerTasks) {
       const runId = task && task.runId;
       const source = taskSource(task);
@@ -2352,9 +2480,24 @@ async function restoreActiveRunsFromLedger() {
         continue;
       }
       if (!taskCanRestoreChat(task, snapshot.epoch) || runs.has(convId)) continue;
-      const conv = await window.api.history.load(convId);
-      if (!conv || !Array.isArray(conv.turns) || !conv.turns.length) continue;
-      const located = taskTurnLocation(conv, task, { allowLastFallback: !taskIsTerminal(task) });
+      let conv = await window.api.history.load(convId);
+      if (!conv || !Array.isArray(conv.turns)) continue;
+      let located = taskTurnLocation(conv, task);
+      if (!located) {
+        // The host can reconstruct a missing turn only from a durable original
+        // input belonging to this run. Never borrow another turn's prompt or time.
+        let recovered;
+        try { recovered = await window.api.history.recoverTurn(convId, runId); }
+        catch (error) { console.warn('读取任务原始消息失败', runId, error); }
+        if (recovered?.ok) {
+          conv = recovered.conversation || await window.api.history.load(convId);
+          located = taskTurnLocation(conv, task);
+        }
+        if (!located) {
+          console.warn('任务原始消息无法恢复，保留在任务中心，未改动其他消息', runId);
+          continue;
+        }
+      }
       const repairInterrupted = located && taskHasEmptyInterruptedProgress(task, located.turn);
       // 终态历史只修复能精确对应且仍缺回复的占位轮，避免重放旧任务覆盖正常历史。
       if (!located || (taskIsTerminal(task) && !repairInterrupted
@@ -2387,6 +2530,7 @@ async function restoreActiveRunsFromLedger() {
         runId, inputKind: savedTurn.inputKind, taskRun: window.RelayTaskContinuity?.normalize(savedTurn.taskRun),
         output: progress?.output || (repairInterrupted ? null : savedTurn.output) || null,
         files: Array.isArray(savedTurn.files) ? savedTurn.files : [],
+        deliverables: savedTurn.deliverables || null,
         skill: savedTurn.skill || null,
         supplements: Array.isArray(savedTurn.supplements) ? savedTurn.supplements.map(input => ({ ...input })) : [],
         ts: savedTurn.ts || task.createdAt || new Date().toISOString(),
@@ -2482,8 +2626,11 @@ async function restoreActiveRunsFromLedger() {
   // 第二次权威快照关闭「首次 snapshot 时还在跑，重放前已终态」的竞态窗口。
   // 此时 job-done/实时事件都已先消费，只对仍留在恢复表的任务做降级收尾。
   try {
+    const deletionSnapshotRevision = historyTaskEventRevision;
     const finalSnapshot = await window.api.tasks.snapshot({ limit: 2000 });
     if (finalSnapshot && finalSnapshot.ok !== false && Array.isArray(finalSnapshot.items)) {
+      // Do not let an older async snapshot resurrect a task already ended by an event.
+      if (deletionSnapshotRevision === historyTaskEventRevision) syncHistoryTaskDeletionSnapshot(finalSnapshot.items);
       for (const task of finalSnapshot.items) {
         if (taskIsCreation(task)) {
           if (taskIsTerminal(task) && restoredCreationRunIds.has(task.runId)) {
@@ -2654,7 +2801,7 @@ function handleClaudeEvent(evt) {
       run.taskRun = window.RelayTaskContinuity.normalize(run.activityState.taskRun);
       run.turn.taskRun = run.taskRun;
     }
-    updateRunActivity(run, onView, activityEventNeedsRender(evt));
+    if (activityEventNeedsRender(evt)) scheduleRunOutputActivity(run, onView);
   }
 
   if (evt.type === 'system' && evt.subtype === 'init') {
@@ -2699,8 +2846,9 @@ function handleClaudeEvent(evt) {
   }
   if (evt.type === 'assistant' || evt.type === 'stream_event') {
     // A text block is provisional until the backend confirms this run's final result.
-    const raw = evt.event || {};
-    scheduleRunOutputActivity(run, onView, evt.type === 'assistant' || raw.type === 'message_stop');
+    // Complete SDK frames and message_stop can arrive in bursts as well; only
+    // run-level result/terminal persistence requires an immediate flush.
+    scheduleRunOutputActivity(run, onView);
     return;
   }
 
@@ -2824,6 +2972,7 @@ let streamRenderBubble = null;   // 本轮渲染锚定的气泡,切换会话后�
 // 切换会话时同时解除旧消息树的所有持有者，后台任务只保留可重建的数据。
 function clearConversationMessages() {
   detachStreamRenderTarget();
+  window.relayTurnDeliverables?.clear();
   window.RelayActivity?.clearTaskSummaries(messagesEl);
   // Background tasks retain their state, never the detached transcript tree.
   // loadConversation already rebuilds these view references from run.turn and
@@ -2886,6 +3035,7 @@ function renderRunOutput(run) {
     }
     if (currentAssistantBubble === bubble) detachStreamRenderTarget();
     run.outputBubble = null;
+    window.relayTurnDeliverables?.render(run.turn, { conversationId: run.convId, turnIndex: run.turnIndex });
     return;
   }
   if (!bubble || !bubble.isConnected) {
@@ -2893,11 +3043,13 @@ function renderRunOutput(run) {
     run.outputBubble = bubble;
     bubble.dataset.turn = String(run.turnIndex ?? 0);
   }
+  window.RelayTurnDeliveryReferences?.stampOwner(bubble, run.convId, run.turn, run.turnIndex);
   currentAssistantBubble = bubble;
   bubble.dataset.raw = text;
   // Render the confirmed body once, then install final-answer actions.
   renderStreamBubble(bubble);
   flushStreamRender();
+  window.relayTurnDeliverables?.render(run.turn, { conversationId: run.convId, turnIndex: run.turnIndex });
   scrollToBottom();
 }
 
@@ -3096,6 +3248,7 @@ function buildContextPreamble(turns, conversation = null) {
 // 发送 / 中止
 // ─────────────────────────────────────────
 async function send(options = null) {
+  window.relayComposerPrewarm?.cancel();
   const sourceOwner = composerDraftOwner;
   const sourceDraft = readComposerDraft();
   const explicit = !!(options && typeof options === 'object' && options.explicit === true);
@@ -3336,7 +3489,7 @@ async function send(options = null) {
   const sentOrchestrateAgents = Array.isArray(currentOrchestrateAgents) ? [...currentOrchestrateAgents] : null;
   const sessionRouteForRun = targetSessionRoute;
   sentConv.turns.push(pendingTurn);
-  pendingConversationSends.add(convId);
+  setPendingConversationSend(convId, true);
   let savePromise;
   let placeholderPersisted = false;
   try {
@@ -3355,6 +3508,8 @@ async function send(options = null) {
     applyPermissionMetadata(sentConv, permission);
     if (currentConv === sentConv) { currentPermissionState = permission; syncPermissionControl(); }
     unsavedWorkspaceConversations.delete(sentConv);
+    if (!explicit) await resumeBrowserFeedbackForSubmission(sourceDraft, convId,
+      () => currentConv === sentConv && composerDraftOwner === sourceOwner);
     pendingConversationSaves.delete(convId);
   } catch (error) {
     if (pendingConversationSaves.get(convId) === savePromise) pendingConversationSaves.delete(convId);
@@ -3365,7 +3520,7 @@ async function send(options = null) {
       // unlaunched placeholder while keeping this conversation's send gate.
       try { await window.api.history.save(sentConv); } catch (_) {}
     }
-    pendingConversationSends.delete(convId);
+    setPendingConversationSend(convId, false);
     if (consumeComposer) restoreFailedComposerDraft(sourceOwner, sourceDraft);
     const message = `对话保存失败：${error && error.message || '请稍后重试'}`;
     if (currentConv === sentConv) {
@@ -3418,7 +3573,7 @@ async function send(options = null) {
   };
   runs.set(convId, run);
   jobToConv.set(clientRunId, convId);
-  pendingConversationSends.delete(convId);
+  setPendingConversationSend(convId, false);
   if (currentConv === sentConv) syncPermissionControl();
   refreshHistoryList();
 
@@ -3464,6 +3619,7 @@ async function send(options = null) {
       showRunError(run, run.launchError);
       setRunning(false);
     }
+    refreshHistoryList();
     return { ok: false, error: (result && result.error) || '启动失败', runId: clientRunId, conversationId: convId };
   }
 
@@ -3505,8 +3661,14 @@ async function send(options = null) {
   return { ok: true, runId: result.jobId || clientRunId, conversationId: convId };
 }
 
+async function resumeBrowserFeedbackForSubmission(draft, conversationId, isCurrent) {
+  const results = await window.RelayBrowserFeedback?.resumeForSubmission(draft, conversationId, window.api.browser, isCurrent);
+  const failed = results?.find(result => !result.ok);
+  if (failed && isCurrent()) showToast(failed.error || '网页仍暂停，请在浏览器中允许继续');
+}
 function readComposerDraft() {
   return { prompt: inputEl.value, files: attachedFiles.map(file => ({ ...file })),
+    browserFeedbackResumes: window.RelayBrowserFeedback?.retainResumes(composerDraftOwner, inputEl.value) || [],
     skill: selectedQuickSkill ? { ...selectedQuickSkill } : null,
     selectionStart: inputEl.selectionStart, selectionEnd: inputEl.selectionEnd,
     scrollTop: inputEl.scrollTop || 0 };
@@ -3530,6 +3692,7 @@ function renderComposerDraft() {
   inputEl.scrollTop = composerDraftOwner.scrollTop || 0;
 }
 function activateComposerDraft(conversationId = null) {
+  window.relayComposerPrewarm?.cancel();
   captureComposerDraft();
   const next = conversationId ? composerDrafts.get(conversationId) || {} : {};
   if (conversationId) composerDrafts.set(conversationId, next);
@@ -3724,10 +3887,10 @@ async function pauseCurrent() {
     return;
   }
   const operation = Promise.resolve().then(() => pauseRun(run));
-  conversationControls.set(convId, operation); syncRunningUI();
+  conversationControls.set(convId, operation); syncHistoryDeletionAvailability(convId); syncRunningUI();
   try { await operation; }
   catch (error) { showToast(error && error.message || '暂停失败，请重试'); }
-  finally { conversationControls.delete(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
+  finally { conversationControls.delete(convId); syncHistoryDeletionAvailability(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
 }
 
 async function submitSupplement(draft, convId) {
@@ -3765,10 +3928,10 @@ async function submitSupplement(draft, convId) {
       showToast(response && (response.message || response.error) || '补充尚未送达，内容已保留');
       return { ok: false, pending: true };
     });
-    operation.kind = 'supplement'; conversationControls.set(convId, operation); syncRunningUI();
+    operation.kind = 'supplement'; conversationControls.set(convId, operation); syncHistoryDeletionAvailability(convId); syncRunningUI();
     try { return await operation; }
     catch (error) { showToast(error && error.message || '暂时无法确认接收状态，补充内容已保留'); return { ok: false, pending: true }; }
-    finally { conversationControls.delete(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
+    finally { conversationControls.delete(convId); syncHistoryDeletionAvailability(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
   }
   const payload = { explicit: true, ...draft };
   if (draft.sendAsNew) { delete payload.messageId; delete payload.jobId; delete payload.sendAsNew; }
@@ -3844,7 +4007,7 @@ function applyRunSupplement(run, input) {
     if (hasSupplementTimeline(run.turn)) syncRunOutputActivity(run, true);
     else appendSupplementMessage(accepted, run.turnIndex, run.activityEl && run.activityEl.isConnected ? run.activityEl : run.outputBubble);
     scrollToBottom();
-  }
+  } else run.outputPresentationDirty = true;
   return accepted;
 }
 
@@ -3854,6 +4017,7 @@ async function steerCurrent(options = null) {
   if (!run) return { ok: false, error: '任务状态已更新，请重新发送' };
   if (conversationControls.has(convId)) return { ok: false, pending: true };
   const explicit = !!(options && options.explicit);
+  const feedbackDraft = !explicit ? readComposerDraft() : null, feedbackOwner = composerDraftOwner;
   if (explicit && options.jobId && options.jobId !== run.jobId) return { ok: false, pending: true };
   // Flush buffered tokens before capturing the send boundary. The first segment
   // must match the text visible when the user submits, even within our throttle.
@@ -3876,6 +4040,9 @@ async function steerCurrent(options = null) {
     setSelectedQuickSkill(null); hideSkillQuickPopup(); autoGrowInput();
   }
   const operation = Promise.resolve().then(async () => {
+    // Resume only the exact feedback the user submitted, after all input validation.
+    if (feedbackDraft) await resumeBrowserFeedbackForSubmission(feedbackDraft, convId,
+      () => currentConv?.id === convId && composerDraftOwner === feedbackOwner && runs.get(convId) === run);
     // This writes to the same persistent Query. It must never interrupt or create a run.
     const response = await window.api.steerClaude({ jobId: run.jobId, conversationId: convId, ...draft });
     const observed = (run.turn.supplements || []).find(input => input.id === draft.messageId);
@@ -3889,7 +4056,7 @@ async function steerCurrent(options = null) {
     return { ok: true, runId: run.jobId, conversationId: convId, input };
   });
   operation.kind = 'supplement';
-  conversationControls.set(convId, operation); syncRunningUI();
+  conversationControls.set(convId, operation); syncHistoryDeletionAvailability(convId); syncRunningUI();
   try { return await operation; }
   catch (error) {
     // If the acceptance event arrived but the invoke receipt was lost, do not resend.
@@ -3902,7 +4069,7 @@ async function steerCurrent(options = null) {
     showToast(error && error.message || '补充提示尚未发送，已保留');
     return { ok: false, pending: true };
   }
-  finally { conversationControls.delete(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
+  finally { conversationControls.delete(convId); syncHistoryDeletionAvailability(convId); if (currentConv && currentConv.id === convId) syncRunningUI(); }
 }
 
 // 中止【当前所看会话】的运行
@@ -3984,7 +4151,29 @@ function autoGrowInput() {
   // 只有内容超过最大高度时才显示滚动条,单行/未超高时隐藏
   inputEl.style.overflowY = full > max ? 'auto' : 'hidden';
 }
-inputEl.addEventListener('input', autoGrowInput);
+function composerPrewarmIntent() {
+  if (activeView !== 'chat' || !providerRoutingLoaded || !currentConv?.id || !inputEl.value.trim()
+      || ['agent', 'orchestrate'].includes(currentMode) || isConvRunning(currentConv.id)
+      || pendingConversationSends.has(currentConv.id) || conversationControls.has(currentConv.id)) return null;
+  const route = sessionRouteSnapshot(configuredChatRoute(currentModel), currentModel);
+  if (!route) return null;
+  const args = [currentConv.id, currentSessionId, currentMode, runtimeModelForValue(currentModel),
+    currentEffort, currentAgent, currentWorkingDir?.path || null, route];
+  return { key: JSON.stringify([pageNavigationVersion, ...args]), args, conversation: currentConv, draft: composerDraftOwner };
+}
+window.relayComposerPrewarm = window.RelayComposerPrewarm.create({
+  readIntent: composerPrewarmIntent,
+  dispatch: intent => window.api.prespawnClaude(...intent.args).then(result => {
+    if (result?.ok && currentConv === intent.conversation && composerDraftOwner === intent.draft && activeView === 'chat') {
+      void refreshClaudeRuntimeInfo(intent.conversation.id).catch(() => {});
+    }
+    return result;
+  }),
+});
+inputEl.addEventListener('input', () => {
+  autoGrowInput();
+  window.relayComposerPrewarm.schedule();
+});
 
 // ─────────────────────────────────────────
 // 附件上传(点击 + / 拖拽)
@@ -4199,6 +4388,17 @@ function addFiles(list, owner = composerDraftOwner) {
   }
   if (owner === composerDraftOwner) { attachedFiles = files.map(file => ({ ...file })); renderAttachments(); }
 }
+
+// Browser feedback is a user-reviewed composer draft, never an automatic send.
+window.relayAddBrowserFeedback = item => {
+  const result = window.RelayBrowserFeedback.appendDraft({ ...readComposerDraft(), composerSubmitting: composerDraftOwner.composerSubmitting }, item, currentConv?.id);
+  if (!result.ok) return result;
+  inputEl.value = result.draft.prompt;
+  attachedFiles = result.draft.files;
+  composerDraftOwner.browserFeedbackResumes = result.draft.browserFeedbackResumes;
+  renderAttachments(); autoGrowInput(); captureComposerDraft(); inputEl.focus();
+  return { ok: true };
+};
 
 // The + menu owns attachments, project selection and execution modes.
 getProjectComposer();
@@ -4691,6 +4891,9 @@ async function refreshClaudeRuntimeInfo(convId, { includeContext = true, context
   if (contextOnly && !includeContext) return null;
   const requestedConv = currentConv && currentConv.id === convId ? currentConv : null;
   const requestedSessionId = requestedConv?.sessionId || null;
+  const requestedDiagnosticsRun = !contextOnly ? runs.get(convId) : null;
+  const requestedDiagnosticsState = requestedDiagnosticsRun?.activityState;
+  const requestedDiagnosticsEpoch = requestedDiagnosticsState?.contextEpoch;
   const requestedModel = currentModel;
   const requestedRoute = configuredChatRoute(requestedModel);
   const requestRevision = claudeRuntimeUIRevision;
@@ -4710,6 +4913,17 @@ async function refreshClaudeRuntimeInfo(convId, { includeContext = true, context
       && (info.providerRevision == null
         || Number(info.providerRevision) === Number(requestedRoute.providerRevision || 0)));
     const matchesModel = !info.routeTier || info.routeTier === requestedModel;
+    if (!contextOnly && isCurrentRequest && matchesProvider && matchesModel) {
+      const run = runs.get(convId);
+      const diagnosticSessionId = info.diagnostics?.sessionId;
+      const activeSessionId = run?.activityState?.session?.id || run?.sessionId || requestedSessionId;
+      if (run && run === requestedDiagnosticsRun && run.activityState === requestedDiagnosticsState
+          && run.activityState?.contextEpoch === requestedDiagnosticsEpoch
+          && (!diagnosticSessionId || !activeSessionId || diagnosticSessionId === activeSessionId)
+          && run.activityState && window.RelayActivity?.ingestDiagnostics?.(run.activityState, info.diagnostics?.diagnostics)) {
+        scheduleRunOutputActivity(run, isMountedChatJob(run.jobId));
+      }
+    }
     if (!contextOnly && isCurrentRequest && matchesProvider && matchesModel && Array.isArray(info.models)) {
       supportedClaudeModels = info.models;
       supportedClaudeProviderId = info.providerId || '';
@@ -4774,7 +4988,6 @@ async function selectModelTier(tier) {
     return;
   }
   const previousModel = currentModel;
-  const previousEffort = currentEffort;
   const nextEffort = effortForTier(tier);
   const changingConv = currentConv;
   const requestRevision = ++claudeRuntimeUIRevision;
@@ -4795,6 +5008,9 @@ async function selectModelTier(tier) {
     const result = await window.api.setClaudeRuntime(
       convId, runtimeModelForValue(tier.value), nextEffort,
     );
+    // The host persists only runtime fields on the latest history. Never save
+    // this captured conversation after awaiting a possibly slow session exit.
+    if (!isCurrentSelection() || result?.stale) return;
     if (!result || !result.ok) throw new Error(result && result.message || '模型切换失败');
     let appliedEffort = Object.prototype.hasOwnProperty.call(result, 'effort') ? result.effort || null : nextEffort;
     const persistedRouteChanged = !!(changingConv.sessionProviderId && result.providerId
@@ -4825,6 +5041,14 @@ async function selectModelTier(tier) {
     }
     changingConv.model = tier.value;
     changingConv.effort = appliedEffort;
+    for (const [key, value] of Object.entries(result.runtimePatch || {})) {
+      if (value == null && !['model', 'effort', 'sessionId'].includes(key)) delete changingConv[key];
+      else changingConv[key] = value;
+    }
+    appliedEffort = changingConv.effort || null;
+    if (Object.prototype.hasOwnProperty.call(result.runtimePatch || {}, 'sessionId')) {
+      currentSessionId = changingConv.sessionId || null;
+    }
     if (previousModel !== tier.value || result.restartRequired || persistedRouteChanged) {
       contextUsageByConv.delete(convId);
       delete changingConv.contextUsage;
@@ -4838,11 +5062,12 @@ async function selectModelTier(tier) {
       }
       updateModelSwitchUI();
     }
-    try { await window.api.history.save(changingConv); } catch (_) {}
   } catch (e) {
     if (isCurrentSelection()) {
-      currentModel = previousModel;
-      currentEffort = previousEffort;
+      // A previous UI value may belong to another still-pending selection.
+      // Roll back to the conversation's committed metadata instead.
+      currentModel = changingConv.model || previousModel;
+      currentEffort = changingConv.effort || null;
       updateModelSwitchUI();
       showToast(e.message || '模型切换失败');
     }
@@ -4857,7 +5082,6 @@ async function selectModelTier(tier) {
 async function selectEffortLevel(level) {
   const allowed = supportedEffortLevelsForTier();
   if (!allowed.includes(level) || level === currentEffort) return;
-  const previousEffort = currentEffort;
   const changingConv = currentConv;
   const changingModel = currentModel;
   const requestRevision = ++claudeRuntimeUIRevision;
@@ -4875,19 +5099,26 @@ async function selectEffortLevel(level) {
     const result = await window.api.setClaudeRuntime(
       convId, runtimeModelForValue(changingModel), level,
     );
+    if (!isCurrentSelection() || result?.stale) return;
     if (!result || !result.ok) throw new Error(result && result.message || '推理强度切换失败');
     const appliedEffort = Object.prototype.hasOwnProperty.call(result, 'effort') ? result.effort || null : level;
     if (result.applied) changingConv.sessionModel = changingModel;
     changingConv.model = changingModel;
     changingConv.effort = appliedEffort;
+    for (const [key, value] of Object.entries(result.runtimePatch || {})) {
+      if (value == null && !['model', 'effort', 'sessionId'].includes(key)) delete changingConv[key];
+      else changingConv[key] = value;
+    }
+    if (Object.prototype.hasOwnProperty.call(result.runtimePatch || {}, 'sessionId')) {
+      currentSessionId = changingConv.sessionId || null;
+    }
     if (isCurrentSelection()) {
-      currentEffort = appliedEffort;
+      currentEffort = changingConv.effort || null;
       updateModelSwitchUI();
     }
-    try { await window.api.history.save(changingConv); } catch (_) {}
   } catch (e) {
     if (isCurrentSelection()) {
-      currentEffort = previousEffort;
+      currentEffort = changingConv.effort || null;
       updateModelSwitchUI();
       if (modelPopup && modelPopup.classList.contains('show')) {
         modelPopupTransition = 'refresh';
@@ -5111,8 +5342,8 @@ function renderModelPopupAdvanced(pop) {
     const fraction = pointerFraction ?? visual.fraction;
     // The track is inset one pixel; its flat fill edge stays beneath the thumb
     // center instead of introducing a rounded gap beside the white control.
-    fill.style.width = `calc(12px + (100% - 24px) * ${fraction})`;
-    thumb.style.left = `calc(13px + (100% - 26px) * ${fraction})`;
+    fill.style.width = `calc(var(--effort-thumb-inset) - 1px + (100% - var(--effort-control-size) + 2px) * ${fraction})`;
+    thumb.style.left = `calc(var(--effort-thumb-inset) + (100% - var(--effort-control-size)) * ${fraction})`;
     strengthTitle.textContent = EFFORT_LABELS[visual.level] || visual.level;
     if (paintedIndex !== visual.index && !reducedMotion()) {
       const direction = visual.index > paintedIndex ? 1 : -1;
@@ -5137,7 +5368,7 @@ function renderModelPopupAdvanced(pop) {
   let gesture = null;
   const paintPointer = (event) => {
     const track = range.getBoundingClientRect();
-    const fraction = Math.max(0, Math.min(1, (event.clientX - track.left - 13) / Math.max(1, track.width - 26)));
+    const fraction = Math.max(0, Math.min(1, (event.clientX - track.left - track.height / 2) / Math.max(1, track.width - track.height)));
     range.value = String(Math.round(fraction * (levels.length - 1)));
     paint(range.value, fraction);
   };
@@ -5382,6 +5613,7 @@ function showAppView(view, navigationIntent = null) {
     });
     if (activeView === 'chat') chatWasFollowingOutput = stickToBottom;
   }
+  if (view !== 'chat') window.relayComposerPrewarm?.cancel();
   activeView = view;
   projectComposer?.close();
   if (view === 'chat' || view === 'create') lastConversationView = view;
@@ -5395,12 +5627,18 @@ function showAppView(view, navigationIntent = null) {
   syncPageNavigation();
   window.dispatchEvent(new CustomEvent('relay:view-changed', { detail: { view, previousView: previous && previous.dataset.appView } }));
   if (view === 'chat' && navigationIntent == null) emitConversationChanged(currentConv && currentConv.id);
+  // A second click can supersede the first return frame without changing views.
+  // It still owns the pending catch-up, but must not restore an old scroll offset.
+  if (!changed && view === 'chat') requestAnimationFrame(() => {
+    if (pageNavigationVersion === navigationVersion && activeView === 'chat') flushVisibleRunPresentation();
+  });
   if (changed) requestAnimationFrame(() => {
     if (pageNavigationVersion !== navigationVersion || activeView !== view) return;
     target.querySelectorAll('.messages, .workspace-page-body, .modal-body, .set-content, .set-nav, .sv-listbody, .sv-detail-column').forEach((el) => {
       if (pageScrollPositions.has(el)) el.scrollTop = pageScrollPositions.get(el);
     });
     if (view === 'chat') {
+      flushVisibleRunPresentation();
       stickToBottom = chatWasFollowingOutput;
       if (stickToBottom) scrollToBottom(true);
       scheduleConversationIndexUpdate();
@@ -6226,10 +6464,16 @@ if ($('cvPrompt')) $('cvPrompt').addEventListener('input', autoGrowCvPrompt);
 
 // ── 资料库主页面：真实本地资料，挂载后保留页面与查询状态 ──
 let myWorkEl = null;
-const libState = { fileType: 'all', fileView: 'grid', query: '', renderKey: null, searchTimer: null };
+const libState = { kind: 'output', fileType: 'all', fileView: 'grid', query: '', renderKey: null, searchTimer: null };
 const libSources = {
-  images: { items: null, error: '', loading: false, request: 0, loadedAt: 0, promise: null },
-  files: { items: null, error: '', loading: false, request: 0, loadedAt: 0, promise: null },
+  images: { items: null, error: '', loading: false, request: 0, loadedAt: 0, promise: null, truncated: false, warnings: [] },
+  files: { items: null, error: '', loading: false, request: 0, loadedAt: 0, promise: null, truncated: false, warnings: [] },
+};
+const LIB_KINDS = [['output', '成果'], ['process', '过程文件'], ['legacy', '历史文件']];
+const LIB_KIND_DETAILS = {
+  output: '集中查看成果目录中的文件与生成的图片。',
+  process: '查看会话临时目录中的脚本、草稿和中间文件；删除会话时可能一并清理。',
+  legacy: '保留从历史记录发现的其他文件，它们尚未确认为交付成果。',
 };
 const LIB_TYPES = [['all', '全部'], ['document', '文档'], ['image', '图片'], ['spreadsheet', '表格'], ['presentation', '演示文稿'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
 const LIB_FILE_ICONS = {
@@ -6269,21 +6513,28 @@ function normalizeLibraryItems(items, source) {
   return (Array.isArray(items) ? items : []).filter(item => item && typeof item.path === 'string' && item.path.trim()).map(item => {
     const name = typeof item.name === 'string' && item.name ? item.name : item.path.split(/[\\/]/).pop();
     const ext = String(item.ext || (name.includes('.') ? name.split('.').pop() : '')).toLowerCase();
-    const type = source === 'images' || /^(png|jpe?g|webp|gif|bmp|svg)$/.test(ext) ? 'image' : LIB_TYPES.some(([value]) => value === item.type) ? item.type : 'other';
-    return { path: item.path, name, ext, type, mtime: Number(item.mtime) || 0, size: Number.isFinite(item.size) ? item.size : null, generatedImage: source === 'images' };
+    const type = item.isDirectory ? 'other' : source === 'images' || /^(png|jpe?g|webp|gif|bmp|svg)$/.test(ext) ? 'image' : LIB_TYPES.some(([value]) => value === item.type) ? item.type : 'other';
+    const kind = LIB_KINDS.some(([value]) => value === item.kind) ? item.kind : source === 'images' ? 'output' : 'legacy';
+    return { path: item.path, name, ext, type, kind, isDirectory: item.isDirectory === true, mtime: Number(item.mtime) || 0, size: Number.isFinite(item.size) ? item.size : null, generatedImage: source === 'images',
+      ...(typeof item.conversationId === 'string' && item.conversationId ? { conversationId: item.conversationId } : {}) };
   });
 }
 function libraryItems() {
   const byPath = new Map();
   // 图片库提供明确的生成图身份；重复文件保留这一身份，删除时使用原图片接口。
   for (const kind of ['files', 'images']) {
-    for (const item of libSources[kind].items || []) byPath.set(libPathKey(item.path), item);
+    for (const item of libSources[kind].items || []) {
+      const key = libPathKey(item.path), previous = byPath.get(key);
+      // 保留目录扫描的明确归属，也保留图片库的删除接口身份。
+      byPath.set(key, previous && item.generatedImage ? { ...previous, generatedImage: true,
+        kind: previous.kind === 'legacy' ? item.kind : previous.kind } : item);
+    }
   }
   return [...byPath.values()].sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
 }
 function filteredLibraryItems() {
   const query = libState.query.trim().toLocaleLowerCase();
-  return libraryItems().filter(item => (libState.fileType === 'all' || item.type === libState.fileType)
+  return libraryItems().filter(item => item.kind === libState.kind && (libState.fileType === 'all' || item.type === libState.fileType)
     && (!query || `${item.name}\n${item.path}`.toLocaleLowerCase().includes(query)));
 }
 function mountLibraryPage() {
@@ -6293,7 +6544,8 @@ function mountLibraryPage() {
   myWorkEl = document.createElement('section');
   myWorkEl.className = 'libp-content';
   myWorkEl.innerHTML = `
-    <div class="libp-head"><div><h1>资料库</h1><p>集中查看本地文件与生成的图片。</p></div><span class="libp-total" aria-live="polite"></span></div>
+    <div class="libp-head"><div><h1>资料库</h1><p data-lib-description>${LIB_KIND_DETAILS[libState.kind]}</p></div><span class="libp-total" aria-live="polite"></span></div>
+    <div class="libp-kinds" role="group" aria-label="文件用途">${LIB_KINDS.map(([kind, label]) => `<button type="button" data-lib-kind="${kind}" aria-pressed="${kind === libState.kind}">${label}<span data-lib-count="${kind}"></span></button>`).join('')}</div>
     <div class="libp-toolbar"><div class="libp-filters" role="group" aria-label="资料类型">${LIB_TYPES.map(([type, label]) => `<button type="button" data-lib-filter="${type}" aria-pressed="${type === libState.fileType}">${label}</button>`).join('')}</div>
       <label class="libp-search">${LIB_UI_ICONS.search}<input type="search" placeholder="搜索资料" aria-label="搜索资料" autocomplete="off" spellcheck="false"></label>
     </div>
@@ -6308,6 +6560,12 @@ function mountLibraryPage() {
   host.appendChild(myWorkEl);
   if (typeof bindTransientScrollbar === 'function') bindTransientScrollbar(host);
   myWorkEl.addEventListener('click', event => {
+    const kind = event.target.closest('[data-lib-kind]');
+    if (kind && LIB_KINDS.some(([value]) => value === kind.dataset.libKind)) {
+      libState.kind = kind.dataset.libKind;
+      if (kind.hasAttribute('data-lib-reset')) { libState.query = ''; libState.fileType = 'all'; myWorkEl.querySelector('.libp-search input').value = ''; }
+      renderLibrary(); host.scrollTop = 0; return;
+    }
     const filter = event.target.closest('[data-lib-filter]');
     if (filter) { libState.fileType = filter.dataset.libFilter; renderLibrary(); host.scrollTop = 0; return; }
     const view = event.target.closest('[data-lib-view]');
@@ -6351,6 +6609,8 @@ function loadLibrarySource(kind, force = false) {
     if (request !== source.request) return;
     if (!result || !result.ok) throw new Error(result && result.error ? result.error : '未能读取本地资料');
     source.items = normalizeLibraryItems(result.items, kind);
+    source.truncated = result.truncated === true;
+    source.warnings = Array.isArray(result.warnings) ? result.warnings : [];
     source.loadedAt = Date.now();
   }).catch(error => {
     if (request === source.request) source.error = error && error.message ? error.message : '读取失败';
@@ -6370,13 +6630,22 @@ function renderLibrary() {
   const host = $('libraryPageBody');
   const scrollTop = host ? host.scrollTop : 0;
   const items = filteredLibraryItems();
-  const required = libState.fileType === 'all' || libState.fileType === 'image' ? ['images', 'files'] : ['files'];
+  const required = libState.kind === 'output' && (libState.fileType === 'all' || libState.fileType === 'image') ? ['images', 'files'] : ['files'];
   const loading = required.some(kind => libSources[kind].loading);
   const pending = required.some(kind => libSources[kind].items === null && !libSources[kind].error);
   const errors = required.filter(kind => libSources[kind].error);
-  const total = libraryItems().length;
-  const partial = Object.values(libSources).some(source => source.error || source.items === null);
+  const allItems = libraryItems();
+  const total = allItems.filter(item => item.kind === libState.kind).length;
+  const legacyCount = allItems.filter(item => item.kind === 'legacy').length;
+  const partial = required.some(kind => libSources[kind].error || libSources[kind].items === null || libSources[kind].truncated || libSources[kind].warnings.length);
   myWorkEl.querySelector('.libp-total').textContent = total ? `${partial ? '已载入 ' : ''}${total} 项资料` : '';
+  myWorkEl.querySelector('[data-lib-description]').textContent = LIB_KIND_DETAILS[libState.kind];
+  myWorkEl.querySelectorAll('.libp-kinds [data-lib-kind]').forEach(button => {
+    const kind = button.dataset.libKind;
+    const selected = kind === libState.kind;
+    button.classList.toggle('is-selected', selected); button.setAttribute('aria-pressed', String(selected));
+    button.querySelector('[data-lib-count]').textContent = String(allItems.filter(item => item.kind === kind).length);
+  });
   myWorkEl.querySelector('.libp-section-head h2').textContent = libState.query.trim() || libState.fileType !== 'all' ? `${items.length} 项匹配资料` : '最近修改';
   myWorkEl.querySelectorAll('[data-lib-filter]').forEach(button => {
     const selected = button.dataset.libFilter === libState.fileType;
@@ -6392,20 +6661,26 @@ function renderLibrary() {
   refresh.title = anyLoading ? '正在刷新资料库' : '刷新资料库';
   const status = myWorkEl.querySelector('.libp-status');
   const showLoading = loading && !items.length;
-  status.hidden = !errors.length && !showLoading;
-  status.innerHTML = errors.length ? errors.map(kind => `<div class="libp-error"><span>${kind === 'images' ? '图片' : '文件'}暂时无法载入${libSources[kind].items ? '，已保留上次结果' : ''}。</span><button type="button" data-lib-retry="${kind}">重试</button></div>`).join('') : showLoading ? '<span>正在更新资料…</span>' : '';
+  const limited = required.some(kind => libSources[kind].truncated || libSources[kind].warnings.length);
+  status.hidden = !errors.length && !showLoading && !limited;
+  status.innerHTML = errors.map(kind => `<div class="libp-error"><span>${kind === 'images' ? '图片' : '文件'}暂时无法载入${libSources[kind].items ? '，已保留上次结果' : ''}。</span><button type="button" data-lib-retry="${kind}">重试</button></div>`).join('')
+    + (showLoading && !errors.length ? '<span>正在更新资料…</span>' : '')
+    + (limited ? '<div>当前仅显示已读取的文件，部分目录尚未完整读取。仍可在工作区或文件夹中查看其他文件。</div>' : '');
   const body = myWorkEl.querySelector('.libp-results');
   body.setAttribute('aria-busy', String(loading));
   // 元数据未变化时保留资料卡片节点、图片解码结果与页面滚动位置。
-  const key = JSON.stringify([libState.fileView, libState.fileType, libState.query, items.map(item => [item.path, item.name, item.type, item.ext, item.mtime, item.size, item.generatedImage]), items.length ? '' : [pending, errors.length]]);
+  const key = JSON.stringify([libState.kind, libState.fileView, libState.fileType, libState.query, items.map(item => [item.path, item.name, item.type, item.ext, item.mtime, item.size, item.generatedImage, item.isDirectory]), items.length ? '' : [pending, errors.length, legacyCount]]);
   if (key !== libState.renderKey) {
     libState.renderKey = key;
     if (items.length) body.replaceChildren(libState.fileView === 'grid' ? buildLibFileGrid(items) : buildLibFileList(items));
     else {
       const filtered = Boolean(libState.query.trim()) || libState.fileType !== 'all';
-      const title = pending ? '正在载入资料' : errors.length ? '资料暂时无法载入' : filtered ? '没有找到匹配的资料' : '还没有本地资料';
-      const detail = pending ? '图片和文件会在这里汇总。' : errors.length ? '请使用上方的重试按钮，再试一次。' : filtered ? '试试其他关键词，或查看全部类型。' : '生成图片或在对话中保存文件后，可以在这里查看。';
-      body.innerHTML = `<div class="libp-empty">${LIB_UI_ICONS.folder}<h3>${title}</h3><p>${detail}</p>${filtered && !pending ? '<button type="button" data-lib-clear>清除筛选</button>' : ''}</div>`;
+      const legacyAvailable = libState.kind === 'output' && !total && legacyCount > 0 && !pending;
+      const emptyTitles = { output: '还没有已归类的成果', process: '还没有发现过程文件', legacy: '还没有发现历史文件' };
+      const emptyDetails = { output: '保存到成果目录的文件与生成的图片会在这里显示。', process: '会话临时目录中的文件会在这里显示。', legacy: '从旧会话发现、尚未归类的文件会保留在这里。' };
+      const title = pending ? '正在载入资料' : errors.length ? '资料暂时无法载入' : filtered ? '没有找到匹配的资料' : emptyTitles[libState.kind];
+      const detail = pending ? '正在读取本地文件。' : errors.length ? '请使用上方的重试按钮，再试一次。' : legacyAvailable ? `另有 ${legacyCount} 项历史文件尚未归类，可以继续查看。` : filtered ? '试试其他关键词，或查看全部类型。' : emptyDetails[libState.kind];
+      body.innerHTML = `<div class="libp-empty">${LIB_UI_ICONS.folder}<h3>${title}</h3><p>${detail}</p>${filtered && !pending ? '<button type="button" data-lib-clear>清除筛选</button>' : ''}${legacyAvailable ? '<button type="button" data-lib-kind="legacy" data-lib-reset>查看历史文件</button>' : ''}</div>`;
     }
   }
   if (host) host.scrollTop = scrollTop;
@@ -6423,6 +6698,7 @@ function openLibraryItem(item, items) {
   } else openLibraryFile(item);
 }
 async function deleteLibraryItem(item) {
+  if (item.isDirectory) { showToast('请在文件管理器中处理文件夹。'); return; }
   const image = item.type === 'image';
   const confirmed = await customConfirm({ title: image ? '删除图片' : '删除文件',
     message: `将删除本地${image ? '图片' : '文件'}「${item.name}」，无法恢复。确定删除吗？`,
@@ -6456,7 +6732,7 @@ function showLibFileMenu(event, item) {
     try { await copyImageToClipboard(toFileUrl(item.path)); showToast('图片已复制'); }
     catch (error) { showToast('复制失败：' + error.message); }
   };
-  delBtn.hidden = false;
+  delBtn.hidden = item.isDirectory === true;
   delBtn.onclick = () => { hideCopyPopover(); deleteLibraryItem(item); };
   const anchor = event.currentTarget && event.currentTarget.getBoundingClientRect ? event.currentTarget.getBoundingClientRect() : null;
   const x = event.clientX || (anchor ? anchor.right : 12);
@@ -6474,7 +6750,7 @@ function libraryThumbnail(item, compact = false) {
     image.addEventListener('error', () => { thumb.classList.add('is-unavailable'); thumb.innerHTML = `${libFileIcon('image')}<span>无法预览</span>`; }, { once: true });
     thumb.appendChild(image);
   } else {
-    thumb.innerHTML = `<span class="libp-file-placeholder">${libFileIcon(item.type)}<span>${escapeHtml(item.ext.toUpperCase() || 'FILE')}</span></span>`;
+    thumb.innerHTML = `<span class="libp-file-placeholder">${item.isDirectory ? LIB_UI_ICONS.folder : libFileIcon(item.type)}<span>${item.isDirectory ? '文件夹' : escapeHtml(item.ext.toUpperCase() || 'FILE')}</span></span>`;
   }
   return thumb;
 }
@@ -6482,7 +6758,7 @@ function libraryItemElement(item, items, list) {
   const row = document.createElement('article');
   row.className = 'libp-item'; row.dataset.libraryPath = item.path;
   const open = document.createElement('button');
-  open.type = 'button'; open.className = 'libp-open'; open.title = `${item.type === 'image' ? '查看图片' : '打开文件'} · ${item.path}`;
+  open.type = 'button'; open.className = 'libp-open'; open.title = `${item.isDirectory ? '打开文件夹' : item.type === 'image' ? '查看图片' : '打开文件'} · ${item.path}`;
   const thumb = libraryThumbnail(item, list);
   const info = document.createElement('span'); info.className = 'libp-item-info';
   const meta = [libFmtTime(item.mtime), libFmtSize(item.size)].filter(Boolean).join(' · ');
@@ -6551,6 +6827,7 @@ function openAgentPicker() {
 
 // ── 会话全文搜索弹窗(ChatGPT 式:搜索框 + 按时间分组的结果) ──
 let searchEl = null;
+let resetHistorySearch = () => {};
 // 把后端片段里的命中哨兵 \x00…\x01 转成高亮 <mark>(先转义 HTML 防注入)
 function renderSnippet(snip) {
   const esc = escapeHtml(String(snip || ''));
@@ -6605,11 +6882,33 @@ function showSearchModal() {
 
     const input = searchEl.querySelector('.search-input');
     const resultsEl = searchEl.querySelector('[data-results]');
-    let timer = null, lastQuery = '';
+    let timer = null, revision = 0, composing = false;
+    const showStatus = (text, busy = false) => {
+      resultsEl.replaceChildren();
+      const status = document.createElement('div');
+      status.className = 'search-empty';
+      status.setAttribute('role', 'status');
+      status.textContent = text;
+      resultsEl.appendChild(status);
+      if (busy) resultsEl.setAttribute('aria-busy', 'true'); else resultsEl.removeAttribute('aria-busy');
+    };
+    const invalidateSearch = () => {
+      clearTimeout(timer); timer = null;
+      revision++;
+      resultsEl.removeAttribute('aria-busy');
+      // Cancel the old scan as soon as input changes, before the next debounce fires.
+      try { Promise.resolve(window.api.history.cancelSearch?.()).catch(() => {}); } catch (_) {}
+      return revision;
+    };
+    resetHistorySearch = () => {
+      invalidateSearch(); composing = false;
+      showStatus('输入关键词搜索你的历史对话');
+    };
 
-    const renderResults = (q, items) => {
-      if (!q) { resultsEl.innerHTML = `<div class="search-empty">输入关键词搜索你的历史对话</div>`; return; }
-      if (!items.length) { resultsEl.innerHTML = `<div class="search-empty">没有找到包含「${escapeHtml(q)}」的对话</div>`; return; }
+    const renderResults = (q, items, partial = false) => {
+      resultsEl.removeAttribute('aria-busy');
+      if (!q) { showStatus('输入关键词搜索你的历史对话'); return; }
+      if (!items.length) { showStatus(partial ? '部分历史暂时无法读取，请稍后重试。' : `没有找到包含「${q}」的对话`); return; }
       const groups = groupSearchResults(items);
       resultsEl.innerHTML = groups.map(([label, arr]) => `
         <div class="search-group-title">${escapeHtml(label)}</div>
@@ -6623,50 +6922,76 @@ function showSearchModal() {
           </button>
         `).join('')}
       `).join('');
-      // 绑点击打开
-      resultsEl.querySelectorAll('.search-result').forEach((row) => {
-        row.addEventListener('click', () => {
-          const id = row.dataset.id, isCreate = row.dataset.kind === 'create';
-          // 命中正文时带上定位(turn 索引 + 命中侧),打开会话后滚到那条消息;命中标题则无 data-turn
-          const jumpTo = row.dataset.turn != null
-            ? { turnIndex: parseInt(row.dataset.turn, 10), side: row.dataset.side || null }
-            : null;
-          hideSearchModal();
-          if (isCreate) loadCreateConv(id, jumpTo); else loadConversation(id, jumpTo);
-        });
-      });
+      if (partial) {
+        const notice = document.createElement('div');
+        notice.className = 'search-empty';
+        notice.textContent = '部分历史暂时无法读取，以上为已检索到的结果。';
+        resultsEl.appendChild(notice);
+      }
     };
-
-    const doSearch = async () => {
-      const q = input.value.trim();
-      lastQuery = q;
-      if (!q) { renderResults('', []); return; }
+    // A single delegated listener covers every returned row without rebinding on each query.
+    resultsEl.addEventListener('click', (event) => {
+      const row = event.target.closest('.search-result');
+      if (!row || !resultsEl.contains(row)) return;
+      const id = row.dataset.id, isCreate = row.dataset.kind === 'create';
+      const jumpTo = row.dataset.turn != null
+        ? { turnIndex: parseInt(row.dataset.turn, 10), side: row.dataset.side || null }
+        : null;
+      hideSearchModal();
+      if (isCreate) loadCreateConv(id, jumpTo); else loadConversation(id, jumpTo);
+    });
+    const isCurrent = (version, query) => version === revision && !composing
+      && searchEl.classList.contains('show') && input.value.trim() === query;
+    const doSearch = async (version, query) => {
+      timer = null;
+      if (!isCurrent(version, query)) return;
       try {
-        const r = await window.api.history.search(q);
-        if (q !== lastQuery) return;   // 已有更新的查询,丢弃过期结果
-        renderResults(q, (r && r.items) || []);
-      } catch (_) { renderResults(q, []); }
+        const result = await window.api.history.search(query, 50);
+        if (!isCurrent(version, query) || result?.canceled) return;
+        if (!result || result.ok === false) { showStatus(result?.error || '搜索暂时失败，请稍后重试。'); return; }
+        renderResults(query, Array.isArray(result.items) ? result.items : [], !!result.partial);
+      } catch (_) {
+        if (isCurrent(version, query)) showStatus('搜索暂时失败，请稍后重试。');
+      }
     };
-    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(doSearch, 120); });
-    // Enter 打开第一条结果
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { const first = resultsEl.querySelector('.search-result'); if (first) first.click(); }
+    const scheduleSearch = (event) => {
+      const version = invalidateSearch(), query = input.value.trim();
+      if (composing || event?.isComposing) { showStatus('输入完成后开始搜索'); return; }
+      if (!query) { renderResults('', []); return; }
+      showStatus('正在搜索…', true);
+      timer = setTimeout(() => doSearch(version, query), 180);
+    };
+    input.addEventListener('input', scheduleSearch);
+    input.addEventListener('compositionstart', () => {
+      composing = true; invalidateSearch(); showStatus('输入完成后开始搜索');
+    });
+    input.addEventListener('compositionend', () => { composing = false; scheduleSearch(); });
+    input.addEventListener('keydown', (event) => {
+      if (composing || event.isComposing || event.keyCode === 229) {
+        if (event.key === 'Escape') event.stopPropagation();
+        return;
+      }
+      if (event.key === 'Enter') {
+        const first = resultsEl.querySelector('.search-result');
+        if (first) { event.preventDefault(); first.click(); }
+      }
     });
   }
   searchEl.classList.add('show');
   window.relayWindowChrome?.setSearchOpen(true);
   const input = searchEl.querySelector('.search-input');
   input.value = '';
-  searchEl.querySelector('[data-results]').innerHTML = `<div class="search-empty">输入关键词搜索你的历史对话</div>`;
-  setTimeout(() => input.focus(), 30);
+  resetHistorySearch();
+  setTimeout(() => { if (searchEl.classList.contains('show')) input.focus(); }, 30);
 }
 function hideSearchModal() {
+  resetHistorySearch();
   if (searchEl) searchEl.classList.remove('show');
   window.relayWindowChrome?.setSearchOpen(false);
 }
 $('btnSearch').addEventListener('click', showSearchModal);
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && searchEl && searchEl.classList.contains('show')) { hideSearchModal(); return; }
+  if (e.key === 'Escape' && !e.isComposing && e.keyCode !== 229 && searchEl && searchEl.classList.contains('show')) { hideSearchModal(); return; }
   // Search bindings are dispatched by the shared keyboard shortcut controller.
 });
 
@@ -8695,6 +9020,7 @@ async function renderMcpPanel(mount) {
 
   const statusLabels = {
     connected: '已连接',
+    deferred: '按需连接',
     failed: '连接失败',
     'needs-auth': '需要授权',
     pending: '连接中',
@@ -8770,7 +9096,7 @@ async function renderMcpPanel(mount) {
           </div>
         </div>
         <div class="dp-item-actions">
-          <button class="mcp-row-reconnect" type="button" data-reconnect aria-label="重连 MCP" title="重连此 MCP" ${reconnectDisabled ? 'disabled' : ''}>↻</button>
+          <button class="mcp-row-reconnect" type="button" data-reconnect aria-label="${runtimeStatus === 'deferred' ? '立即连接 MCP' : '重连 MCP'}" title="${runtimeStatus === 'deferred' ? '立即连接此 MCP' : '重连此 MCP'}" ${reconnectDisabled ? 'disabled' : ''}>↻</button>
           <div class="switch ${it.enabled ? 'on' : ''}" data-toggle title="${it.enabled ? '已启用,点击停用' : '已停用,点击启用'}"></div>
           <div class="dp-menu-wrap">
             <button class="dp-more" type="button" aria-label="更多操作">···</button>
@@ -12668,10 +12994,23 @@ async function createConversationFork(conversationId, runId, trigger, redo = fal
 }
 window.addEventListener('relay:native-history-updated', () => { void refreshHistoryList(); });
 
-window.RelayLocalFileLinks?.install(messagesEl, {
+window.relayTurnDeliveryReferences = window.RelayTurnDeliveryReferences?.create({
+  container: messagesEl, getConversation: () => currentConv,
+  getTarget: reference => window.relayTurnDeliverables?.getArtifactTarget(reference),
+});
+window.relayMessageFileLinks = window.RelayLocalFileLinks?.install(messagesEl, {
   context: () => window.relayConversationWorkspace(),
   onError: message => showToast(message),
+  resolveTurnArtifact: (link, parsed) => window.relayTurnDeliveryReferences?.resolve(link, parsed),
+  navigateTurnArtifact: reference => window.relayTurnDeliveryReferences?.navigate(reference),
 });
 window.RelayLocalMarkdownImages?.install(messagesEl, {
   context: () => window.relayConversationWorkspace(),
+});
+
+window.relayTurnDeliverables = window.RelayTurnDeliverables?.createController({
+  container: messagesEl, getConversation: () => currentConv, getRun: runForJob,
+  isVisible: () => activeView === 'chat', bridge: window.api.deliverables,
+  onPresentationChanged: owner => window.relayTurnDeliveryReferences?.refresh(
+    owner, scope => window.relayMessageFileLinks?.decorate(scope)),
 });
