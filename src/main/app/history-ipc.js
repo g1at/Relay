@@ -2,13 +2,45 @@
 
 const fs = require('fs');
 
+function normalizeCreationComposer(value) {
+  const invalid = () => Object.assign(new Error('创作模型或参数格式无效'), { code: 'INVALID_CREATION_COMPOSER' });
+  const object = item => item !== null && typeof item === 'object' && !Array.isArray(item)
+    && Object.prototype.toString.call(item) === '[object Object]';
+  if (!object(value) || Object.keys(value).some(key => !['model', 'parameters'].includes(key))
+    || typeof value.model !== 'string' || !value.model.trim() || value.model.length > 1024
+    || /[\u0000-\u001f\u007f]/.test(value.model) || !object(value.parameters)) throw invalid();
+  const entries = Object.entries(value.parameters);
+  if (entries.length > 128) throw invalid();
+  const excluded = new Set(['key', 'apikey', 'authorization', 'auth', 'token', 'accesstoken', 'refreshtoken',
+    'secret', 'password', 'credential', 'credentials', 'cookie', 'ref', 'refs', 'reference', 'references',
+    'refpaths', 'referencepaths', 'image', 'images', 'imageurl', 'imageurls', 'videourl', 'audiourl', 'dataurl', 'base64']);
+  const parameters = {};
+  for (const [key, item] of entries) {
+    if (!key || key.length > 128 || /[\u0000-\u001f\u007f]/.test(key)
+      || ['__proto__', 'prototype', 'constructor'].includes(key)
+      || excluded.has(key.replace(/[-_]/g, '').toLowerCase())) throw invalid();
+    if (item !== null && typeof item !== 'string' && typeof item !== 'boolean' && typeof item !== 'number') throw invalid();
+    if (typeof item === 'number' && !Number.isFinite(item)) throw invalid();
+    if (typeof item === 'string' && (item.length > 4096 || /^\s*data:/i.test(item))) throw invalid();
+    parameters[key] = item;
+  }
+  const normalized = { model: value.model.trim(), parameters };
+  if (JSON.stringify(normalized).length > 32768) throw invalid();
+  return normalized;
+}
+
 // Disk access, project projection and native title sync remain separate services.
 function registerHistoryIpc({
   ipcMain, history, projects, nativeHistory, isMiniChatActive,
   saveConversation, deleteConversation, genId, protectSdkMetadata, assertConversationAvailable = () => {}, searchService = null,
-  hydrateConversation = value => value,
+  hydrateConversation = value => value, completionState = null,
 }) {
   const { readHistoryIndex, loadConversation, persistConversationRecord, convFilePath } = history;
+  // Completion acknowledgements never rewrite conversation content or activity dates.
+  ipcMain.handle('history:completionSnapshot', () => completionState?.snapshot() || { revision: 0, items: [] });
+  ipcMain.handle('history:markCompletionRead', (_event, input) => completionState
+    ? completionState.markRead(input?.id, input?.runId)
+    : { ok: false, changed: false, code: 'COMPLETION_STATE_UNAVAILABLE', revision: 0, items: [] });
   ipcMain.handle('history:list', () => {
     projects.initialize();
     // 列表只读索引,零正文 IO(v2 目录式存储的核心收益)
@@ -64,6 +96,28 @@ function registerHistoryIpc({
 
   ipcMain.handle('history:load', async (_e, id) => projects.projectConversation(await hydrateConversation(loadConversation(id))));
 
+  ipcMain.handle('history:updateCreationComposer', (_e, input) => {
+    try {
+      const id = input?.id;
+      if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(id) || id.toLowerCase() === 'index') {
+        return { ok: false, code: 'INVALID_CONVERSATION_ID', error: '会话标识无效' };
+      }
+      assertConversationAvailable(id);
+      const mediaComposer = normalizeCreationComposer(input?.mediaComposer);
+      const current = loadConversation(id);
+      if (!current || current.id !== id) return { ok: false, code: 'CONVERSATION_NOT_FOUND', error: '创作会话不存在' };
+      if (current.kind !== 'create') return { ok: false, code: 'NOT_CREATION_CONVERSATION', error: '只能更新创作会话的模型和参数' };
+      // Merge into the latest body without changing turns, title or activity time.
+      if (persistConversationRecord({ ...current, mediaComposer }) === false) {
+        return { ok: false, code: 'CREATION_COMPOSER_SAVE_FAILED', error: '创作设置保存失败，请重试' };
+      }
+      return { ok: true, id, mediaComposer: normalizeCreationComposer(mediaComposer) };
+    } catch (error) {
+      return { ok: false, code: error.code || 'CREATION_COMPOSER_SAVE_FAILED',
+        error: error.code ? error.message : '创作设置保存失败，请重试' };
+    }
+  });
+
   ipcMain.handle('history:save', (_e, conv) => {
     try { if (conv?.id) assertConversationAvailable(conv.id); }
     catch (error) { return { ok: false, code: error.code, error: error.message }; }
@@ -77,7 +131,19 @@ function registerHistoryIpc({
     // 置顶由专用 setPinned 入口维护；运行中旧快照整存不能撤销最新的置顶操作。
     // 正文是权威来源，避免索引暂未同步时读回旧标记；新记录保留初始化值。
     const existing = fs.existsSync(convFilePath(conv.id)) ? loadConversation(conv.id) : null;
-    if (existing) conv.pinned = !!existing.pinned;
+    if (existing) {
+      conv.pinned = !!existing.pinned;
+      // Composer changes have their own metadata-only entry point. Old result
+      // writers must not restore the model or parameters captured at submission.
+      if (Object.prototype.hasOwnProperty.call(existing, 'mediaComposer')) {
+        conv.mediaComposer = JSON.parse(JSON.stringify(existing.mediaComposer));
+      } else delete conv.mediaComposer;
+    } else if (Object.prototype.hasOwnProperty.call(conv, 'mediaComposer')) {
+      try {
+        if (conv.kind !== 'create') return { ok: false, code: 'NOT_CREATION_CONVERSATION', error: '只能更新创作会话的模型和参数' };
+        conv.mediaComposer = normalizeCreationComposer(conv.mediaComposer);
+      } catch (error) { return { ok: false, code: error.code, error: error.message }; }
+    }
     protectSdkMetadata(conv, existing);
     conv = projects.projectConversation(conv);
     saveConversation(conv);
@@ -103,10 +169,10 @@ function registerHistoryIpc({
     return id;
   };
   const getSearch = () => search ||= new (require('./history-search-client').HistorySearchClient)({ historyDir: history.getHistoryDir() });
-  ipcMain.handle('history:search', async (event, { query, limit } = {}) => {
+  ipcMain.handle('history:search', async (event, { query, limit, offset } = {}) => {
     const source = clientId(event);
     try {
-      const result = await getSearch().search(query, limit, source);
+      const result = await getSearch().search(query, limit, source, ...(offset === undefined ? [] : [offset]));
       if (!result.ok || result.canceled) return result;
       // A deletion can start while the worker is searching. Its durable
       // admission barrier also excludes the result from this late reply.

@@ -12,7 +12,7 @@
 .sdk-settings-row--multiline > .sdk-settings-control { grid-column: 2; display: flex; flex-direction: column; align-items: stretch; width: 100%; max-width: none; margin-left: 0; gap: 12px; }
 /* Reuse the same field skin as provider settings; only multiline sizing differs. */
 .sdk-settings-input { width: 100%; min-width: 0; height: auto; padding: 9px 10px; border-color: var(--line-subtle); border-radius: 9px; background: var(--surface-inset); font-family: inherit; font-size: 12.5px; line-height: 1.6; resize: none; }
-textarea.sdk-settings-input { min-height: 82px; max-height: 260px; }
+textarea.sdk-settings-input { flex: 0 0 auto; height: 82px; min-height: 82px; max-height: 260px; overflow-y: auto; }
 .sdk-settings-input::placeholder { color: var(--text-muted); }
 .sdk-settings-empty { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 @container (max-width: 620px) {
@@ -31,6 +31,7 @@ textarea.sdk-settings-input { min-height: 82px; max-height: 260px; }
 .sdk-runtime-label { min-width: 0; flex: 1; font-size: 13px; }
 .sdk-runtime-label small { display: block; font-size: 11px; line-height: 1.5; color: var(--text-muted); margin-top: 4px; }
 .sdk-plugin-config .sdk-runtime-input { box-sizing: border-box; width: min(50%, 320px); min-width: 0; border: 1px solid var(--line-subtle); border-radius: 9px; padding: 7px 9px; background: var(--surface-inset); color: inherit; font: inherit; font-size: 12px; resize: vertical; }
+.sdk-plugin-config .sdk-runtime-input:focus { outline: none; border-color: var(--line-emphasis); box-shadow: none; }
 .sdk-plugin-secret { opacity: .6; font-size: 11px; }
 .sdk-history-removal { margin-top: 14px; font-size: 12px; }
 .sdk-history-removal label { display: block; margin: 10px 0; line-height: 1.6; }

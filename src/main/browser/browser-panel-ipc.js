@@ -4,6 +4,7 @@ const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const { createBrowserPanelHost } = require('./browser-panel-host');
 const { createBrowserProfileStore } = require('./browser-profile-store');
+const { createBrowserChromeMenu } = require('./browser-chrome-menu');
 
 // Only the local main document owns browser tabs. Remote views never receive
 // preload.js, and even a foreign renderer with a bridge cannot control them.
@@ -17,6 +18,7 @@ function registerBrowserPanelIpc({ ipcMain, getWindow, entryFile, createHost = c
   let formStore;
   let automation = null;
   let hostGeneration = 0;
+  const chromeMenu = createBrowserChromeMenu({ getWindow, getElectron });
   const feedbackResumes = new Map();
   const annotationLookups = new Map(), lookupCancelled = Symbol('annotation lookup cancelled');
   function cancelAnnotationLookups(predicate = () => true) {
@@ -110,6 +112,8 @@ function registerBrowserPanelIpc({ ipcMain, getWindow, entryFile, createHost = c
     if (disposed || !isTrusted(event)) return { ok: false, code: 'FORBIDDEN', error: '此窗口不能操作内置浏览器' };
     if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, code: 'INVALID_ACTION', error: '浏览器操作无效' };
     try {
+      if (input.action === 'menu.popup') return await chromeMenu.popup(input);
+      if (input.action === 'menu.close') return chromeMenu.close(input.requestId);
       if (input.action === 'cancelFeedback') {
         const pending = feedbackResumes.get(input.id);
         if (pending?.requestId === input.requestId && pending.conversationId === input.conversationId) feedbackResumes.delete(input.id);
@@ -190,13 +194,13 @@ function registerBrowserPanelIpc({ ipcMain, getWindow, entryFile, createHost = c
           } });
       }
       if (input.action === 'visibility') cancelAnnotationLookups((_pending, id) => !input.visible || input.id && input.id !== id);
-      if (['navigate', 'back', 'forward', 'reload', 'stop', 'close', 'zoom'].includes(input.action)) {
+      if (['navigate', 'back', 'forward', 'reload', 'stop', 'close', 'zoom', 'security.continue', 'security.useHttp'].includes(input.action)) {
         const id = input.id || host?.state().activeId;
         cancelAnnotationLookups((_pending, targetId) => targetId === id);
       }
       // Manual navigation/refresh/closing must revoke outstanding automation
       // before changing the page. This path cannot be reached by remote pages.
-      if (automation && ['navigate', 'back', 'forward', 'reload', 'stop', 'close', 'zoom', 'passwords.fill', 'contacts.fill', 'print', 'devTools'].includes(input.action)) {
+      if (automation && ['navigate', 'back', 'forward', 'reload', 'stop', 'close', 'zoom', 'security.continue', 'security.useHttp', 'passwords.fill', 'contacts.fill', 'print', 'devTools'].includes(input.action)) {
         const id = input.id || host?.state().activeId;
         if (id) { feedbackResumes.delete(id); await automation.control({ action: 'pause', id, reason: '你已操作浏览器' }); }
       }
@@ -242,6 +246,7 @@ function registerBrowserPanelIpc({ ipcMain, getWindow, entryFile, createHost = c
     dispose() {
       if (disposed) return;
       disposed = true; ipcMain.removeHandler('browser:invoke');
+      chromeMenu.dispose();
       cancelAnnotationLookups(); cancelFeedbackResumes();
       automation?.dispose(); automation = null;
       if (host) host.destroy();

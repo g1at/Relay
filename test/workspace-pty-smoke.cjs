@@ -6,7 +6,13 @@ const { EventEmitter } = require('node:events');
 const { pathToFileURL } = require('node:url');
 const { registerWorkspaceTools } = require('../src/main/workspace/workspace-tools');
 const nativePty = require('node-pty');
-const spawnedPids = [];
+const spawnedPids = [], ownedWorkers = [];
+async function waitForWorker(index) {
+  const worker = ownedWorkers[index];
+  if (!worker) throw Error('PTY output worker was not observed');
+  for (let attempt = 0; attempt < 80 && !worker.exited; attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  check(index === 0 ? 'natural_exit_releases_native_worker' : 'closed_terminal_releases_native_worker', worker.exited, 'Owned PTY output worker exited before Electron shutdown');
+}
 const outputDir = path.join(__dirname, '..', '.codex-tmp', 'workspace-pty-smoke');
 fs.mkdirSync(outputDir, { recursive: true });
 app.setPath('userData', path.join(outputDir, 'profile'));
@@ -65,7 +71,7 @@ app.whenReady().then(async () => {
   const root = path.join(outputDir, 'synthetic-workspace'); fs.mkdirSync(root, { recursive: true });
   registry = registerWorkspaceTools({
     ipcMain: { handle: (name, handler) => handlers.set(name, handler), removeHandler: (name) => handlers.delete(name) },
-    ptyModule: { spawn(...args) { const terminal = nativePty.spawn(...args); spawnedPids.push(terminal.pid); return terminal; } },
+    ptyModule: { spawn(...args) { const terminal = nativePty.spawn(...args); spawnedPids.push(terminal.pid); const worker = terminal._agent?._conoutSocketWorker?._worker; const record = { exited: worker?.threadId === -1 }; ownedWorkers.push(record); worker?.once('exit', () => { record.exited = true; }); return terminal; } },
     getWindow: () => ({ webContents: sender, isDestroyed: () => false }), resolveWorkspace: async () => ({ root, conversationId: 'pty-smoke-fixture', managed: true }), shell: { openPath: async () => '' },
   });
   const started = await call('terminalStart', { context: { conversationId: 'pty-smoke-fixture' }, cols: 80, rows: 24 });
@@ -74,6 +80,7 @@ app.whenReady().then(async () => {
   const escapedRoot = root.replace(/'/g, "''");
   await call('terminalInput', { id: terminalId, data: `[Console]::WriteLine(('RELAY_' + 'PTY_READY')); [Console]::WriteLine(('TTY_' + [Console]::IsInputRedirected)); if ((Get-Location).Path -eq '${escapedRoot}') { [Console]::WriteLine(('ROOT_' + 'OK')) }\r` });
   await completed;
+  await waitForWorker(0);
   stage = 'closing';
   const another = await call('terminalStart', { context: { conversationId: 'pty-smoke-fixture' } });
   check('second_terminal_start', another.ok, another.error);
@@ -85,6 +92,7 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   check('close_terminates_native_shell', gone, 'Owned PowerShell PID no longer exists');
+  await waitForWorker(1);
   stage = 'complete';
 }).catch((error) => { report.failures.push(error.message); }).finally(() => {
   if (registry) registry.dispose();

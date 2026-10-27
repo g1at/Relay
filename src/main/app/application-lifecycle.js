@@ -80,6 +80,11 @@ function registerApplicationLifecycle({
     // 主窗口现在「关闭=隐藏到托盘」,不会触发本事件;此处只在真正退出(windows.isQuitting)
     //   或仅有向导窗口被关时走到。托盘存活且非退出意图时,保持进程驻留让后台任务继续跑。
     if (!windows.isQuitting && windows.tray) return;
+    // Record the application exit before native stop callbacks can settle the
+    // same task as a user cancellation. The operation is terminal/idempotent.
+    taskRuntime.flushStreams();
+    taskRuntime.flushEvents();
+    taskRuntime.interruptActiveRuns('Relay exited before the task completed');
     // 杀掉所有在跑的 claude 子进程(含常驻会话 —— 它们不会自己退,漏杀就是每个 ~630MB 的孤儿)
     for (const [, child] of taskRuntime.jobs) { try { child.kill('SIGTERM'); } catch (_) {} }
     taskRuntime.jobs.clear();
@@ -134,6 +139,12 @@ function registerApplicationLifecycle({
       }
       return;
     }
+    // Durable completed events win; every remaining task (including queued
+    // work) is then attributed to application exit before teardown can emit
+    // generic cancellation/abort results. The next launch may offer Resume.
+    taskRuntime.flushStreams();
+    taskRuntime.flushEvents();
+    taskRuntime.interruptActiveRuns('Relay exited before the task completed');
     try { if (mini.getChat()) mini.getChat().destroy(); } catch (_) {}
     try { if (mini.getHost()) mini.getHost().destroy(); } catch (_) {}
     integrations.attachmentDialog.dispose();
@@ -141,8 +152,6 @@ function registerApplicationLifecycle({
     try { integrations.workspaceTools.dispose(); } catch (e) { console.warn('[workspace] 退出清理失败: %s', e.message); }
     try { taskRuntime.interactions.close({ message: 'Relay 正在退出，等待中的操作已安全拒绝', interrupt: true }); }
     catch (e) { console.warn('[interaction] 退出清理失败: %s', e.message); }
-    taskRuntime.flushStreams();
-    taskRuntime.flushEvents();
     if (memory.hasPendingUsage()) memory.flushUsage();
     try { scheduler.shutdown(); } catch (e) { console.warn('[scheduler] 退出清理失败: %s', e.message); }
     try { if (taskRuntime.getOrchestrator()) taskRuntime.getOrchestrator().shutdown(); }
@@ -151,7 +160,6 @@ function registerApplicationLifecycle({
       try { lease.release(); } catch (_) {}
     }
     taskRuntime.resourceLeases.clear();
-    taskRuntime.interruptActiveRuns('Relay exited before the task completed');
     try { if (taskRuntime.getLedger() && typeof taskRuntime.getLedger().flush === 'function') taskRuntime.getLedger().flush(); } catch (_) {}
     for (const [, child] of taskRuntime.jobs) { try { child.kill('SIGTERM'); } catch (_) {} }
     taskRuntime.jobs.clear();

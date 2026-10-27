@@ -61,6 +61,11 @@ app.whenReady().then(async () => {
   await act("codeFixture.turn.activity=RelayActivity.serialize(codeFixture.run.activityState);codeFixture.turn.output=RelayAssistantOutput.serialize(codeFixture.output);");
   await ev('window.api.history.save(currentConv)');
   await ev("loadConversation('code-fixture-conversation',null,{forceReload:true}).catch(error=>{codeFixture.historyError=error.stack;throw error})");
+  // Restored completed processes mount their rows only when opened. Exercise
+  // that user action before inspecting the earlier process's code controls.
+  await wait("messagesEl.querySelector('.message.assistant .body pre .code-run')");
+  await check('RestoredProcessStartsCollapsed', "!!messagesEl.querySelector('.process-summary')?.closest('.is-collapsed')");
+  await act("messagesEl.querySelectorAll('.process-summary').forEach(summary=>{if(summary.closest('.is-collapsed'))summary.click()})");
   await wait("messagesEl.querySelectorAll('pre.relay-code-block').length===2");
   await check('RealHistoryRestoreEnhancesBothCodeSurfaces', "[...messagesEl.querySelectorAll('pre')].every(pre=>pre.querySelector('.code-run')&&pre.querySelector('.code-copy')&&getComputedStyle(pre,'::before').height==='28px')");
   await act("messagesEl.querySelectorAll('.process-summary').forEach(summary=>{if(summary.closest('.is-collapsed'))summary.click()});stopFollowingMessages();document.getAnimations().forEach(animation=>{if(animation.effect?.getComputedTiming().iterations!==Infinity)animation.finish()});messagesEl.querySelector('.conversation-narration pre').scrollIntoView({block:'start'})");
@@ -73,6 +78,12 @@ app.whenReady().then(async () => {
   await check('StandaloneMiniStyleReaderHasCopyCollapseWithoutInventedRunAPI', "codeFixture.standalone.querySelector('.code-copy')&&codeFixture.standalone.querySelector('.code-toggle')&&!codeFixture.standalone.querySelector('.code-run')&&getComputedStyle(codeFixture.standalone.querySelector('pre'),'::before').height==='28px'");
   await act("const fallback=document.createElement('div');fallback.innerHTML='<pre class=md-fallback>原始文字</pre>';enhanceCodeBlocks(fallback);codeFixture.fallbackSafe=!fallback.querySelector('.code-actions')");
   await check('FallbackTextDoesNotAcquireCodeActions', 'codeFixture.fallbackSafe');
+  await ev("(()=>{\n window.incrementalCodeProbe=document.createElement('div'); incrementalCodeProbe.style.width='320px'; messagesEl.append(incrementalCodeProbe);\n relayRenderReadOnlyMarkdown(incrementalCodeProbe,firstCode+'\\n\\n尾段',{incremental:true});\n window.stableCodePre=incrementalCodeProbe.querySelector('pre'); window.stableCode=stableCodePre.querySelector('code'); window.codeMetricReads=0;\n for(const name of ['scrollLeft','scrollTop']){const get=Object.getOwnPropertyDescriptor(Element.prototype,name).get;Object.defineProperty(stableCode,name,{configurable:true,get(){codeMetricReads++;return get.call(this)}});}\n relayRenderReadOnlyMarkdown(incrementalCodeProbe,firstCode+'\\n\\n尾段追加',{incremental:true});\n})()");
+  await check('IncrementalTailNeverMeasuresUnchangedCodeLayout', 'codeMetricReads===0&&incrementalCodeProbe.querySelector("pre")===stableCodePre&&stableCode.isConnected');
+  await ev("(()=>{\n delete stableCode.scrollLeft;delete stableCode.scrollTop;\n window.growingCodeSource=String.fromCharCode(96).repeat(3)+'js\\n'+Array.from({length:30},(_,i)=>'const line'+i+' = '+JSON.stringify('x'.repeat(200))+';').join('\\n');\n relayRenderReadOnlyMarkdown(incrementalCodeProbe,growingCodeSource,{incremental:true});incrementalCodeProbe.querySelector('.code-toggle').click();\n incrementalCodeProbe.querySelector('code').scrollLeft=42;window.growingCodeScroll=incrementalCodeProbe.querySelector('code').scrollLeft;window.growingCodePre=incrementalCodeProbe.querySelector('pre');\n relayRenderReadOnlyMarkdown(incrementalCodeProbe,growingCodeSource+'\\nconst finalValue = 2;\\n'+String.fromCharCode(96).repeat(3),{incremental:true});\n})()");
+  await check('ReplacedStreamingCodeRetainsUserCollapseAndScroll', 'growingCodeScroll>0&&incrementalCodeProbe.querySelector("pre")!==growingCodePre&&incrementalCodeProbe.querySelector("pre").classList.contains("collapsed")&&incrementalCodeProbe.querySelector("code").scrollLeft===growingCodeScroll');
+  await check('ReplacedStreamingCodeHasOneControlSet', 'incrementalCodeProbe.querySelectorAll(".code-actions").length===1&&incrementalCodeProbe.querySelectorAll(".code-copy").length===1&&incrementalCodeProbe.querySelector("code").textContent.includes("const finalValue = 2;")');
+  await act('incrementalCodeProbe.remove()');
   await check('NoRendererErrorsModelCallsOrUnexpectedNetwork', "uiFixture.errors.length===0&&!uiFixture.calls.includes('runClaude')&&typeof require==='undefined'");
   if (network.length) throw Error('Unexpected network');
   save(); clearTimeout(deadline); win.destroy(); app.exit(0);

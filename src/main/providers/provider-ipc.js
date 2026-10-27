@@ -2,9 +2,35 @@
 
 const { testProviderConnection, createProviderDraftRuntime, discoverProviderModels } = require("./provider-connectivity");
 
+const { retryProviderWrite, providerWriteFailure } = require('./provider-write-retry');
+
 function registerProviderIpc({
-  ipcMain, providerStore, publishProviderChange,
+  ipcMain, providerStore, publishProviderChange, writeRetrySleep,
 }) {
+  // Keep user writes ordered while yielding to the event loop during backoff.
+  // Each attempt calls the store again so it reads the latest committed state.
+  let writeQueue = Promise.resolve();
+  const write = operation => {
+    const pending = writeQueue.then(() => retryProviderWrite(operation, { sleep: writeRetrySleep }));
+    writeQueue = pending.catch(() => {});
+    return pending;
+  };
+  const notify = (...args) => {
+    try { publishProviderChange(...args); }
+    catch (error) {
+      // Notification failure cannot turn a committed write into a failed save.
+      try { (providerStore.logger || console).warn('[provider] 配置已保存，通知更新失败: %s', error.message); } catch (_) {}
+    }
+  };
+  const currentRevision = (id, revision, message) => {
+    const current = providerStore.getProfile(id);
+    if (!current || Number(current.revision) !== Number(revision)) {
+      const error = new Error(message);
+      error.code = 'PROVIDER_RESULT_STALE';
+      throw error;
+    }
+    return current;
+  };
 
   ipcMain.handle('providers:list', () => ({
     ok: true,
@@ -12,57 +38,65 @@ function registerProviderIpc({
     routes: providerStore.getRoutingView(),
   }));
 
-  ipcMain.handle('providers:create', (_event, input = {}) => {
+  ipcMain.handle('providers:mediaPresets', () => ({ ok: true, ...providerStore.getMediaProtocolPresets() }));
+  ipcMain.handle('providers:listMediaModels', (_event, options = {}) => ({
+    ok: true, models: providerStore.listMediaModels({ modality: options && options.modality }),
+  }));
+
+  ipcMain.handle('providers:create', async (_event, input = {}) => {
     try {
-      const result = providerStore.createProfile(input);
-      publishProviderChange('新增', { runtimeChanged: !!result.chatRoutesChanged });
+      const result = await write(() => providerStore.createProfile(input));
+      notify('新增', { runtimeChanged: !!result.chatRoutesChanged });
       return { ok: true, ...result };
     } catch (error) {
-      return { ok: false, message: error.message };
+      return providerWriteFailure(error);
     }
   });
 
-  ipcMain.handle('providers:update', (_event, { id, patch } = {}) => {
+  ipcMain.handle('providers:update', async (_event, { id, patch } = {}) => {
     try {
-      const before = providerStore.getProfile(id);
-      const result = providerStore.updateProfile(id, patch || {});
-      publishProviderChange('更新', {
+      let before;
+      const result = await write(() => {
+        before = providerStore.getProfile(id);
+        return providerStore.updateProfile(id, patch || {});
+      });
+      notify('更新', {
         runtimeChanged: !!(result.chatRoutesChanged
           || (before && before.activeTiers && before.activeTiers.length && result.runtimeChanged)),
       });
       return { ok: true, ...result };
     } catch (error) {
-      return { ok: false, message: error.message };
+      return providerWriteFailure(error);
     }
   });
 
-  ipcMain.handle('providers:duplicate', (_event, id) => {
+  ipcMain.handle('providers:duplicate', async (_event, id) => {
     try {
-      const result = providerStore.duplicateProfile(id);
-      publishProviderChange('复制');
+      const result = await write(() => providerStore.duplicateProfile(id));
+      notify('复制');
       return { ok: true, ...result };
     } catch (error) {
-      return { ok: false, message: error.message };
+      return providerWriteFailure(error);
     }
   });
 
-  ipcMain.handle('providers:remove', (_event, id) => {
+  ipcMain.handle('providers:remove', async (_event, id) => {
     try {
-      const result = providerStore.removeProfile(id);
-      publishProviderChange('删除');
+      const result = await write(() => providerStore.removeProfile(id));
+      notify('删除');
       return { ok: true, ...result };
     } catch (error) {
-      return { ok: false, message: error.message };
+      return providerWriteFailure(error);
     }
   });
 
-  ipcMain.handle('providers:setImageRoute', (_event, { adapterId, id } = {}) => {
+  ipcMain.handle('providers:setImageRoute', async (_event, { adapterId, id } = {}) => {
     try {
-      const result = providerStore.setImageRoute(adapterId, id || null);
-      if (result.changed) publishProviderChange('切换图像模型');
+      const result = await write(() => providerStore.setImageRoute(adapterId, id || null));
+      if (result.changed) notify('切换图像模型');
       return { ok: true, ...result };
     } catch (error) {
-      return { ok: false, message: error.message };
+      return providerWriteFailure(error);
     }
   });
 
@@ -78,15 +112,18 @@ function registerProviderIpc({
         return { ...result, ok: false, scope: 'saved', stale: true, message: '服务商配置已变更，请重新检测' };
       }
       if (!result.ok || !result.authMode) return { ...result, scope: 'saved', profile: before };
-      const stored = providerStore.setAuthMode(id, result.authMode);
+      const stored = await write(() => {
+        currentRevision(id, runtime.revision, '服务商配置已变更，请重新检测');
+        return providerStore.setAuthMode(id, result.authMode);
+      });
       if (stored.changed) {
-        publishProviderChange('Anthropic 认证方式更新', {
+        notify('Anthropic 认证方式更新', {
           runtimeChanged: !!(before.activeTiers && before.activeTiers.length),
         });
       }
       return { ...result, scope: 'saved', profile: stored.profile };
     } catch (error) {
-      return { ok: false, scope: 'saved', message: error.message || '连接检测失败' };
+      return { ...providerWriteFailure(error, '连接检测失败'), scope: 'saved', ...(error.code === 'PROVIDER_RESULT_STALE' ? { stale: true } : {}) };
     }
   });
 
@@ -102,48 +139,54 @@ function registerProviderIpc({
   });
 
   ipcMain.handle('providers:discoverModels', async (_event, id) => {
-    const runtime = providerStore.getConnectionRuntime(id);
-    if (!runtime) return { ok: false, models: [], message: '该服务商尚未配置 Base URL 或 API Key' };
-    const discovered = await discoverProviderModels(runtime);
-    const imageModels = Array.isArray(discovered.imageModels) ? discovered.imageModels : [];
-    const models = Array.isArray(discovered.models) ? discovered.models : [];
+    let discovered = {}, auth = { changed: false }, stored = null, before = null;
     try {
-      const before = providerStore.getProfile(id);
-      // Discovery is scoped to the URL/key/revision that started the request.
-      // Do not let an old response restore capabilities after a key change.
-      if (!before || Number(before.revision) !== Number(runtime.revision)) {
-        return {
-          ...discovered, ok: false, stale: true,
-          models: [], modelCatalog: [], imageModels: [], totalModels: 0,
-          message: '服务商配置已变更，请重新获取模型目录',
-        };
+      const runtime = providerStore.getConnectionRuntime(id);
+      if (!runtime) return { ok: false, models: [], message: '该服务商尚未配置 Base URL 或 API Key' };
+      // Fetch once. Only local persistence is eligible for retry.
+      discovered = await discoverProviderModels(runtime);
+      const imageModels = Array.isArray(discovered.imageModels) ? discovered.imageModels : [];
+      const models = Array.isArray(discovered.models) ? discovered.models : [];
+      let revision = runtime.revision;
+      const guard = () => currentRevision(id, revision, '服务商配置已变更，请重新获取模型目录');
+      before = guard();
+      // A shared gateway directory does not establish Claude's auth mode.
+      if (discovered.ok && discovered.authMode && !discovered.gatewayRootFallbackUsed) {
+        auth = await write(() => {
+          guard();
+          return providerStore.setAuthMode(id, discovered.authMode);
+        });
+        // Follow our own committed auth revision, never an unrelated edit.
+        revision = auth.profile?.revision ?? revision;
       }
-      // 同域根路径回退只用于读取共享模型目录；它可能是 OpenAI 风格目录，
-      // 不能据此改变 Claude Messages 的认证方式。只有 Anthropic 主路径命中时才记忆认证。
-      const auth = discovered.ok && discovered.authMode && !discovered.gatewayRootFallbackUsed
-        ? providerStore.setAuthMode(id, discovered.authMode)
-        : { changed: false };
-      const stored = providerStore.setDiscoveredImageModels(
-        id,
-        discovered.ok ? imageModels : null,
-        {
-          status: discovered.ok
-            ? (imageModels.length ? 'ready' : 'none')
-            : 'error',
+      stored = await write(() => {
+        guard();
+        return providerStore.setDiscoveredImageModels(id, discovered.ok ? imageModels : null, {
+          status: discovered.ok ? (imageModels.length ? 'ready' : 'none') : 'error',
           message: discovered.message,
           modelCount: Number(discovered.totalModels) || models.length,
           claimUnassignedRoutes: false,
-        },
-      );
-      if (stored.routesChanged || auth.changed) {
-        publishProviderChange(
-          auth.changed ? 'Anthropic 认证与模型能力更新' : '图像能力更新',
-          { runtimeChanged: !!(auth.changed && before && before.activeTiers && before.activeTiers.length) },
-        );
-      }
-      return { ...discovered, profile: stored.profile };
+        });
+      });
+      // Directory refresh never replaces explicit media bindings.
+      const media = discovered.ok && typeof providerStore.setMediaCatalog === 'function'
+        ? await write(() => {
+          guard();
+          return providerStore.setMediaCatalog(id, discovered.mediaCandidates || discovered.mediaModels || discovered.modelCatalog || []);
+        }) : null;
+      return { ...discovered, profile: media ? media.profile : stored.profile };
     } catch (error) {
-      return { ...discovered, ok: false, message: error.message };
+      if (error.code === 'PROVIDER_RESULT_STALE') {
+        return { ...discovered, ok: false, stale: true, models: [], modelCatalog: [], imageModels: [], mediaModels: [], mediaCandidates: [], totalModels: 0, message: error.message };
+      }
+      return { ...discovered, ...providerWriteFailure(error, '模型目录更新失败') };
+    } finally {
+      // Earlier writes may have committed even if a later catalog write failed.
+      if (stored?.routesChanged || auth.changed) {
+        notify(auth.changed ? 'Anthropic 认证与模型能力更新' : '图像能力更新', {
+          runtimeChanged: !!(auth.changed && before?.activeTiers?.length),
+        });
+      }
     }
   });
 

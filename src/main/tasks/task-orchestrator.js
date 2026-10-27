@@ -10,7 +10,8 @@ const { DEFAULTS: GENERAL_PREFERENCE_DEFAULTS } = require('../app/general-prefer
 
 const DEFAULT_RESOURCE_LIMITS = Object.freeze({
   claude: GENERAL_PREFERENCE_DEFAULTS.maxParallelTasks,
-  image: 1,
+  image: 3,
+  video: 2,
   command: 1,
 });
 
@@ -71,6 +72,7 @@ function inferResource(input = {}) {
   if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
   const kind = String(input.kind || '').toLowerCase();
   if (kind === 'image' || kind.endsWith('_image')) return 'image';
+  if (kind === 'video' || kind.endsWith('_video')) return 'video';
   if (kind === 'command' || kind.endsWith('_command')) return 'command';
   return 'claude';
 }
@@ -503,9 +505,13 @@ class TaskOrchestrator {
   }
 
   _externalActiveRuns() {
-    return this.ledger.list({ terminal: false }).filter((run) => (
-      ACTIVE_STATES.has(run.state) && !this.active.has(run.runId) && !this.externalActive.has(run.runId)
-    ));
+    return this.ledger.list({ terminal: false }).filter((run) => {
+      if (!ACTIVE_STATES.has(run.state) || this.active.has(run.runId) || this.externalActive.has(run.runId)) return false;
+      const media = ['image', 'video'].includes(this._resourceOf(run));
+      // Media pools bound new generation executions. Paused work has released
+      // its lease, and recovery only polls/downloads an already accepted task.
+      return !(media && (run.state === RUN_STATES.WAITING_USER || run.metadata?.mediaRecoveryOnly === true));
+    });
   }
 
   _occupancy() {
@@ -520,6 +526,14 @@ class TaskOrchestrator {
     for (const entry of this.active.values()) add(entry.run, entry.resource);
     for (const entry of this.externalActive.values()) add(entry.run, entry.resource);
     for (const run of this._externalActiveRuns()) add(run);
+    // Polling an accepted media task uses no generation slot, but its active
+    // history writer still owns the conversation until completion or pause.
+    for (const run of this.ledger.list({ terminal: false })) {
+      if (!run.metadata?.mediaRecoveryOnly || !['image', 'video'].includes(this._resourceOf(run))
+        || !ACTIVE_STATES.has(run.state) || run.state === RUN_STATES.WAITING_USER) continue;
+      const conversationKey = this._conversationKeyOf(run);
+      if (conversationKey) conversations.add(conversationKey);
+    }
     return { resources, conversations };
   }
 

@@ -45,9 +45,10 @@ const { observeProvenance, applyProvenance, protectSdkMetadata, resolveStoredSco
 const { createSessionForkService } = require('./sdk/sdk-session-forks');
 const { createSessionHistoryService, executeSessionOperation } = require('./sdk/sdk-session-history');
 const { registerNativeAttachmentDialog } = require('./app/native-attachment-dialog');
-const { createMiniWindowHost, isQuickChatEnabled, normalizeQuickChatPatch } = require('./app/mini-window-host');
+const { createMiniWindowHost, isQuickChatEnabled } = require('./app/mini-window-host');
 const { createMiniChatController } = require('./app/mini-chat-controller');
 const { createTaskbarCompletionBadge, createNativeTaskbarOverlay } = require('./app/taskbar-completion-badge');
+const { createConversationCompletionState } = require('./app/conversation-completion-state');
 const updater = require('./app/updater');
 const claudeSdk = require('./sdk/claude-sdk');
 const { LiveTurnRouter } = require('./live/live-turn-router');
@@ -62,7 +63,7 @@ const historyStore = require('./app/history-store').createHistoryStore({
   recoverLegacyOutput: (...args) => recoverLegacyOutput(...args),
   canWrite: id => getConversationDeletion().canWrite(id),
 });
-const { getHistoryDir, historyIndexPath, convFilePath, writeJsonAtomic, convMeta, readHistoryIndex, writeHistoryIndex, rebuildHistoryIndex, loadConversation, persistConversationRecord, forEachConversation, migrateHistoryV1 } = historyStore;
+const { getHistoryDir, convFilePath, writeJsonAtomic, readHistoryIndex, loadConversation, persistConversationRecord, migrateHistoryV1 } = historyStore;
 const { createRuntimeMetadataWriter, completeConversationTurn } = require('./app/conversation-mutations');
 const { createTurnDeliveryService, protectTurnDeliverables } = require('./app/turn-delivery-service');
 const { createTurnDeliveryHooks } = require('./app/turn-delivery-hooks');
@@ -94,17 +95,12 @@ const { normalizeSupplement, sameSupplement, submitLiveSupplement, observeSupple
 const recoverLegacyOutput = require('./projects/legacy-output-recovery').createLegacyOutputRecovery();
 const { LiveTurnControls } = require('./live/live-turn-control');
 const { ProviderStore } = require('./providers/provider-store');
-const {
-  providerApiUrl,
-  imageRequestRoute,
-} = require('./providers/provider-connectivity');
 const { TaskLedger } = require('./tasks/task-ledger');
-const { TaskEventJournal, isValidEpoch } = require('./tasks/task-event-journal');
+const { TaskEventJournal } = require('./tasks/task-event-journal');
 const { TaskProgressClient } = require('./tasks/task-progress-client');
 const { TaskOrchestrator } = require('./tasks/task-orchestrator');
 const {
   InteractionBroker,
-  isAppPermissionMode,
   resolveUnattendedPermissionMode,
 } = require('./tasks/interaction-broker');
 const { createConversationPermissions, isConversationPermissionMode } = require('./projects/conversation-permissions');
@@ -113,7 +109,7 @@ const { SkillDraftClient } = require('./skills/skill-draft-client');
 const { prepareSkillGenerationWorkspace } = require('./skills/skill-generation-workspace');
 const { SkillMaintenanceHost } = require('./skills/skill-maintenance-host');
 const { normalizeMaintenancePolicy, evaluateMaintenanceRun } = require('./skills/skill-maintenance-policy');
-const { normalizeMemoryMeta, memoryEligibility } = require('./memory/memory-schema');
+const { memoryEligibility, MEMORY_TYPE_GUIDANCE } = require('./memory/memory-schema');
 const {
   RUN_STATES,
   RUN_EVENT_SCHEMA_VERSION,
@@ -166,16 +162,16 @@ const SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 // ─────────────────────────────────────────
 // Relay 长期记忆主库：保留旧目录，记录按全局/项目作用域访问。
 // ─────────────────────────────────────────
-//   复刻 Claude Code CLI 的原生记忆模式:纯文件 —— 一个 MEMORY.md 索引(每条一行)
-//   + 每条事实一个 .md(带 name/description/type frontmatter)。但 CLI 的记忆注入是
-//   交互式 harness 的特权,`claude -p`(headless)从不注入;故由 main 进程在拼 prompt 时
-//   把索引塞进去(见下方 buildMemoryHint),并用 --add-dir 授权该目录,让模型自读自写。
-//   数据位置保持兼容；受控工具负责读取、候选写入、版本校验和恢复。
+//   数据位置保持兼容。宿主负责检索、历史提炼与来源校验；受控工具负责
+//   正文读取和候选写入，批准、版本冲突和恢复统一由 MemoryStore 管理。
 const MEMORY_DIR = path.join(os.homedir(), '.claude', 'relay-memory');
 const MEMORY_INDEX = path.join(MEMORY_DIR, 'MEMORY.md');
 const { MemoryStore } = require('./memory/memory-store');
 const { createMemoryRuntime, MEMORY_CONSOLIDATION_PROMPT } = require('./memory/memory-runtime');
-const relayMemoryStore = new MemoryStore({ dir: MEMORY_DIR });
+const { createMemoryRetriever, redactMemoryText } = require('./memory/memory-retrieval');
+const { MemoryLearningService } = require('./memory/memory-learning');
+const relayMemoryStore = new MemoryStore({ dir: MEMORY_DIR, isCore: isMemoryPinned });
+const memoryRetriever = createMemoryRetriever({ store: relayMemoryStore });
 const memoryRequestContexts = new Map();
 const MEMORY_USAGE_FILE = path.join(MEMORY_DIR, '.usage.json');
 let _memoryUsageCache = null;
@@ -190,7 +186,7 @@ function readMemoryUsage() {
   return _memoryUsageCache;
 }
 
-function flushMemoryUsage() {
+function flushMemoryUsage({ strict = false } = {}) {
   if (_memoryUsageFlushTimer) clearTimeout(_memoryUsageFlushTimer);
   _memoryUsageFlushTimer = null;
   try {
@@ -203,7 +199,7 @@ function flushMemoryUsage() {
       fs.rmSync(MEMORY_USAGE_FILE, { force: true });
       fs.renameSync(tmp, MEMORY_USAGE_FILE);
     }
-  } catch (e) { console.warn('[memory] 用量元数据写入失败: %s', e.message); }
+  } catch (e) { if (strict) throw e; console.warn('[memory] 用量元数据写入失败: %s', e.message); }
 }
 
 function scheduleMemoryUsageFlush() {
@@ -237,37 +233,21 @@ function memoryReadStats(file) {
   } catch (_) { return null; }
 }
 
+function isMemoryPinned(file) {
+  const usage = readMemoryUsage();
+  if (usage[file]?.pinned) return true;
+  return process.platform === 'win32' && Object.keys(usage).some(key => key.toLowerCase() === String(file).toLowerCase() && usage[key]?.pinned);
+}
+
 function memoryIndexLine(entry) {
   const scope = entry.meta && entry.meta.scope !== 'global'
     ? ` [${entry.meta.scope}:${entry.meta.projectId || '-'}]` : '';
-  return `- [${entry.title}](${entry.file})${entry.pinned ? ' [核心]' : ''}${scope}${entry.desc ? ' — ' + entry.desc : ''}`;
-}
-
-function memoryQueryTerms(value) {
-  const text = String(value || '').toLowerCase().slice(-8000);
-  const terms = new Set((text.match(/[a-z0-9_\-]{2,}|[\u3400-\u9fff]{2,}/g) || []).flatMap((token) => {
-    if (!/[\u3400-\u9fff]/.test(token) || token.length <= 2) return [token];
-    const grams = [];
-    for (let i = 0; i < token.length - 1; i++) grams.push(token.slice(i, i + 2));
-    return grams;
-  }));
-  return [...terms].slice(0, 160);
-}
-
-function memoryRelevanceScore(entry, terms) {
-  const title = `${entry.title} ${entry.file}`.toLowerCase();
-  const desc = String(entry.desc || '').toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    if (title.includes(term)) score += 6;
-    if (desc.includes(term)) score += 3;
-  }
-  return score;
+  return `- [${redactMemoryText(entry.title)}](${entry.file})${entry.pinned ? ' [核心]' : ''}${scope}${entry.desc ? ' — ' + redactMemoryText(entry.desc) : ''}`;
 }
 
 // ── 索引由主进程根据受治理的记忆库生成，模型通过 Relay 记忆工具访问正文。 ──
 // 磁盘索引供用户查看；每轮返回的 entries/lines 按调用方的项目上下文过滤。
-function rebuildMemoryIndex(context = {}) {
+function rebuildMemoryIndex(context = {}, { strict = false } = {}) {
   let allEntries = [];
   const usage = readMemoryUsage();
   try {
@@ -277,7 +257,7 @@ function rebuildMemoryIndex(context = {}) {
       desc: meta.description.replace(/\r?\n/g, ' ').trim(),
       pinned: meta.core || !!(usage[file] && usage[file].pinned),
     }));
-  } catch (error) { console.warn('[memory] 读取记忆库失败: %s', error.message); }
+  } catch (error) { if (strict) throw error; console.warn('[memory] 读取记忆库失败: %s', error.message); }
   allEntries.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.mtime - a.mtime || a.file.localeCompare(b.file));
   const activeIndexEntries = allEntries.filter((entry) => memoryEligibility(entry.meta, {
     projectId: entry.meta.projectId, now: context.now,
@@ -287,7 +267,7 @@ function rebuildMemoryIndex(context = {}) {
   const entries = allEntries.filter((entry) => memoryEligibility(entry.meta, context).eligible);
   const lines = entries.map(memoryIndexLine);
   try { relayMemoryStore.writeIndex(body); }
-  catch (error) { console.warn('[memory] 写入索引失败: %s', error.message); }
+  catch (error) { if (strict) throw error; console.warn('[memory] 写入索引失败: %s', error.message); }
   return {
     count: lines.length, totalCount: allEntries.length,
     bytes: Buffer.byteLength(lines.join('\n'), 'utf8'),
@@ -306,12 +286,17 @@ const MEMORY_INDEX_HEAD = 40;   // 降级时保留核心记忆 + 与当前任务
 function buildMemoryHint(mode = 'full', query = '', context = {}) {
   if (mode === 'off') return '';
   const { entries } = rebuildMemoryIndex(context);
-  const terms = memoryQueryTerms(query);
-  const ranked = entries.map(entry => ({ entry, score: memoryRelevanceScore(entry, terms) }))
-    .sort((a, b) => Number(b.entry.pinned) - Number(a.entry.pinned) || b.score - a.score || b.entry.mtime - a.entry.mtime);
+  const hits = memoryRetriever.search(query, { context, limit: 100, includeCore: true });
+  const byFile = new Map(hits.map((hit, index) => [hit.file, { ...hit, rank: index }]));
+  const ranked = entries.map(entry => ({ entry, hit: byFile.get(entry.file) }))
+    .filter(item => item.entry.pinned || item.hit)
+    .sort((a, b) => Number(b.entry.pinned) - Number(a.entry.pinned)
+      || (a.hit?.rank ?? Infinity) - (b.hit?.rank ?? Infinity) || b.entry.mtime - a.entry.mtime);
   const selected = []; let used = 0;
-  for (const { entry } of ranked) {
-    const line = memoryIndexLine(entry), size = Buffer.byteLength(line + '\n', 'utf8');
+  for (const { entry, hit } of ranked) {
+    const excerpt = hit?.matchedFields?.includes('body') && hit.snippet
+      ? ' — 正文命中：' + String(hit.snippet).replace(/[\r\n]/g, ' ').slice(0, 160) : '';
+    const line = memoryIndexLine(entry) + excerpt, size = Buffer.byteLength(line + '\n', 'utf8');
     if (used + size > MEMORY_INDEX_BUDGET || selected.length >= MEMORY_INDEX_HEAD) continue;
     selected.push({ entry, line }); used += size;
   }
@@ -322,7 +307,8 @@ function buildMemoryHint(mode = 'full', query = '', context = {}) {
   return '\n\n---\n[长期记忆] Relay 管理' + scope + '记忆。\n'
     + selected.map(item => item.line).join('\n')
     + '\n使用 mcp__relay-memory__list 查询、mcp__relay-memory__read 读取正文。完整索引和版本由宿主管理，不通过文件或 Shell 直接读写记忆目录。\n'
-    + rules + (mode === 'maintenance' ? '\n' + MEMORY_CONSOLIDATION_PROMPT : '');
+    + rules + (mode === 'read' || mode === 'maintenance' ? '' : '\n' + MEMORY_TYPE_GUIDANCE)
+    + (mode === 'maintenance' ? '\n' + MEMORY_CONSOLIDATION_PROMPT : '');
 }
 
 // 让 Windows 任务栏把多个窗口归到我们 app 而不是 Electron(也修 dev 模式任务栏图标走 .exe 不走 electron.exe)
@@ -620,6 +606,16 @@ function publicTaskRun(run) {
   };
 }
 
+const pendingMiniCompletions = new Map();
+const conversationCompletionState = createConversationCompletionState({
+  filePath: path.join(app.getPath('userData'), 'conversation-completions.json'),
+  onChange: snapshot => {
+    const win = applicationWindows.mainWindow;
+    if (win && !win.isDestroyed()) win.webContents.send('history:completionChanged', snapshot);
+  },
+  onError: error => console.warn('[history-completion] %s', error.message),
+});
+
 const taskbarBadgeImages = new Map();
 function focusedRelayWindow(win) {
   return !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized() && win.isFocused();
@@ -655,6 +651,11 @@ app.on('browser-window-focus', (_event, win) => {
 });
 
 function broadcastTaskLedgerChange(change) {
+  if (change?.run?.source?.type === 'mini' && !change.run.lineage?.parentRunId
+      && ['succeeded', 'failed'].includes(change.run.state) && change.previous && !isTerminalState(change.previous.state)) {
+    // Mini persists its final turn asynchronously after receiving job-done.
+    pendingMiniCompletions.set(change.run.runId, change);
+  } else conversationCompletionState.observe(change);
   if (process.platform === 'win32') taskbarCompletionBadge.observe(change);
   const run = publicTaskRun(change && change.run);
   if (!run) return;
@@ -771,6 +772,7 @@ try {
       reason: 'Relay restarted before the task reached a terminal state',
       retainQueued: false,
       includeTerminal: false,
+      shouldRetain: run => require('./media/media-task-bridge').ownsMediaRecovery(run, app.getPath('userData')),
     })
     : { interrupted: [] };
   if (recovered.interrupted.length) {
@@ -780,7 +782,7 @@ try {
         try {
           materializeCreationTaskResult(run, {
             ok: false,
-            error: 'Relay 在图片生成完成前退出，请重新生成',
+            error: 'Relay 在生成完成前退出，未找到可恢复的远端任务记录',
           });
         } catch (historyError) {
           console.warn('[image] 恢复创作占位失败 runId=%s: %s', run.runId, historyError.message);
@@ -1004,6 +1006,7 @@ function finishShadowTaskRun(runId, ok, details = {}) {
       } : {}),
       result: {
         status,
+        ...(Object.hasOwn(details, 'conversationId') ? { conversationId: details.conversationId || null } : {}),
         summary: redactTaskText(details.summary || ''),
         error: details.error ? redactTaskText(details.error) : null,
         artifactPaths: Array.isArray(details.artifactPaths) ? details.artifactPaths.slice(0, 100) : [],
@@ -1033,7 +1036,7 @@ function requestShadowTaskCancel(runId) {
   } catch (e) { console.warn('[task-ledger] 标记取消失败 runId=%s: %s', runId, e.message); }
 }
 
-function startScheduledShadowRun({ task, trigger, scheduledFor, startedAt } = {}) {
+function startScheduledShadowRun({ task, trigger, scheduledFor, startedAt, runId = crypto.randomUUID() } = {}) {
   const action = task && task.action || {};
   const scheduledWorkspace = resolveExecutionWorkspace({
     conversationId: task.workspaceConversationId || task.lastConvId || `scheduled-${task.id}`,
@@ -1042,10 +1045,11 @@ function startScheduledShadowRun({ task, trigger, scheduledFor, startedAt } = {}
     agentName: action.agentName || null,
   });
   const actionType = action.type || 'chat';
-  const kind = actionType === 'image' ? 'scheduled_image'
+  const media = ['image', 'video'].includes(actionType)
+    ? resolveMediaRequest({ model: action.mediaModel || action.imageModel, mediaKind: actionType }) : null;
+  const kind = media ? `scheduled_${media.mediaKind}`
     : actionType === 'command' ? 'scheduled_command'
       : 'scheduled_chat';
-  const runId = crypto.randomUUID();
   const run = createShadowTaskRun({
     runId,
     state: RUN_STATES.QUEUED,
@@ -1062,10 +1066,11 @@ function startScheduledShadowRun({ task, trigger, scheduledFor, startedAt } = {}
       builtin: task && task.builtin || null,
       scheduledFor: scheduledFor || null,
     },
-    execution: { jobId: runId, appInstanceId: TASK_EVENT_EPOCH },
+    execution: { jobId: runId, appInstanceId: TASK_EVENT_EPOCH, resource: media?.mediaKind || (actionType === 'command' ? 'command' : 'claude') },
     metadata: {
       actionType,
-      model: action.model || action.imageModel || null,
+      model: media?.model || action.model || action.mediaModel || action.imageModel || null,
+      ...(media ? { mediaKind: media.mediaKind } : {}),
       workingDir: scheduledWorkspace.cwd,
     },
   });
@@ -1103,11 +1108,12 @@ function finishScheduledShadowRun(runId, result) {
 }
 
 function interruptActiveShadowRuns(reason) {
+  mediaShuttingDown = true;
   if (!taskLedger) return;
   flushShadowTaskEvents();
   try {
     for (const run of taskLedger.list({ terminal: false })) {
-      if (run.state === RUN_STATES.QUEUED && !run.startedAt) continue;
+      if (require('./media/media-task-bridge').ownsMediaRecovery(run, app.getPath('userData'))) continue;
       taskLedger.terminal(run.runId, RUN_STATES.INTERRUPTED, {
         phase: 'terminal',
         executorState: 'stopped',
@@ -1302,7 +1308,17 @@ function getConversationDeletion() {
   });
   return conversationDeletionService;
 }
-function deleteConversation(id) { return getConversationDeletion().delete(id); }
+function deleteConversation(id) {
+  return getConversationDeletion().delete(id).then(result => {
+    if (result?.ok === true) {
+      conversationCompletionState.remove(id);
+      for (const [runId, change] of pendingMiniCompletions) {
+        if (change.run.source.conversationId === id) pendingMiniCompletions.delete(runId);
+      }
+    }
+    return result;
+  });
+}
 function assertConversationAvailable(id) {
   if (!id) return;
   getConversationDeletion().assertAvailable(id);
@@ -1355,17 +1371,16 @@ function promptNeedsFeishu(text) {
   return typeof text === 'string' && FEISHU_URL_RE.test(text);
 }
 
-// 飞书轮追加到 prompt 末尾的系统提示 —— 让模型等 MCP 就绪而不是退化抓网页
+// 飞书轮追加到 prompt 末尾的系统提示 —— 按当前 MCP 清单发现工具，避免重用历史入口。
 const FEISHU_HINT =
   '\n\n---\n[系统提示] 上面包含飞书(Feishu/Lark)文档链接。请务必使用 feishu-mcp-pro ' +
-  '提供的 MCP 工具来读取和操作(如 wiki_get_node / doc_fetch / doc_read / doc_create / doc_write / ' +
-  'doc_update / bitable_ops / sheet_ops 等)。若这些工具此刻尚未就绪,请稍等片刻后重试调用,' +
-  '不要改用 WebFetch、WebSearch 或命令行(curl/Invoke-WebRequest)去抓取网页 —— 飞书文档需要登录鉴权,' +
-  '直接抓网页只会拿到登录页,无法获取正文。\n' +
-  '重要:飞书 MCP 提供约 50+ 个工具(涵盖文档读写、多维表格、电子表格、日历、任务、知识库等)。' +
-  '如果你的工具列表中只看到部分飞书工具(例如只有读取类没有写入类),这是 MCP 工具列表加载延迟导致的,' +
-  '请直接尝试调用你需要的工具名称(如 doc_create、doc_write、doc_update 等),不要因为工具列表中暂时' +
-  '看不到就放弃或告诉用户工具不可用——工具实际上是存在的,直接调用即可成功。';
+  '提供的 MCP 工具来读取和操作。先检查本轮当前工具列表：所需业务工具已列出时，按其原始参数调用；' +
+  '若只看到名称以 relay_search_tools 开头的飞书发现入口，先通过该入口用 query 或 names 搜索并激活所需工具，' +
+  '再调用返回的原始工具名。工具按需加载，看不到业务工具不代表服务离线。\n' +
+  '只使用当前列表中的发现入口，不要从历史复制或猜测带随机后缀的工具名。若返回 No such tool available，' +
+  '重新检查当前工具列表并通过当前入口重新发现，最多重试发现一次；入口缺失或仍失败时，报告实际错误，' +
+  '提示用户在 MCP 设置中重连服务或重建会话，不要反复猜名调用，也不要自动重放可能已经生效的写入。' +
+  '不要改用 WebFetch、WebSearch 或命令行抓取需要登录的飞书网页，也不要查找凭据或另行启动 MCP 服务来绕过工具发现。';
 
 // Relay 已为 AskUserQuestion 和权限请求提供原生决策卡。明确鼓励使用结构化工具，
 // 避免模型退回到一大段文字选项；UI 会在用户回复后把答案原样回传并继续本轮。
@@ -1488,6 +1503,12 @@ function getMiniChat() {
     setPermissions: input => getConversationPermissions().set(input),
     getSessionRoute: model => providerSessionRoute(activeRelayProviderRuntime({ tier: model }), model),
     onState: state => publishMiniState(state),
+    onFinishedSaved: ({ runId }) => {
+      const change = pendingMiniCompletions.get(runId);
+      if (!change) return;
+      pendingMiniCompletions.delete(runId);
+      conversationCompletionState.observe(change);
+    },
     onHistoryChanged: id => {
       try { if (applicationWindows.mainWindow && !applicationWindows.mainWindow.isDestroyed()) applicationWindows.mainWindow.webContents.send('mini:history-changed', { id }); } catch (_) {}
     },
@@ -1705,7 +1726,6 @@ function promptMaybeCron(text) { return typeof text === 'string' && CRON_HINT_RE
 //   所以这里只返回一个工厂，由 claude-sdk.js 在拿到 sdk 后调用。
 //   这样也顺带去掉了原来的临时配置文件与它的清理逻辑。
 function cronMcpFactory() {
-  const userDataDir = app.getPath('userData');
   return (sdk) => {
     try {
       const { createCronMcpServer } = require('./scheduling/cron-mcp');
@@ -1714,7 +1734,7 @@ function cronMcpFactory() {
           createSdkMcpServer: sdk.createSdkMcpServer,
           tool: sdk.tool,
           z: require('zod').z,
-          userDataDir,
+          scheduler,
         }),
       };
     } catch (e) {
@@ -1849,8 +1869,8 @@ function buildSdkParams({
   const effectivePermissionMode = background
     ? resolveUnattendedPermissionMode(permissionMode)
     : (isConversationPermissionMode(permissionMode) || permissionMode === 'plan' ? permissionMode : 'default');
-  const memory = createMemoryRuntime({ store: relayMemoryStore,
-    isCore: file => !!readMemoryUsage()[file]?.pinned,
+  const memory = createMemoryRuntime({ store: relayMemoryStore, retriever: memoryRetriever,
+    isCore: isMemoryPinned,
     context: () => ({ cwd: cwd || validWorkingDir || os.homedir(), projectId: runtimeContract?.projectId || null,
       mode: includeMemoryDirectory ? (background ? 'read' : 'full') : 'off',
       ...(typeof memoryContext === 'function' ? memoryContext() : memoryContext || {}) }),
@@ -1906,6 +1926,47 @@ function runRelayText(options) {
     runtimePolicy: buildRuntimePolicy({ settings: readAppSettings(), memoryDir: MEMORY_DIR,
       environment: runtime.agentEnvironment || 'native', mapPath: toWslPath }),
     onUsage: record => recordRelayUsage(record, 'background') });
+}
+
+let memoryLearningService = null;
+function getMemoryLearningService() {
+  if (memoryLearningService) return memoryLearningService;
+  const isCore = isMemoryPinned;
+  memoryLearningService = new MemoryLearningService({
+    store: relayMemoryStore,
+    stateDir: path.join(app.getPath('userData'), 'memory-learning'),
+    listConversations: () => readHistoryIndex().map(meta => {
+      const binding = getProjectStore().binding(meta.id);
+      return binding === undefined ? meta : { ...meta, projectId: binding };
+    }),
+    loadConversation: id => {
+      const conversation = loadConversation(id);
+      if (!conversation) return null;
+      // Project membership is host-owned and can change without rewriting a transcript.
+      const binding = getProjectStore().binding(id);
+      return { ...conversation, projectId: binding === undefined ? conversation.projectId || null : binding };
+    },
+    isConversationActive: id => !!(liveSessions.get(id)?.busy || liveSessions.get(id)?.asyncAgentTracker?.size
+      || taskLedger?.list({ terminal: false }).some(run => run.source?.conversationId === id)),
+    getProjects: () => getProjectStore().list(),
+    isCore,
+    generate: async ({ prompt, schema, validate, model, signal }) => {
+      const runtime = activeRelayProviderRuntime({ tier: model || 'sonnet', fallback: true });
+      return claudeSdk.runStructured({ prompt, schema, validate: value => ({ success: true, data: validate(value) }), signal, maxTurns: 6,
+        cwd: os.homedir(), model: runtime.modelId, timeoutMs: 60000,
+        runtimeEnv: getSdkRuntimeStorage().apply(runtime.env),
+        runtimePolicy: buildRuntimePolicy({ settings: readAppSettings(), memoryDir: MEMORY_DIR,
+          environment: runtime.agentEnvironment || 'native', mapPath: toWslPath }),
+        onUsage: record => recordRelayUsage(record, 'background') });
+    },
+  });
+  return memoryLearningService;
+}
+
+async function runMemoryMaintenance({ model, signal } = {}) {
+  const result = await getMemoryLearningService().run({ model, signal });
+  rebuildMemoryIndex();
+  return result;
 }
 
 // ─────────────────────────────────────────
@@ -3755,6 +3816,20 @@ ${prompt}`;
     });
   } catch (_) {}
   const onEvent = (evt) => {
+    if (evt?.type === 'job-done' && TaskClock.isRootEvent(evt)) {
+      // A shutdown-triggered native close may arrive after APP_EXIT was already
+      // committed. Carry that host-owned cause through both journal and UI;
+      // an ordinary abort/SDK error must not erase it or invent it.
+      evt = { ...evt };
+      delete evt.relay_app_interruption;
+      try {
+        const terminal = taskLedger?.get(runId);
+        if (terminal?.state === RUN_STATES.INTERRUPTED && terminal.result?.error?.code === 'APP_EXIT') {
+          evt.interrupted = true;
+          evt.relay_app_interruption = 'APP_EXIT';
+        }
+      } catch (error) { console.warn('[task-ledger] 读取退出归因失败: %s', error.message); }
+    }
     evt = taskClock.stamp(evt);
     try { turnDeliveryService?.observe(runId, evt); }
     catch (error) { console.warn('[deliverables] 文件事件记录失败: %s', error.code || error.message); }
@@ -4769,113 +4844,6 @@ ipcMain.handle('relay:quitAndInstall', () => updater.quitAndInstall());
 //   · 用 Node 原生 https,零外部依赖(不依赖 Python/openai 包,便于分发)。
 //   · 生成的图存到 userData/generated_images/,返回本地路径给 renderer 渲染(file://)。
 // ─────────────────────────────────────────
-// 可选的图像模型清单。每个模型自带可用尺寸 sizes(value=API 传的 size,label=界面比例)。
-//   · gpt-image-2:azure_openai 前缀,返回 b64_json。清晰度由独立的 quality 参数(low/medium/high)控制,
-//                 尺寸用固定 5 档比例;界面「画质」下拉走 qualityTiers。
-//   · 豆包 Seedream:volcengine_maas 前缀,返回 url。没有 quality 参数,清晰度=像素量(2K/4K),
-//                 故界面「画质」下拉切的是分辨率档(resoTiers),每档每比例对应一组官方推荐像素。
-// GPT-image-2 按「分辨率档 × 比例」给尺寸(和豆包同构,界面「画质」下拉切 1K/4K 档)。
-//   约束(Azure 官方):两边都是 16 的倍数、长边 ≤3840、宽高比 ≤3:1、总像素 [655,360, 8,294,400]。
-//   4K 档各值均已离线核验满足全部约束(注:受 829万像素上限,1:1 最大 2880×2880,到不了 4096)。
-const GPT_RESO = {
-  '1K': [
-    { ratio: '1:1',  value: '1024x1024' },
-    { ratio: '2:3',  value: '1024x1536' },
-    { ratio: '3:2',  value: '1536x1024' },
-    { ratio: '9:16', value: '1024x1792' },
-    { ratio: '16:9', value: '1792x1024' },
-  ],
-  '4K': [
-    { ratio: '1:1',  value: '2880x2880' },
-    { ratio: '2:3',  value: '2352x3520' },
-    { ratio: '3:2',  value: '3520x2352' },
-    { ratio: '9:16', value: '2160x3840' },
-    { ratio: '16:9', value: '3840x2160' },
-  ],
-};
-const GPT_RATIO_DESC = {
-  '1:1': '正方形，头像', '2:3': '竖图，社交媒体', '3:2': '横图，横版插画',
-  '9:16': '手机壁纸，人像', '16:9': '桌面壁纸，风景',
-};
-function gptSizesForTier(tier) {
-  const rows = GPT_RESO[tier] || GPT_RESO['1K'];
-  return rows.map((r) => ({ value: r.value, label: r.ratio, shortLabel: r.ratio, desc: GPT_RATIO_DESC[r.ratio] || '' }));
-}
-// GPT 分辨率档 → quality 参数:1K 用 medium(快/省)、4K 用 high(配高分辨率)。在 generateImageCore 里据 size 反推。
-const GPT_TIERS = [
-  { value: '1K', label: '1K', desc: '标准，快' },
-  { value: '4K', label: '4K', desc: '超清，慢' },
-];
-// 判断某 size 属于 GPT 哪个分辨率档(用于反推 quality);非 GPT 尺寸返回 null。
-function gptTierOfSize(size) {
-  for (const [tier, rows] of Object.entries(GPT_RESO)) {
-    if (rows.some((r) => r.value === size)) return tier;
-  }
-  return null;
-}
-// 豆包按「分辨率档 × 比例」给官方推荐像素值(火山《Seedream·size》原表)。
-//   2K/4K 各比例的宽高像素;界面选「画质(档) + 比例」两件事,生成时查这张表得最终 size。
-//   注:豆包 size 约束=总像素 [3,686,400, 16,777,216] 且宽高比 [1/16,16],下列值均已满足。
-const DOUBAO_RESO = {
-  '2K': [
-    { ratio: '1:1',  value: '2048x2048' },
-    { ratio: '4:3',  value: '2304x1728' },
-    { ratio: '3:4',  value: '1728x2304' },
-    { ratio: '16:9', value: '2848x1600' },
-    { ratio: '9:16', value: '1600x2848' },
-    { ratio: '3:2',  value: '2496x1664' },
-    { ratio: '2:3',  value: '1664x2496' },
-    { ratio: '21:9', value: '3136x1344' },
-  ],
-  '4K': [
-    { ratio: '1:1',  value: '4096x4096' },
-    { ratio: '4:3',  value: '4704x3520' },
-    { ratio: '3:4',  value: '3520x4704' },
-    { ratio: '16:9', value: '5504x3040' },
-    { ratio: '9:16', value: '3040x5504' },
-    { ratio: '3:2',  value: '4992x3328' },
-    { ratio: '2:3',  value: '3328x4992' },
-    { ratio: '21:9', value: '6240x2656' },
-  ],
-};
-// 比例 → 中文描述(界面比例下拉的副标题,2K/4K 共用)
-const DOUBAO_RATIO_DESC = {
-  '1:1': '正方形，头像', '4:3': '横图，文章配图', '3:4': '竖图，经典比例',
-  '16:9': '桌面壁纸，风景', '9:16': '手机壁纸，人像', '3:2': '横图，横版插画',
-  '2:3': '竖图，社交媒体', '21:9': '超宽，电影感',
-};
-// 把某一分辨率档展开成 sizes 列表(供界面比例下拉用;value=该档该比例的像素值)
-function doubaoSizesForTier(tier) {
-  const rows = DOUBAO_RESO[tier] || DOUBAO_RESO['2K'];
-  return rows.map((r) => ({
-    value: r.value, label: r.ratio, shortLabel: r.ratio, desc: DOUBAO_RATIO_DESC[r.ratio] || '',
-  }));
-}
-// 豆包各模型支持的分辨率档(5.0-lite 多一档 3K;4.5/4.0 只有 2K/4K)
-const DOUBAO_TIERS_53 = [
-  { value: '2K', label: '2K', desc: '标清，快' },
-  { value: '3K', label: '3K', desc: '高清' },
-  { value: '4K', label: '4K', desc: '超清，慢且贵' },
-];
-const DOUBAO_TIERS_2 = [
-  { value: '2K', label: '2K', desc: '标清，快' },
-  { value: '4K', label: '4K', desc: '超清，慢且贵' },
-];
-// 模型清单。qualityKind 告诉前端「画质」下拉切的是什么:
-//   'resolution' → 切分辨率档(豆包),qualityTiers 为档列表,真正的 size 由前端按 档×比例 查表;
-//   'quality'    → 切 quality 参数(GPT),qualityTiers 为 quality 取值,sizes 固定。
-// 三个模型的「画质」下拉统一切【分辨率档】(qualityKind:'resolution')。各自的档→比例→像素表
-//   分别走 gptReso / doubaoReso(getConfig 下发);前端按 档×比例 查出最终 size。
-//   GPT 的 quality 参数不在前端选,由 generateImageCore 据 size 落在哪个档自动推(1K→medium,4K→high)。
-const IMAGE_MODELS = [
-  { adapterId: 'gpt-image-2', label: 'GPT-image-2',  desc: '通用，文字渲染好',  ok: true,
-    sizes: gptSizesForTier('1K'), qualityKind: 'resolution', qualityTiers: GPT_TIERS, defaultQuality: '1K', resoKey: 'gpt' },
-  { adapterId: 'seedream-5.0', label: 'Seedream 5.0', desc: '中文友好，支持组图', ok: true,
-    sizes: doubaoSizesForTier('2K'), qualityKind: 'resolution', qualityTiers: DOUBAO_TIERS_53, defaultQuality: '2K', resoKey: 'doubao' },
-  { adapterId: 'seedream-4.5', label: 'Seedream 4.5', desc: '稳定，支持组图',   ok: true,
-    sizes: doubaoSizesForTier('2K'), qualityKind: 'resolution', qualityTiers: DOUBAO_TIERS_2, defaultQuality: '2K', resoKey: 'doubao' },
-];
-
 function generatedImagesDir() {
   const dir = path.join(app.getPath('userData'), 'generated_images');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -4896,303 +4864,102 @@ function pastedImagesDir() {
   return dir;
 }
 
-// IPC: 读取服务商已识别出的图像路由(renderer 渲染下拉用)。
-ipcMain.handle('image:getConfig', () => {
-  const metadata = new Map(IMAGE_MODELS.map((item) => [item.adapterId, item]));
-  const routes = providerStore.listImageRoutes()
-    .sort((left, right) => Number(right.activeProvider) - Number(left.activeProvider))
-    .map((route) => {
-      const adapted = metadata.get(route.adapterId);
-      return adapted ? {
-        ...adapted,
-        name: route.routeId,
-        routeId: route.routeId,
-        providerId: route.providerId,
-        providerName: route.providerName,
-        remoteModelId: route.remoteModelId,
-        desc: `${route.providerName} · ${adapted.desc}`,
-      } : null;
-    })
-    .filter(Boolean);
-  return {
-    models: routes,
-    // 各 resoKey → 「分辨率档 → [{ratio,value}]」表。前端按 模型.resoKey + 当前档 + 比例 查出最终 size。
-    resoTables: { doubao: DOUBAO_RESO, gpt: GPT_RESO },
-    savedDir: generatedImagesDir(),
-  };
-});
-
-// IPC: 文生图 / 图生图 / 多图融合 / 组图。
-//   { prompt, model, size, n, image, sequential } → { ok, paths:[], error }
-//   image:参考图,可为 data URL 字符串(单图)或字符串数组(多图融合,仅豆包,最多 14 张)。
-//   sequential:true 时开启组图(仅豆包,sequential_image_generation:auto,一次出一组关联图)。
-//   按固定适配模型的 provider 前缀分流（JSON 请求体）：
-//     · 豆包 volcengine_maas:打 /images/generations。参考图放 `image`(单图传 string、多图传 array);
-//       默认 watermark:false 去掉「AI生成」水印;组图透传 sequential_image_generation。
-//     · GPT azure_openai:带参考图时走「图片编辑」端点 /images/edits,参考图放 `image_url`
-//       （当前适配协议使用 JSON，而非 Azure 原生 multipart）；仅支持单图，数组取第一张。
-//       不支持多图融合/组图/watermark 参数。
-// 图像生成核心（供 image:generate IPC 与定时任务调度器共用）。
-//   入参 { prompt, model, size, n, image, sequential } → { ok, paths, error }。
-const MAX_IMAGE_API_RESPONSE_BYTES = 160 * 1024 * 1024;
-const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
-
-async function downloadGeneratedImage(urlValue, file, signal, redirectsLeft = 3) {
-  if (signal && signal.aborted) return { ok: false, canceled: true, error: '任务已取消' };
-  let url;
-  try { url = new URL(urlValue); } catch (_) { return { ok: false, error: '图片下载地址无效' }; }
-  if (!['http:', 'https:'].includes(url.protocol)) return { ok: false, error: '图片下载协议不受支持' };
-  const temporary = `${file}.${crypto.randomBytes(4).toString('hex')}.part`;
-  return new Promise((resolve) => {
-    let settled = false;
-    let request = null;
-    let output = null;
-    let bytes = 0;
-    const cleanup = () => {
-      if (signal) signal.removeEventListener('abort', onAbort);
-    };
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (!result.ok) {
-        try { if (output) output.destroy(); } catch (_) {}
-        try { fs.rmSync(temporary, { force: true }); } catch (_) {}
-      }
-      resolve(result);
-    };
-    const onAbort = () => {
-      try { if (request) request.destroy(); } catch (_) {}
-      finish({ ok: false, canceled: true, error: '任务已取消' });
-    };
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-    const mod = url.protocol === 'http:' ? require('http') : require('https');
-    request = mod.get(url, (response) => {
-      if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
-        response.resume();
-        cleanup();
-        if (redirectsLeft <= 0) return finish({ ok: false, error: '图片下载重定向过多' });
-        settled = true;
-        downloadGeneratedImage(new URL(response.headers.location, url).toString(), file, signal, redirectsLeft - 1)
-          .then(resolve);
-        return;
-      }
-      if (response.statusCode !== 200) {
-        response.resume();
-        finish({ ok: false, error: `图片下载失败（HTTP ${response.statusCode}）` });
-        return;
-      }
-      const declared = Number(response.headers['content-length']);
-      if (Number.isFinite(declared) && declared > MAX_DOWNLOADED_IMAGE_BYTES) {
-        response.destroy();
-        finish({ ok: false, error: '图片文件超过 64MB 安全上限' });
-        return;
-      }
-      output = fs.createWriteStream(temporary, { flags: 'wx' });
-      response.on('data', (chunk) => {
-        bytes += chunk.length;
-        if (bytes > MAX_DOWNLOADED_IMAGE_BYTES) {
-          response.destroy();
-          finish({ ok: false, error: '图片文件超过 64MB 安全上限' });
-        }
-      });
-      response.on('error', (error) => finish({ ok: false, error: error.message }));
-      output.on('error', (error) => finish({ ok: false, error: error.message }));
-      output.on('finish', () => {
-        if (settled || (signal && signal.aborted)) return finish({ ok: false, canceled: true, error: '任务已取消' });
-        try { fs.renameSync(temporary, file); finish({ ok: true }); }
-        catch (error) { finish({ ok: false, error: error.message }); }
-      });
-      response.pipe(output);
+// Both interactive creation and schedules use the same durable protocol service.
+let mediaService = null;
+let mediaShuttingDown = false;
+function getMediaService() {
+  if (!mediaService) {
+    const { MediaService } = require('./media/media-service');
+    mediaService = new MediaService({
+      userDataDir: app.getPath('userData'),
+      resolveRuntime: selection => providerStore.getMediaRuntime(selection),
+      isShuttingDown: () => mediaShuttingDown || applicationWindows.isQuitting,
+      resolveCredential: snapshot => providerStore.resolveMediaCredential(snapshot),
+      seal: value => {
+        if (!safeStorage.isEncryptionAvailable()) throw new Error('OS encryption unavailable');
+        return safeStorage.encryptString(value);
+      },
+      unseal: value => safeStorage.decryptString(value),
+      onChanged: task => {
+        try {
+          require('./media/media-task-bridge').reconcileMediaTask(task, {
+            ledger: taskLedger, materialize: materializeCreationTaskResult, finish: finishShadowTaskRun,
+            reconcileSchedule: value => scheduler.reconcileMediaTask(value), finishSchedule: finishScheduledShadowRun,
+            publish: value => { if (applicationWindows.mainWindow && !applicationWindows.mainWindow.isDestroyed()) applicationWindows.mainWindow.webContents.send('media:changed', value); },
+          });
+          if (task.runId && taskLedger?.get(task.runId)?.metadata?.mediaRecoveryOnly) taskOrchestrator?.dispatch();
+        } catch (error) { console.warn('[media] 更新任务视图失败: %s', error.message); }
+      },
     });
-    request.setTimeout(120000, () => {
-      request.destroy();
-      finish({ ok: false, error: '图片下载超时（120s）' });
-    });
-    request.on('error', (error) => {
-      if (signal && signal.aborted) finish({ ok: false, canceled: true, error: '任务已取消' });
-      else finish({ ok: false, error: error.message });
-    });
+  }
+  return mediaService;
+}
+function mediaConfig() {
+  return { models: providerStore.listMediaModels().map(item => ({ ...item, name: item.routeId, label: item.label || item.modelId, ok: item.available && item.enabled !== false })), savedDir: generatedImagesDir() };
+}
+function resolveMediaRequest(opts = {}) {
+  const requestedKind = opts.mediaKind === 'video' ? 'video' : 'image';
+  const model = opts.model || providerStore.listMediaModels({ modality: requestedKind }).find(item => item.available && item.enabled !== false)?.routeId;
+  if (!model) throw Object.assign(new Error('请先配置可用的图片或视频模型'), { code: 'MEDIA_BINDING_REQUIRED' });
+  const runtime = providerStore.getMediaRuntime(model);
+  const protocol = runtime && require('./media/media-protocols').getProtocolDefinitions().find(item => item.id === runtime.protocol);
+  if (!protocol || (runtime.modality && runtime.modality !== protocol.modality)) {
+    throw Object.assign(new Error('未找到类型匹配的可用媒体模型'), { code: 'MEDIA_RUNTIME_UNAVAILABLE' });
+  }
+  return { model: runtime.routeId || model, mediaKind: protocol.modality };
+}
+function mediaTaskResource(task) {
+  const snapshot = task?.snapshot;
+  const protocol = snapshot && require('./media/media-protocols').getProtocolDefinitions().find(item => item.id === snapshot.protocol);
+  return protocol?.modality || (task?.mediaKind === 'video' ? 'video' : 'image');
+}
+function markMediaRecoveryRun(task) {
+  const run = task?.runId && taskLedger?.get(task.runId);
+  if (!run || isTerminalState(run.state)) return;
+  const resource = mediaTaskResource(task);
+  // Recovery never submits a new generation. Keep its identity visible without
+  // treating its GET requests as another occupied generation slot.
+  taskLedger.update(run.runId, { state: run.state, execution: { ...run.execution, resource },
+    metadata: { ...run.metadata, mediaKind: resource, mediaRecoveryOnly: true,
+      orchestration: { ...run.metadata?.orchestration, resource } } });
+}
+ipcMain.handle('image:getConfig', () => mediaConfig());
+ipcMain.handle('media:getConfig', () => mediaConfig());
+for (const method of ['list', 'get', 'resume', 'stop', 'retryDownload']) {
+  ipcMain.handle(`media:${method}`, async (_event, value) => {
+    if (['resume', 'retryDownload'].includes(method)) {
+      const task = await getMediaService().get(value);
+      assertConversationAvailable(task?.conversationId);
+      const priorRun = task?.runId && taskLedger?.get(task.runId);
+      if (priorRun && isTerminalState(priorRun.state) && !['completed','failed'].includes(task.state)) {
+        const continuationId = crypto.randomUUID();
+        const resource = mediaTaskResource(task);
+        createShadowTaskRun({runId:continuationId,kind:resource,trigger:'user',title:'继续媒体任务',state:RUN_STATES.QUEUED,phase:'queued',source:{...priorRun.source,conversationId:task.conversationId || priorRun.source?.conversationId,conversationKind:'create',turnIndex:task.turnIndex ?? priorRun.source?.turnIndex},execution:{resource},recovery:{continuationOf:task.runId},metadata:{mediaTaskId:task.id,mediaKind:resource,mediaRecoveryOnly:true}});
+        await getMediaService().attachRun(task.id, continuationId);
+      } else if (task && !getMediaService().running.has(task.id)) {
+        markMediaRecoveryRun(task);
+      }
+    }
+    return getMediaService()[method](value);
   });
 }
-
-async function generateImageCore({ prompt, model, size, n, image, sequential, signal } = {}) {
-  if (signal && signal.aborted) return { ok: false, canceled: true, error: '任务已取消' };
-  const text = String(prompt || '').trim();
-  if (!text) return { ok: false, error: '请输入图片描述' };
-  const route = providerStore.getImageRuntime(model);
-  if (!route) return {
-    ok: false,
-    error: '未发现可用图像模型，请在“设置 → 服务商”保存服务商后点击“获取模型”',
-  };
-  const { baseUrl, apiKey } = route;
-  const chosen = IMAGE_MODELS.find((item) => item.adapterId === route.adapterId);
-  if (!chosen) return { ok: false, error: '该图像模型尚未被 Relay 适配' };
-  const isGpt = chosen.adapterId === 'gpt-image-2';
-  // 识别阶段不关心供应商前缀；调用阶段则完整保留远端模型 ID。
-  // 仅对 Relay 旧版已验证过的两种网关命名空间维持“请求头 + 裸模型名”兼容，
-  // 其他 Base URL 一律把服务端返回的完整 ID 原样放入 model 字段。
-  const { requestModel, providerHeader } = imageRequestRoute(route.remoteModelId);
-  // 归一化参考图:统一成数组,过滤掉空/非字符串项
-  const refs = (Array.isArray(image) ? image : (image ? [image] : []))
-    .filter((s) => typeof s === 'string' && s);
-  const hasRef = refs.length > 0;
-  const wantGroup = !!sequential && !isGpt;   // 组图仅豆包
-  // GPT 带参考图 → 编辑端点;其余(豆包,或纯文生图)→ 生成端点
-  const useEdit = isGpt && hasRef;
-
-  const payloadObj = {
-    model: requestModel,
-    prompt: text,
-    // 组图模式下放宽张数上限到 15(豆包组图:参考图数+生成数≤15);常规仍 1-4
-    n: Math.min(Math.max(parseInt(n, 10) || 1, 1), wantGroup ? 15 : 4),
-    size: size || '1024x1024',
-  };
-  if (hasRef) {
-    if (useEdit) {
-      payloadObj.image_url = refs[0];            // GPT 编辑:单图 image_url(取第一张)
-    } else {
-      // 豆包:单图传 string,多图传 array(多图融合)
-      payloadObj.image = refs.length === 1 ? refs[0] : refs;
-    }
+async function generateImageCore(opts = {}) {
+  let resolved;
+  try { resolved = resolveMediaRequest(opts); }
+  catch (error) { return { ok: false, error: error.message, code: error.code || 'MEDIA_RUNTIME_UNAVAILABLE' }; }
+  const admittedResource = opts.runId && taskLedger?.get(opts.runId)?.execution?.resource;
+  if (['image', 'video'].includes(admittedResource) && admittedResource !== resolved.mediaKind) {
+    return { ok: false, code: 'MEDIA_CONFIGURATION_CHANGED', error: '排队期间模型类型已变更，请重新选择模型后生成' };
   }
-  // GPT 画质:quality 不由前端选,按 size 落在哪个分辨率档自动推 —— 1K→medium(快/省)、4K→high(配高清)。
-  //   size 不在已知档里(如定时任务传了自定义尺寸)则回落 high(官方默认)。
-  if (isGpt) {
-    const tier = gptTierOfSize(payloadObj.size);
-    payloadObj.quality = (tier === '1K') ? 'medium' : 'high';
-  }
-  if (!isGpt) {
-    payloadObj.watermark = false;                // 豆包去水印(GPT 无此参数)
-    if (wantGroup) {
-      // 组图:auto 让模型自主决定张数;max_images 用 n 兜住上限
-      payloadObj.sequential_image_generation = 'auto';
-      payloadObj.sequential_image_generation_options = { max_images: payloadObj.n };
-    }
-  }
-  const payload = JSON.stringify(payloadObj);
-
-  const endpoint = useEdit ? '/images/edits' : '/images/generations';
-  let url;
-  try { url = new URL(providerApiUrl(baseUrl, `/v1${endpoint}`)); }
-  catch (_) { return { ok: false, error: '服务商 Base URL 无效' }; }
-  const mod = url.protocol === 'http:' ? require('http') : require('https');
-
-  const result = await new Promise((resolve) => {
-    let body = '';
-    let bodyBytes = 0;
-    let req;
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      if (signal) signal.removeEventListener('abort', onAbort);
-      resolve(value);
-    };
-    const onAbort = () => {
-      try { if (req) req.destroy(); } catch (_) {}
-      finish({ status: 0, body: '', err: '任务已取消', canceled: true });
-    };
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-    try {
-      req = mod.request({
-        hostname: url.hostname,
-        port: url.port || (url.protocol === 'http:' ? 80 : 443),
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'authorization': 'Bearer ' + apiKey,
-          'x-api-key': apiKey,
-          'content-length': Buffer.byteLength(payload),
-          ...(providerHeader ? { 'x-model-provider-id': providerHeader } : {}),
-        },
-      }, (res) => {
-        res.on('data', (c) => {
-          bodyBytes += c.length;
-          if (bodyBytes > MAX_IMAGE_API_RESPONSE_BYTES) {
-            res.destroy();
-            try { req.destroy(); } catch (_) {}
-            finish({ status: 0, body: '', err: 'API 响应超过 160MB 安全上限' });
-            return;
-          }
-          body += c;
-        });
-        res.on('end', () => finish({ status: res.statusCode, body }));
-      });
-    } catch (e) { return finish({ status: 0, body: '', err: e.message }); }
-    // 生图可能较慢,给 6 分钟(GPT-image-2 的 quality=high / 4K 单张常超 3 分钟)
-    req.setTimeout(360000, () => { try { req.destroy(); } catch (_) {} finish({ status: 0, body: '', err: '请求超时(360s)' }); });
-    req.on('error', (e) => finish({ status: 0, body: '', err: e.message, canceled: !!(signal && signal.aborted) }));
-    req.write(payload);
-    req.end();
-  });
-
-  if (result.canceled) return { ok: false, canceled: true, error: '任务已取消' };
-  if (result.err) { console.error('[image] 网络错误: %s', result.err); return { ok: false, error: '网络错误:' + result.err }; }
-  let json;
-  try { json = JSON.parse(result.body); } catch (_) { console.error('[image] API 返回非 JSON status=%d body=%s', result.status, (result.body || '').slice(0, 200)); return { ok: false, error: `API 返回非 JSON(HTTP ${result.status})` }; }
-  if (result.status !== 200 || json.error) {
-    const errObj = json.error || {};
-    const msg = errObj.message || errObj.param || `HTTP ${result.status}`;
-    const code = String(errObj.code || errObj.type || '').toLowerCase();
-    console.error('[image] API 报错 status=%d code=%s msg=%s', result.status, code, msg.slice(0, 200));
-    // 内容审核拒绝:给一句中文提示,告诉用户是被安全系统拦了、改提示词即可(GPT/豆包措辞不一,统一识别)
-    if (code.includes('content_policy') || code.includes('content_filter') ||
-        /safety system|content policy|moderation|被.*(拒绝|拦截|过滤)|敏感|违规/i.test(msg)) {
-      return { ok: false, error: '提示词被内容安全系统拒绝，未生成图片。请调整描述(尤其涉及人物身材/裸露/敏感的措辞)后重试。\n原始信息：' + msg };
-    }
-    return { ok: false, error: 'API 错误:' + msg };
-  }
-  const data = Array.isArray(json.data) ? json.data : [];
-  if (!data.length) return { ok: false, error: 'API 未返回图片数据' };
-
-  // 落盘:b64_json 直接写(.png);url 模式下载(豆包多为 .jpeg,按 URL 后缀定扩展名)
-  const dir = generatedImagesDir();
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const paths = [];
-  for (let i = 0; i < data.length; i++) {
-    if (signal && signal.aborted) return { ok: false, canceled: true, error: '任务已取消', paths };
-    const item = data[i];
-    try {
-      if (item.b64_json) {
-        const file = path.join(dir, `img-${ts}-${i + 1}.png`);
-        const encoded = String(item.b64_json);
-        const padding = encoded.endsWith('==') ? 2 : (encoded.endsWith('=') ? 1 : 0);
-        const estimatedBytes = Math.floor(encoded.length * 3 / 4) - padding;
-        if (estimatedBytes > 64 * 1024 * 1024) {
-          console.warn('[image] 跳过超限 base64 图片 index=%d estimatedBytes=%d', i, estimatedBytes);
-          continue;
-        }
-        if (signal && signal.aborted) return { ok: false, canceled: true, error: '任务已取消', paths };
-        const bytes = Buffer.from(encoded, 'base64');
-        if (bytes.length > 64 * 1024 * 1024) continue;
-        const temporary = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.part`;
-        try {
-          await fs.promises.writeFile(temporary, bytes, signal ? { signal } : undefined);
-          if (signal && signal.aborted) throw Object.assign(new Error('任务已取消'), { name: 'AbortError' });
-          await fs.promises.rename(temporary, file);
-          paths.push(file);
-        } catch (writeError) {
-          try { await fs.promises.rm(temporary, { force: true }); } catch (_) {}
-          if ((signal && signal.aborted) || writeError.name === 'AbortError') {
-            return { ok: false, canceled: true, error: '任务已取消', paths };
-          }
-          throw writeError;
-        }
-      } else if (item.url) {
-        // 从 URL 路径推断扩展名(jpg/jpeg/png/webp),拿不到则用 .png
-        let ext = 'png';
-        try { const m = new URL(item.url).pathname.match(/\.(jpe?g|png|webp)(?:$|\?)/i); if (m) ext = m[1].toLowerCase(); } catch (_) {}
-        const file = path.join(dir, `img-${ts}-${i + 1}.${ext}`);
-        const dl = await downloadGeneratedImage(item.url, file, signal);
-        if (dl.canceled) return { ok: false, canceled: true, error: '任务已取消', paths };
-        if (dl.ok) paths.push(file);
-      }
-    } catch (e) { console.warn('[image] 保存图片失败: %s', e.message); }
-  }
-  if (!paths.length) return { ok: false, error: '图片保存失败' };
-  return { ok: true, paths };
+  const input = { ...opts, ...resolved, expectedMediaKind: resolved.mediaKind };
+  if (!input.references && input.image) input.references = (Array.isArray(input.image) ? input.image : [input.image]).map(url => ({ url }));
+  delete input.image;
+  delete input.mediaKind;
+  try {
+    const result = await getMediaService().generate(input);
+    const task = result.taskId ? await getMediaService().get(result.taskId) : null;
+    return { ...result, state: task?.state, recoverable: ['needs_attention', 'submission_unknown', 'stopped', 'download_failed'].includes(task?.state) };
+  } catch (error) { return { ok: false, error: error.message, code: error.code || 'MEDIA_ERROR' }; }
 }
 
 // renderer 可能在付费图片请求完成前刷新或崩溃。主进程持有权威的 conversationId + turnIndex，
@@ -5205,13 +4972,18 @@ function materializeCreationTaskResult(source, result = {}) {
   const conv = loadConversation(conversationId);
   if (!conv || conv.kind !== 'create' || !Array.isArray(conv.turns) || !conv.turns[turnIndex]) return false;
   const turn = conv.turns[turnIndex];
+  if (result.mediaKind) turn.mediaKind = result.mediaKind;
+  if (result.taskId) turn.mediaTaskId = result.taskId;
   const paths = Array.isArray(result.paths) ? [...new Set(result.paths.filter((item) => typeof item === 'string' && item))] : [];
-  if (result.ok) {
+  if (result.ok || paths.length) {
     turn.resultPaths = paths;
-    delete turn.error;
+    if (result.mediaKind) turn.mediaKind = result.mediaKind;
+    if (result.taskId) turn.mediaTaskId = result.taskId;
+    if (result.ok) delete turn.error; else turn.error = result.error;
   } else if (!Array.isArray(turn.resultPaths) || !turn.resultPaths.length) {
     turn.resultPaths = [];
-    turn.error = compactText(result.error || (result.canceled ? '任务已取消' : '图片生成未完成'), 1000);
+    const mediaLabel = turn.mediaKind === 'video' ? '视频' : '图片';
+    turn.error = compactText(result.error || (result.canceled ? '任务已取消' : `${mediaLabel}生成未完成`), 1000);
   }
   const runId = source && source.runId || mapping.runId;
   if (runId && !turn.runId) turn.runId = String(runId);
@@ -5224,14 +4996,18 @@ function materializeCreationTaskResult(source, result = {}) {
 ipcMain.handle('image:generate', async (_e, opts = {}) => {
   try { assertConversationAvailable(opts.conversationId); }
   catch (error) { return { ok: false, code: error.code || 'CONVERSATION_UNAVAILABLE', error: error.message }; }
+  try { opts = { ...opts, ...resolveMediaRequest(opts) }; }
+  catch (error) { return { ok: false, code: error.code || 'MEDIA_RUNTIME_UNAVAILABLE', error: error.message }; }
   const runId = typeof opts.runId === 'string' && /^[0-9a-f][0-9a-f-]{15,63}$/i.test(opts.runId)
     ? opts.runId
     : crypto.randomUUID();
+  const mediaKind = opts.mediaKind === 'video' ? 'video' : 'image';
+  const mediaLabel = mediaKind === 'video' ? '视频' : '图片';
   const createdRun = createShadowTaskRun({
     runId,
     state: RUN_STATES.QUEUED,
     phase: 'queued',
-    kind: 'image',
+    kind: mediaKind,
     trigger: 'user',
     title: compactText(opts.prompt, 80) || 'AI 创作',
     priority: 100,
@@ -5241,14 +5017,14 @@ ipcMain.handle('image:generate', async (_e, opts = {}) => {
       conversationKind: 'create',
       turnIndex: Number.isSafeInteger(opts.turnIndex) ? opts.turnIndex : null,
     },
-    execution: { jobId: runId, appInstanceId: TASK_EVENT_EPOCH },
-    metadata: { model: opts.model || null, size: opts.size || null },
+    execution: { jobId: runId, appInstanceId: TASK_EVENT_EPOCH, resource: mediaKind },
+    metadata: { model: opts.model || null, mediaKind, size: opts.size || null },
   });
   if (taskLedger && !createdRun) {
     const existing = taskLedger.get(runId);
     if (existing) {
       if (!isTerminalState(existing.state)) {
-        return { ok: false, code: 'RUN_IN_PROGRESS', error: '这次图片任务已经在运行中', runId };
+        return { ok: false, code: 'RUN_IN_PROGRESS', error: `这次${mediaLabel}任务已经在运行中`, runId };
       }
       const priorPaths = existing.result && Array.isArray(existing.result.artifactPaths)
         ? existing.result.artifactPaths : [];
@@ -5258,11 +5034,11 @@ ipcMain.handle('image:generate', async (_e, opts = {}) => {
           ok: false, runId, reused: true,
           canceled: existing.state === RUN_STATES.CANCELED,
           error: existing.result && existing.result.error && (existing.result.error.message || existing.result.error)
-            || '这次图片任务已经结束',
+            || `这次${mediaLabel}任务已经结束`,
         };
     }
   }
-  const lease = await acquireTaskResource(runId, 'image', opts.conversationId || null);
+  const lease = await acquireTaskResource(runId, mediaKind, opts.conversationId || null);
   if (!lease) {
     const canceled = { ok: false, canceled: true, error: '任务已取消', runId };
     try { materializeCreationTaskResult({ ...opts, runId }, canceled); } catch (_) {}
@@ -5276,23 +5052,23 @@ ipcMain.handle('image:generate', async (_e, opts = {}) => {
     finishShadowTaskRun(runId, false, { error: error.message });
     return { ok: false, runId, code: error.code || 'CONVERSATION_UNAVAILABLE', error: error.message };
   }
-  updateScheduledShadowPhase(runId, 'tool', '正在生成图片');
+  updateScheduledShadowPhase(runId, 'tool', opts.mediaKind === 'video' ? '正在生成视频' : '正在生成图片');
   try {
-    const result = await generateImageCore({ ...opts, signal: lease.signal || opts.signal });
+    const result = await generateImageCore({ ...opts, runId, signal: lease.signal || opts.signal });
     try { materializeCreationTaskResult({ ...opts, runId }, result || {}); }
     catch (e) { console.warn('[image] 主进程回填创作历史失败 runId=%s: %s', runId, e.message); }
-    finishShadowTaskRun(runId, !!(result && result.ok), {
+    if (!(result && result.recoverable)) finishShadowTaskRun(runId, !!(result && result.ok), {
       status: result && result.canceled ? RUN_STATES.CANCELED : undefined,
-      summary: result && result.ok ? `已生成 ${(result.paths || []).length} 张图片` : '',
+      summary: result && result.ok ? `已生成 ${(result.paths || []).length} 个文件` : '',
       error: result && !result.ok ? result.error : null,
       artifactPaths: result && result.paths || [],
     });
     return { ...result, runId };
   } catch (e) {
-    try { materializeCreationTaskResult({ ...opts, runId }, { ok: false, error: e.message || '图片生成失败' }); }
+    try { materializeCreationTaskResult({ ...opts, runId }, { ok: false, mediaKind, error: e.message || `${mediaLabel}生成失败` }); }
     catch (historyError) { console.warn('[image] 主进程回填创作失败状态失败 runId=%s: %s', runId, historyError.message); }
-    finishShadowTaskRun(runId, false, { error: e.message || '图片生成失败' });
-    return { ok: false, error: e.message || '图片生成失败', runId };
+    finishShadowTaskRun(runId, false, { error: e.message || `${mediaLabel}生成失败` });
+    return { ok: false, mediaKind, error: e.message || `${mediaLabel}生成失败`, runId };
   } finally {
     releaseTaskResource(runId);
   }
@@ -5318,7 +5094,8 @@ ipcMain.handle('image:deleteSaved', (_e, p) => {
 // ─────────────────────────────────────────
 // 扩展名 → 类型分类(用于库里按类型筛选)
 const LIB_TYPE_BY_EXT = {
-  png:'image', jpg:'image', jpeg:'image', webp:'image', gif:'image', bmp:'image', svg:'image',
+  avif:'image', png:'image', jpg:'image', jpeg:'image', webp:'image', gif:'image', bmp:'image', svg:'image',
+  mp4:'video', webm:'video', mov:'video',
   pdf:'pdf',
   doc:'document', docx:'document', txt:'document', md:'document', rtf:'document',
   xls:'spreadsheet', xlsx:'spreadsheet', csv:'spreadsheet', tsv:'spreadsheet',
@@ -5336,7 +5113,7 @@ ipcMain.handle('library:listImages', () => {
   const dir = generatedImagesDir();
   try {
     const files = fs.readdirSync(dir)
-      .filter((n) => /\.(png|jpg|jpeg|webp|gif|bmp)$/i.test(n))
+      .filter((n) => /\.(png|jpg|jpeg|webp|gif|bmp|avif|mp4|webm|mov)$/i.test(n))
       .map((n) => { const p = path.join(dir, n); let mtime = 0, size = 0; try { const st = fs.statSync(p); mtime = st.mtimeMs; size = st.size; } catch (_) {} return { path: p, name: n, mtime, size }; })
       .sort((a, b) => b.mtime - a.mtime);
     return { ok: true, items: files };
@@ -5503,6 +5280,7 @@ ipcMain.handle('dialog:openFolder', async () => {
 // ─────────────────────────────────────────
 const historyIpcService = require('./app/history-ipc').registerHistoryIpc({
   ipcMain, history: historyStore, saveConversation, deleteConversation, genId, protectSdkMetadata,
+  completionState: conversationCompletionState,
   assertConversationAvailable: id => getConversationDeletion().assertAvailable(id),
   hydrateConversation: record => getTurnDeliveryService().hydrate(record),
   projects: { initialize: initializeProjectHistory, getStore: getProjectStore, projectConversation },
@@ -7750,6 +7528,9 @@ ipcMain.handle('data:importZip', async (_e, { kind, zipPath } = {}) => {
 require('./memory/memory-ipc').registerMemoryIpc({
   ipcMain, shell, relayMemoryStore, MEMORY_DIR, MEMORY_INDEX,
   refreshSkillUsageInBackground, readMemoryUsage, memoryReadStats, flushMemoryUsage, rebuildMemoryIndex,
+  getProjects: () => getProjectStore().list(),
+  getLearningStatus: () => getMemoryLearningService().status(),
+  invalidateMemory: file => memoryRetriever.invalidate(file),
 });
 
 // IPC: 探测环境(Agent 目录是否存在;运行时随 SDK 内置故恒可用)
@@ -7766,6 +7547,18 @@ ipcMain.handle('env:probe', async () => ({
 // IPC: 定时任务（scheduler.js）
 // ─────────────────────────────────────────
 //   调度器跑在主进程内（复用托盘常驻 + runClaudeJob）。这里只做 IPC 转发 + 启动注入。
+function restoreMediaTasks() {
+  (async () => {
+    const service = getMediaService();
+    for (const task of await service.list()) {
+      try { assertConversationAvailable(task.conversationId); } catch (_) { await service.stop(task.id); continue; }
+      if (!['completed','failed','stopped'].includes(task.state)) markMediaRecoveryRun(task);
+      await service.onChanged(task);
+      if (!['completed','failed','stopped'].includes(task.state)) await service.resume(task.id);
+    }
+  })().catch(error => console.warn('[media] 恢复任务失败: %s', error.message));
+}
+
 function initScheduler() {
   try {
     scheduler.init({
@@ -7780,7 +7573,10 @@ function initScheduler() {
         return providerSessionRoute(runtime, runtime.tier || tier);
       },
       memoryConsolidationPrompt: MEMORY_CONSOLIDATION_PROMPT,
+      runMemoryMaintenance,
       buildMemoryHint,                    // 普通定时任务默认只读；内置记忆整理使用 maintenance 候选模式
+      listMediaModels: () => providerStore.listMediaModels(),
+      generateMedia: generateImageCore,
       generateImage: generateImageCore,   // 定时出图（type=image）复用图像生成核心
       saveConversation,                   // chat/出图结果落历史（v2 目录式:单条写入,不再整库读写）
       loadConversation,                   // 读单条会话（被删→null）：同一任务多次执行复用同一条会话
@@ -7791,6 +7587,7 @@ function initScheduler() {
       onSkillCuratorDone: finalizeSkillCuratorDrafts,        // 只生成待审草稿并清理隔离副本
       onMemoryMaintenanceStart: () => refreshSkillUsageInBackground({ force: true }), // 整理前刷新记忆实读遥测
       taskRunStart: startScheduledShadowRun,
+      taskRunHistory: () => taskLedger ? taskLedger.list().filter((run) => run.source?.type === 'schedule') : [],
       taskRunAcquire: async (runId, actionType) => {
         const run = taskLedger && taskLedger.get(runId);
         const workspace = run && run.metadata && run.metadata.workingDir;
@@ -7800,7 +7597,7 @@ function initScheduler() {
         assertConversationAvailable(conversationId);
         const lease = await acquireTaskResource(
           runId,
-          actionType === 'image' ? 'image' : (actionType === 'command' ? 'command' : 'claude'),
+          run?.execution?.resource || (actionType === 'video' ? 'video' : actionType === 'image' ? 'image' : actionType === 'command' ? 'command' : 'claude'),
           conversationId || null,
         );
         if (!lease) return null;
@@ -7831,6 +7628,7 @@ function initScheduler() {
       },
     });
     console.log('[scheduler] 已启动');
+    restoreMediaTasks();
   } catch (e) {
     console.error('[scheduler] 启动失败:', e.message);
   }

@@ -1,8 +1,10 @@
 'use strict';
 const path = require('node:path');
 const { guardMemoryToolInput } = require('./memory-store');
+const { MEMORY_TYPES, VALID_TYPES, MEMORY_TYPE_GUIDANCE } = require('./memory-schema');
+const { createMemoryRetriever } = require('./memory-retrieval');
 const READ_TOOLS = new Set(['mcp__relay-memory__list', 'mcp__relay-memory__read']);
-const MEMORY_CONSOLIDATION_PROMPT = '整理当前作用域的 Relay 长期记忆。通过 relay-memory 的 list/read 工具核对条目；只对重复、过时或冲突内容提出精炼的替代候选，使用 propose，并携带刚读取的 revision。已确认内容在用户批准替代前保持有效；不得直接覆写、删除、移动记忆文件或修改 MEMORY.md。核心条目只报告问题。保留每条有效事实与来源，不把低读取次数当作无用。无需改动时简短说明，不制造候选。';
+const MEMORY_CONSOLIDATION_PROMPT = '整理当前作用域的 Relay 长期记忆。通过 relay-memory 的 list/read 工具核对条目；只对重复、过时或冲突内容提出精炼的替代候选，使用 propose，并携带刚读取的 revision。已确认内容在用户批准替代前保持有效；不得直接覆写、删除、移动记忆文件或修改 MEMORY.md。核心条目只报告问题。保留每条有效事实与来源，不把低读取次数当作无用。无需改动时简短说明，不制造候选。' + MEMORY_TYPE_GUIDANCE;
 
 function isStaticPowerShellSourceSearch(name, command, { memoryDir, cwd }) {
   // A narrow exception for a literal search term, not a PowerShell parser or a
@@ -31,7 +33,7 @@ function isStaticPowerShellSourceSearch(name, command, { memoryDir, cwd }) {
   return !guardMemoryToolInput('Write', { file_path: file }, { memoryDir, cwd });
 }
 
-function createMemoryRuntime({ store, context = () => ({}), onChanged = () => {}, onRead = () => {}, isCore = () => false }) {
+function createMemoryRuntime({ store, context = () => ({}), onChanged = () => {}, onRead = () => {}, isCore = () => false, retriever = createMemoryRetriever({ store }) }) {
   const current = () => {
     const ctx = typeof context === 'function' ? context() : context;
     return { ...(ctx || {}), mode: ctx?.mode || 'read' };
@@ -42,27 +44,24 @@ function createMemoryRuntime({ store, context = () => ({}), onChanged = () => {}
     if (ctx.mode === 'off') throw new Error('此任务未启用记忆。');
     return ctx;
   };
-  function list({ query = '', limit = 30 } = {}) {
-    const ctx = checked();
-    const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);
-    return store.list(ctx, { actor: 'model', eligibleOnly: true })
-      .filter(item => !terms.length || terms.every(term => (item.file + ' ' + item.meta.name + ' ' + item.meta.description).toLowerCase().includes(term)))
-      .slice(0, Math.min(100, Math.max(1, Number(limit) || 30)));
+  function list({ query = '', limit = 30, offset = 0 } = {}) {
+    return retriever.search(query, { context: checked(), limit, offset });
   }
   function read({ file } = {}) {
     const result = store.read(file, { actor: 'model', context: checked() });
     onRead(result.file);
     return result;
   }
-  function propose({ file, content, expectedRevision } = {}) {
+  function propose({ file, content, type, expectedRevision } = {}) {
     const ctx = checked();
     if (!writeAllowed(ctx)) throw new Error('当前任务只允许读取记忆。');
     if (expectedRevision === undefined) throw new Error('必须提供 expectedRevision：新记忆传 null，已有记忆先读取 revision。');
+    if (!VALID_TYPES.has(type)) throw new Error('必须明确选择记忆 type：user、feedback、project 或 reference。');
     if (ctx.mode === 'maintenance' && expectedRevision !== null) {
       const previous = store.read(file, { actor: 'model', context: ctx });
       if (previous.meta.core || isCore(file)) throw new Error('核心记忆只报告问题，由用户决定是否修改。');
     }
-    const result = store.write(file, content, { actor: 'model', context: ctx, expectedRevision,
+    const result = store.write(file, content, { actor: 'model', context: ctx, expectedRevision, memoryType: type,
       userConfirmed: ctx.userConfirmed === true && ctx.mode !== 'maintenance' });
     onChanged(result);
     return { ...result, message: result.meta.status === 'draft' ? '候选已保存，等待用户确认后生效。' : '已记住。' };
@@ -96,10 +95,10 @@ function createMemoryRuntime({ store, context = () => ({}), onChanged = () => {}
       catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
     };
     return { 'relay-memory': sdk.createSdkMcpServer({ name: 'relay-memory', version: '1.0.0', tools: [
-      sdk.tool('list', '查找当前项目及全局已确认的 Relay 记忆。', { query: z.string().optional(), limit: z.number().int().min(1).max(100).optional() }, run(list)),
+      sdk.tool('list', '检索当前项目及全局已确认的 Relay 记忆，匹配标题、摘要和正文，返回相关片段；完整内容用 read 读取。空 query 列出可用记忆，可用 offset 按页继续，直到返回不足 limit 条。', { query: z.string().optional(), limit: z.number().int().min(1).max(100).optional(), offset: z.number().int().min(0).optional() }, run(list)),
       sdk.tool('read', '读取一条已生效记忆及 revision；修改前必须先读取。', { file: z.string() }, run(read)),
-      sdk.tool('propose', '保存记忆候选；对已有事实的更新必须携带读取的 revision，不能伪造用户确认或核心状态。', {
-        file: z.string(), content: z.string().max(65536), expectedRevision: z.string().nullable()
+      sdk.tool('propose', '保存记忆候选；对已有事实的更新必须携带读取的 revision，不能伪造用户确认或核心状态。' + MEMORY_TYPE_GUIDANCE, {
+        file: z.string(), content: z.string().max(65536), type: z.enum(MEMORY_TYPES), expectedRevision: z.string().nullable()
       }, run(propose)),
     ] }) };
   }

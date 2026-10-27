@@ -1,4 +1,5 @@
 'use strict';
+const { releaseExitedPtyResources } = require('./pty-exit-cleanup');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -397,7 +398,10 @@ function registerWorkspaceTools(options) {
         if (session.pending.length > 1024 * 1024 && !session.paused && typeof pty.pause === 'function') { session.paused = true; pty.pause(); }
         if (!session.timer) session.timer = setTimeout(() => flush(session), 16);
       }));
-      session.subscriptions.push(pty.onExit((event) => end(session, event.exitCode)));
+      session.subscriptions.push(pty.onExit((event) => {
+        releaseExitedPtyResources(pty, event);
+        end(session, event.exitCode);
+      }));
       return { ok: true, id: session.id, ...resolved, ...size, shell: terminal && terminal.label || (platform === 'win32' ? 'PowerShell' : path.basename(shellPath)) };
     },
     terminalInput(event, input = {}) {

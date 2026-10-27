@@ -96,6 +96,7 @@ function harness(name, cwd, config) {
     cancelPendingLiveInput(value) { value.pendingInput = null; },
   };
   require('./helpers/conversation-permissions-fixture')(context);
+  context.withSessionDiagnostics = require('../src/main/sdk/sdk-session-diagnostic-event').withSessionDiagnostics;
   vm.createContext(context);
   for (const name of ['compactContextUsage', 'contextRuntimeKey', 'persistGoalRecovery', 'saveConversation', 'persistLiveSupplementRecord',
     'publishLiveSupplement', 'settleLiveSupplements', 'steerLiveTurn', 'finishTurn', 'settleUnsentLiveTurn']) {

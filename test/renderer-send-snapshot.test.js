@@ -19,7 +19,7 @@ function harness() {
   const context = {
     console, Map, Set, Date, setTimeout: () => 1,
     inputEl: { value: 'original request', classList: { add() {}, remove() {} } }, attachedFiles: [],
-    currentConv: null, workspaceDraftId: ID_A, currentSessionId: null, currentModel: 'opus', currentEffort: 'high',
+    activeView: 'chat', currentConv: null, workspaceDraftId: ID_A, currentSessionId: null, currentModel: 'opus', currentEffort: 'high',
     currentProjectId: 'project-original', currentExecutionMode: { kind: 'default' },
     currentPermissionState: { permissionMode: 'acceptEdits', revision: 1 }, permissionMutation: null,
     permissionViewRevision: 0, permissionLoadPromise: null, syncPermissionControl() {},

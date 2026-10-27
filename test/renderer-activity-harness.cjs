@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const output = require('../renderer/assistant-output');
 const conversationErrors = require('../renderer/conversation-errors');
+const { completeConversationTurn } = require('../src/main/app/conversation-mutations');
 const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
 const activitySource = fs.readFileSync(path.join(__dirname, '../renderer/activity-stream.js'), 'utf8');
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -24,33 +25,24 @@ function harness(mode = 'plain', { mounted = false } = {}) {
   let timerId = 0, persisted;
   const turnTs = '2026-09-28T09:10:12.672Z';
   const conv = { id: 'conv', turns: [{ user: 'synthetic', runId: 'job', ts: turnTs }], kind: 'create', mode };
-  const runs = new Map(), jobToConv = new Map();
+  const runs = new Map(), recoveryRuns = new Map(), jobToConv = new Map();
   const context = {
     console, Map, Set, Date,
-    window: { RelayTaskContinuity: require('../renderer/task-continuity'), RelayAssistantOutput: output, RelayConversationErrors: conversationErrors, api: { history: {
+    window: { RelayTaskContinuity: require('../renderer/task-continuity'), RelayAssistantOutput: output,
+      RelayHistorySearchText: require('../renderer/history-search-text'), RelayConversationErrors: conversationErrors, api: { history: {
       load: async () => persisted || conv,
       save: async (value) => { persisted = clone(value); return { updatedAt: 'synthetic-time' }; },
       recoverTurn: async () => ({ ok: false, error: 'synthetic original input unavailable' }),
       completeTurn: async (id, runId, ts, payload) => {
-        const next = clone(persisted || conv);
-        const index = next.turns.findIndex(turn => turn.runId === runId && turn.ts === ts);
-        if (next.id !== id || index < 0) return { error: 'turn identity mismatch' };
-        if (payload.retryWithoutResume) {
-          if (next.turns[index].assistant) return { error: 'turn already has an answer' };
-          next.turns.splice(index, 1); next.sessionId = null;
-        } else {
-          Object.assign(next.turns[index], clone(payload.turn));
-          if (payload.session) Object.assign(next, clone(payload.session));
-          if (payload.paused) next.paused = clone(payload.paused);
-          if (payload.clearPausedRunId && next.paused?.runId === payload.clearPausedRunId) delete next.paused;
-          if (payload.clearCarryContextReason === next.carryContextOnNextTurn) delete next.carryContextOnNextTurn;
-        }
-        next.updatedAt = 'synthetic-time'; persisted = next;
-        return { id, updatedAt: next.updatedAt, conversation: clone(next) };
+        return completeConversationTurn({
+          load: () => clone(persisted || conv),
+          persist: (value) => { persisted = clone(value); },
+        }, id, runId, ts, payload);
       },
     } } },
-    runForJob: (id) => runs.get(jobToConv.get(id)), isMountedChatJob: () => mounted,
-    runs, jobToConv, currentConv: conv, currentAssistantBubble: null, currentSessionId: null,
+    runForJob: (id) => recoveryRuns.get(id) || runs.get(jobToConv.get(id)),
+    isMountedChatJob: (id) => mounted && !recoveryRuns.has(id),
+    runs, recoveryRuns, jobToConv, currentConv: conv, currentAssistantBubble: null, currentSessionId: null,
     activeView: mounted ? 'chat' : 'settings', pendingConversationViewReloads: new Set(),
     updateRunActivity(run, onView, force) { updates.push({ run, onView, force }); },
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },

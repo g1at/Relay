@@ -6,6 +6,8 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const { pathToFileURL } = require('node:url');
 const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
+const { createBrowserMenuProbe } = require('./browser-menu-test-helper.cjs');
+const nativeMenu = createBrowserMenuProbe(require('electron'));
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp', 'workspace-tabs-browser-smoke');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
@@ -66,7 +68,7 @@ app.whenReady().then(async () => {
   fs.writeFileSync(entry, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + seed + '</script>'));
   win = new BrowserWindow({ width: 1200, height: 820, show: false, titleBarStyle: 'hidden', titleBarOverlay: { color: '#fafafa', symbolColor: '#343436', height: 35 }, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 3 && !message.includes('Content Security Policy')) report.failures.push('Renderer: ' + message); });
-  registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry });
+  registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry, getElectron: nativeMenu.getElectron });
   await win.loadFile(entry); win.show();
   await until('!!window.relayWorkspacePanel&&providerRoutingLoaded&&!restoringActiveRuns');
   await click('btnWorkspacePanel');
@@ -109,7 +111,7 @@ app.whenReady().then(async () => {
         display:bar&&getComputedStyle(bar).display,state:bar?.dataset.state},
       hasCurrentConversation:!!currentConv,workspaceContext:ctx?{conversationId:ctx.conversationId,workingDir:ctx.workingDir}:null};
   })()`);
-  await check('browser address starts at conversation divider with full size controls', '(()=>{const edge=document.querySelector(".chat-header").getBoundingClientRect().bottom,address=document.getElementById("workspaceBrowserAddress").getBoundingClientRect(),back=document.getElementById("workspaceBrowserBack").getBoundingClientRect();return Math.abs(address.top-edge)<1&&address.height>=29&&back.height>=28&&Math.abs(document.getElementById("workspaceBrowserViewport").getBoundingClientRect().top-document.getElementById("workspaceBrowserNav").getBoundingClientRect().bottom)<1})()');
+  await check('browser toolbar starts at conversation divider and full size controls stay above its edge-to-edge page', '(()=>{const edge=document.querySelector(".chat-header").getBoundingClientRect().bottom,address=document.getElementById("workspaceBrowserAddress").getBoundingClientRect(),back=document.getElementById("workspaceBrowserBack").getBoundingClientRect(),nav=document.getElementById("workspaceBrowserNav").getBoundingClientRect(),page=document.getElementById("workspaceBrowserViewport").getBoundingClientRect();return Math.abs(nav.top-edge)<1&&address.top>=nav.top&&address.bottom<=nav.bottom&&address.height>=34&&back.height>=28&&page.top>=nav.bottom-1&&page.top-nav.bottom<3&&Math.abs(page.left-nav.left)<1&&Math.abs(page.right-nav.right)<1})()');
   await capture('browser-docked');
   // Exercise the host bridge with actual native WebContents input, not a DOM
   // event in Relay. Custom bindings must reach the same parent dispatcher.
@@ -143,15 +145,14 @@ app.whenReady().then(async () => {
   await settle();
   win.setSize(1200, 620); await settle();
   await click('workspaceBrowserMore');
-  await until(async () => !(await browserState()).visible);
-  await check('browser hides native surface underneath its menu', '!document.getElementById("workspaceBrowserMenu").hidden&&!document.getElementById("workspaceBrowserCover").textContent.includes("暂时隐藏")');
+  await until(() => nativeMenu.isOpen(), 'native browser menu');
+  await check('browser menu keeps the native page visible without a snapshot cover', (await browserState()).visible && await evaluate('document.getElementById("workspaceBrowserMenu").hidden&&document.getElementById("workspaceBrowserCover").hidden'));
+  await check('native menu retains find and settings actions in a short window', nativeMenu.has('在页面中查找') && nativeMenu.has('浏览器设置'));
+  // These are separate Chromium captures; the OS popup itself is not included.
   await capture('browser-menu');
-  await check('browser menu scrollbar uses Relay size and removes native arrow buttons', '(()=>{const m=document.getElementById("workspaceBrowserMenu"),bar=getComputedStyle(m,"::-webkit-scrollbar"),button=getComputedStyle(m,"::-webkit-scrollbar-button"),thumb=getComputedStyle(m,"::-webkit-scrollbar-thumb");return bar.width==="9px"&&button.display==="none"&&thumb.borderRadius==="999px";})()');
-  await act('document.getElementById("workspaceBrowserMenu").dispatchEvent(new KeyboardEvent("keydown",{key:"End",bubbles:true}));');
-  await check('long browser menu scrolls its last action into view with the keyboard', '(()=>{const m=document.getElementById("workspaceBrowserMenu"),last=m.querySelector(":scope > [role=menuitem]:last-child"),a=last.getBoundingClientRect(),b=m.getBoundingClientRect();return m.scrollHeight>m.clientHeight&&m.scrollTop>0&&document.activeElement===last&&a.bottom<=b.bottom+1&&a.top>=b.top-1;})()');
-  await capture('browser-menu-scrollbar');
+  nativeMenu.select('在页面中查找');
+  await until('!document.getElementById("workspaceBrowserFind").hidden', 'find command from native menu');
   win.setSize(1200, 820); await settle();
-  await act('Array.from(document.querySelectorAll("#workspaceBrowserMenu button")).find(b=>b.textContent==="在页面中查找").click();');
   await act('document.getElementById("workspaceBrowserFindInput").value="查找示例";document.getElementById("workspaceBrowserFindInput").dispatchEvent(new Event("input",{bubbles:true}));');
   await until('document.getElementById("workspaceBrowserFindCount").textContent.includes("2")', 'find results');
   await check('in-page find receives real Chromium matches', 'document.getElementById("workspaceBrowserFindCount").textContent.includes("2")');
@@ -162,7 +163,7 @@ app.whenReady().then(async () => {
   const expanded = await evaluate('(()=>{const viewport=document.getElementById("workspaceBrowserViewport").getBoundingClientRect(),app=document.querySelector(".app").getBoundingClientRect(),grip=document.getElementById("workspaceResizeHandle"),handle=grip.getBoundingClientRect();return {left:viewport.left,right:viewport.right,appLeft:app.left,appRight:app.right,gripX:handle.left+3,gripY:handle.top+20,headerGrip:document.elementFromPoint(handle.left+3,handle.top+20)===grip,viewportTop:viewport.top};})()');
   const expandedBounds = firstView.getBounds(), browserScale = win.webContents.getZoomFactor();
   report.expandedBrowserGeometry = { viewport: expanded, native: expandedBounds, scale: browserScale };
-  await check('expanded browser fills the content width without a left gutter', expanded.left === expanded.appLeft && expanded.right === expanded.appRight && Math.abs(expandedBounds.x - expanded.left * browserScale) < 1 && Math.abs(expandedBounds.width - (expanded.right - expanded.left) * browserScale) < 1);
+  await check('expanded browser and native page fill the available width', Math.abs(expanded.left - expanded.appLeft) < 1 && Math.abs(expanded.appRight - expanded.right) < 1 && Math.abs(expandedBounds.x - expanded.left * browserScale) < 2 && Math.abs(expandedBounds.width - (expanded.right - expanded.left) * browserScale) < 2);
   await check('expanded browser keeps a resize target above the native page', expanded.headerGrip && expanded.gripY < expandedBounds.y / browserScale);
   await capture('browser-expanded');
   // Hit the actual renderer separator with mouse input. Synthetic events sent
@@ -179,7 +180,8 @@ app.whenReady().then(async () => {
   await check('native webpage returns to its restored column after the snap animation', !await evaluate('relayWorkspacePanel.getState().maximized')&&Math.abs(firstView.getBounds().x-await evaluate('document.getElementById("workspaceBrowserViewport").getBoundingClientRect().left')*win.webContents.getZoomFactor())<3);
   await click('workspaceMaximize'); await settle();
   await click('workspaceBrowserMore');
-  await act('Array.from(document.querySelectorAll("#workspaceBrowserMenu button")).find(button=>button.textContent==="历史记录").click();');
+  await until(() => nativeMenu.isOpen(), 'native history menu');
+  nativeMenu.select('历史记录');
   await until('document.querySelector(".browser-internal-host:not([hidden]) .relay-browser-settings")?.dataset.browserSection==="history"');
   await until(async () => !(await browserState()).visible);
   await check('history menu opens an internal browser tab and preserves chat layout', '(!document.querySelector(".app").dataset.view||document.querySelector(".app").dataset.view==="chat")&&relayWorkspacePanel.getState().maximized&&document.getElementById("workspaceBrowserAddress").value==="relay://browser/history"');
@@ -190,11 +192,21 @@ app.whenReady().then(async () => {
   // through that explicit route, independently of browser management navigation.
   await act('showAppView("settings");');
   await until(async () => !(await browserState()).visible);
-  await check('settings release expanded layout and native overlay', '!relayWorkspacePanel.getState().maximized&&document.querySelector(".app").dataset.view==="settings"');
-  await act('showChatView();'); await until(async () => (await browserState()).visible);
+  await check('settings hide workspace and native overlay while preserving reading preference', 'relayWorkspacePanel.getState().width===0&&document.getElementById("workspacePanel").inert&&document.getElementById("workspacePanel").getAttribute("aria-hidden")==="true"&&!document.querySelector(".app").classList.contains("workspace-maximized")&&document.querySelector(".app").dataset.view==="settings"');
+  await act('showChatView();'); await settle(); await until(async () => (await browserState()).visible);
   await check('returning to chat preserves the same loaded browser', (await browserState()).tab.id === firstId && !firstView.webContents.isDestroyed());
-  await click('btnPermissionMode'); await until(async () => !(await browserState()).visible);
-  await check('permission selector remains above browser content', '!!document.querySelector(".rpc-popover.is-open")');
+  // A nonmodal chat menu only suspends the native page where it actually
+  // overlaps. Exercise both placements using the real permission selector.
+  if (await evaluate('relayWorkspacePanel.getState().maximized')) { await click('workspaceMaximize'); await settle(); }
+  // Leave room for the full chat menu without relying on webpage margins.
+  await act('document.getElementById("workspaceResizeHandle").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowRight",shiftKey:true,bubbles:true}));'); await settle();
+  await click('btnPermissionMode'); await until('!!document.querySelector(".rpc-popover.is-open")');
+  await act(`const menu=document.querySelector('.rpc-popover.is-open'),page=document.getElementById('workspaceBrowserViewport').getBoundingClientRect();menu.style.left=Math.max(8,page.left-menu.getBoundingClientRect().width-12)+'px';menu.style.top=(page.top+16)+'px';`);
+  await settle();
+  await check('permission selector beside the page keeps native browsing available', (await browserState()).visible && await evaluate(`(()=>{const m=document.querySelector('.rpc-popover.is-open').getBoundingClientRect(),p=document.getElementById('workspaceBrowserViewport').getBoundingClientRect();return m.right<=p.left})()`));
+  await act(`const menu=document.querySelector('.rpc-popover.is-open'),page=document.getElementById('workspaceBrowserViewport').getBoundingClientRect();menu.style.left=(page.left+24)+'px';menu.style.top=(page.top+24)+'px';`);
+  await until(async () => !(await browserState()).visible);
+  await check('permission selector overlapping the page hides its native surface', '!!document.querySelector(".rpc-popover.is-open")');
   await click('btnPermissionMode'); await until(async () => (await browserState()).visible);
   await firstView.webContents.executeJavaScript('document.getElementById("popup").click()', true);
   await until('relayWorkspacePanel.getState().tabs.filter(t=>t.kind==="browser").length===2');

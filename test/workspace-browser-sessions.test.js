@@ -17,7 +17,7 @@ function fixture({ holdFiles = false } = {}) {
       removeAttribute() {}, replaceChildren() {}, querySelector() { return null; } });
     return nodes.get(id);
   };
-  const sandbox = { $, app: { dataset: { view: 'chat' } }, document: { hidden: false },
+  const sandbox = { URL, $, app: { dataset: { view: 'chat' } }, document: { hidden: false },
     window: { RelayBrowserInternalPages: { parse: () => null }, relayWorkspacePanel: {} },
     panel: { contains: () => false, querySelectorAll: () => [] }, toggle: { focus() {} },
     clearSnapAnimation() {}, savePreviewScroll() {}, syncFileLayout() {}, renderPreview() {}, ensureReview() {},
@@ -35,10 +35,11 @@ function fixture({ holdFiles = false } = {}) {
   };
   function $(id) { return node(id); }
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/browser-connection.js'), 'utf8'), sandbox);
   vm.runInContext(`
     let context = { conversationId: 'a' }, nextContext = context, contextKey = 'a', revision = 0,
       filesRevision = 0, previewRevision = 0, activeId = null, tab = null, opened = true,
-      navigationRevision = 0, tabNumber = 0, disposed = false, workspace = null,
+      navigationRevision = 0, tabNumber = 0, disposed = false, workspace = null, nativeMenuRequest = null,
       directoryLink = null, selectedDirectory = null, preview = null, sourceMode = false,
       expanded = new Set(), entries = new Map(), loadingFiles = false, fileFingerprint = '',
       browserFeedback = null, reviewView = null, findTimer = null, contextLoading = false,

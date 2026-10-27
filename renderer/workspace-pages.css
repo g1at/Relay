@@ -1,3 +1,11 @@
+/* Layout variables belong to the grid and their explicit consumers. Keeping
+   them out of message descendants avoids restyling long answers on each drag. */
+@property --sidebar-width { syntax: '<length>'; inherits: false; initial-value: 224px; }
+@property --sidebar-visible-width { syntax: '<length>'; inherits: false; initial-value: 224px; }
+@property --sidebar-content-opacity { syntax: '<number>'; inherits: false; initial-value: 1; }
+.app > .sidebar { --sidebar-width: inherit; --sidebar-content-opacity: inherit; }
+.app > .sidebar-resize-handle { --sidebar-visible-width: inherit; }
+
 /* Persistent application pages. Each page keeps its own DOM while hidden. */
 .app { position: relative; --sidebar-width: 224px; --sidebar-visible-width: var(--sidebar-width); --sidebar-motion: 200ms cubic-bezier(.2, .8, .2, 1); grid-template-columns: var(--sidebar-visible-width) minmax(0, 1fr); transition: grid-template-columns var(--sidebar-motion); }
 .app > .chat, .workspace-page { grid-column: 2; grid-row: 1; }
@@ -58,15 +66,12 @@
 #settingsModal.workspace-page .set-content { min-height: 0; background: transparent; padding: 0 8px 16px; }
 #settingsModal.workspace-page .provider-page, #settingsModal.workspace-page .provider-editor { min-width: 0; max-width: 100%; }
 #settingsModal.workspace-page .provider-editor-actions { bottom: 0; margin: 18px 0 0; padding: 10px 0; background: var(--surface-canvas); }
-#settingsModal.workspace-page .provider-edit-row { display: grid; grid-template-columns: minmax(104px, .7fr) minmax(0, 2fr); gap: 10px 12px; min-width: 0; }
 #settingsModal.workspace-page .provider-edit-label { min-width: 0; overflow-wrap: anywhere; }
 #settingsModal.workspace-page .provider-edit-row > :is(.provider-edit-inline-input, .provider-secret-input, .provider-route-control, .provider-model-picker, #providerImageCapabilities) { width: 100%; min-width: 0; }
 #settingsModal.workspace-page .provider-edit-row > :is(.provider-inline-btn, .switch, .settings-segmented) { justify-self: end; }
-#settingsModal.workspace-page .provider-edit-row-control { min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
 #settingsModal.workspace-page .provider-editor-status { overflow-wrap: anywhere; }
-#settingsModal.workspace-page .set-content.is-provider-compact .provider-edit-row { grid-template-columns: minmax(0, 1fr); }
-#settingsModal.workspace-page .set-content.is-provider-compact .provider-edit-row > :is(.provider-inline-btn, .switch, .settings-segmented) { justify-self: start; }
-#settingsModal.workspace-page .set-content.is-provider-compact .provider-edit-row-control { justify-content: flex-start; }
+#settingsModal.workspace-page .set-content.is-provider-compact .provider-edit-section:not(.provider-availability) .provider-edit-row { grid-template-columns: 92px minmax(0, 1fr); gap: 10px 12px; }
+#settingsModal.workspace-page .set-content.is-provider-narrow .provider-edit-section:not(.provider-availability) .provider-edit-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
 #settingsModal.workspace-page .set-content.is-provider-compact .provider-image-capability { grid-template-columns: 16px minmax(0, 1fr) auto; }
 #settingsModal.workspace-page .set-content.is-provider-compact .provider-image-capability svg { grid-column: 1; grid-row: 1 / 3; }
 #settingsModal.workspace-page .set-content.is-provider-compact .provider-image-capability strong { grid-column: 2; grid-row: 1; }
@@ -102,6 +107,7 @@
   #scheduleModal.workspace-page .modal-header { padding-inline: 20px; }
   #settingsModal.workspace-page .set-layout { padding-inline: 16px; }
   #settingsModal.workspace-page .modal-footer { padding-inline: 16px; }
+  #settingsModal.workspace-page .set-content.is-provider-compact .provider-edit-section:not(.provider-availability) .provider-edit-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
   .workspace-page .set-row { flex-wrap: wrap; gap: 9px; }
   .workspace-page .set-label { min-width: 90px; }
 }

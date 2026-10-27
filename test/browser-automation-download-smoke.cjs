@@ -41,6 +41,9 @@ async function run() {
   const id = created.tab.id, wc = host.getAutomationTarget(id).webContents;
   await host.invoke({ action: 'setBounds', rect: { x: 0, y: 0, width: 1020, height: 710 } }); await host.invoke({ action: 'visibility', id, visible: true });
   await until(() => wc.getURL() === base + '/' && !wc.isLoading(), 'fixture initial navigation');
+  // Downloads require the same explicit task control as production automation.
+  host.setTaskBinding(id, { conversationId: 'download-fixture', state: 'controlled' });
+  check('download fixture explicitly acquires task control', host.state(id).tab.recovery.state === 'controlled');
   adapter = createBrowserAutomationAdapter({ webContents: wc });
   check('production host uses one session download listener', wc.session.listenerCount('will-download') === 1);
   const captureClick = async (label, options = {}) => {

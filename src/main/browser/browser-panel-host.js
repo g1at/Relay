@@ -11,12 +11,15 @@ const { attachBrowserPageScrollbars } = require('./browser-page-scrollbars');
 const { previewDocument, ownsPreviewUrl, installPreviewSession } = require('./browser-preview-session');
 const { createAutomationDownload } = require('./browser-automation-downloads');
 const { createBrowserTaskState, taskId } = require('./browser-task-state');
+const { localBrowserAddress, createBrowserConnectionSecurity } = require('./browser-connection-security');
+const { createBrowserFavicon } = require('./browser-favicon');
+const BARE_HOST_PORT = /^(?:localhost|(?:[a-z\d-]+\.)+[a-z\d-]+|\[[a-f\d:.]+\]):\d{1,5}(?:[/?#]|$)/i;
 
 function resolveBrowserAddress(value, engine = 'bing') {
   const input = String(value || '').trim();
   if (!input) return 'about:blank';
-  if (/^[a-z][a-z\d+.-]*:/i.test(input) && !/^(localhost|127(?:\.\d+){3}):/i.test(input)) return normalizeBrowserUrl(input);
-  if (!/\s/.test(input) && (/^(localhost|\[::1\]|127(?:\.\d+){3})(?::\d+)?(?:[/?#]|$)/i.test(input) || /^[^/?#]+\.[^/?#]+/.test(input))) return normalizeBrowserUrl(input);
+  if (/^[a-z][a-z\d+.-]*:/i.test(input) && !localBrowserAddress(input) && !BARE_HOST_PORT.test(input)) return normalizeBrowserUrl(input);
+  if (!/\s/.test(input) && (localBrowserAddress(input) || BARE_HOST_PORT.test(input) || /^[^/?#]+\.[^/?#]+/.test(input))) return normalizeBrowserUrl(input);
   if (input.length > 4000 || /[\u0000-\u001f]/.test(input)) throw browserError('INVALID_URL', '搜索内容过长或无效');
   const base = { bing: 'https://www.bing.com/search?q=', google: 'https://www.google.com/search?q=', duckduckgo: 'https://duckduckgo.com/?q=' }[engine] || 'https://www.bing.com/search?q=';
   return base + encodeURIComponent(input);
@@ -37,7 +40,8 @@ function normalizeBrowserUrl(value = 'about:blank') {
   let text = typeof value === 'string' ? value.trim() : '';
   if (!text || text.length > 16384 || /[\u0000-\u001f\u007f]/.test(text)) throw browserError('INVALID_URL', '请输入有效的网址');
   if (text === 'about:blank') return text;
-  if (/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(text)) text = 'http://' + text;
+  if (localBrowserAddress(text) && !/^https?:\/\//i.test(text)) text = 'http://' + text;
+  else if (BARE_HOST_PORT.test(text)) text = 'https://' + text;
   else if (!/^[a-z][a-z\d+.-]*:/i.test(text)) text = 'https://' + text;
   let url;
   try { url = new URL(text); } catch (_) { throw browserError('INVALID_URL', '请输入有效的网址'); }
@@ -94,6 +98,8 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       loading: tab.loading, canGoBack: read(() => history.canGoBack(), false), canGoForward: read(() => history.canGoForward(), false),
       historyIndex: read(() => history.getActiveIndex(), null), historyLength: read(() => history.length(), null),
       zoom: read(() => wc.getZoomFactor(), tab.zoom || 1), error: tab.error || null,
+      connection: tab.connectionSecurity?.snapshot() || { state: 'none' },
+      favicon: tab.faviconReader?.snapshot() || null,
       muted: read(() => !!wc.isAudioMuted?.(), false), audible: read(() => !!wc.isCurrentlyAudible?.(), false),
       bookmarked: !ownsPreviewUrl(tab.preview, tab.url) && !!store.getBookmark(tab.url),
       ownerConversationId: tab.ownerConversationId || null,
@@ -410,6 +416,8 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     tab.automationPopupOperationId = null;
     const epoch = ++tab.navigationEpoch;
     tab.url = target; tab.error = null; tab.loading = target !== 'about:blank'; tab.findText = null;
+    tab.connectionSecurity?.target(target);
+    tab.faviconReader?.reset();
     // Entering a download URL in Relay's address bar is also explicit browsing.
     // Match the redirect chain rather than granting a broad timed download pass.
     tab.downloadNavigation = { url: target, at: now() };
@@ -561,6 +569,18 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       safeDialogs: true, spellcheck: false } });
     const previewSession = privateSession ? installPreviewSession(partition, preview, () => view.webContents) : null;
     const tab = { id, view, partition, preview, previewSession, privateSession, url: target, title: preview?.title || '', loading: false, error: null, navigationEpoch: 0, zoom: 1 };
+    tab.faviconReader = createBrowserFavicon({ partition,
+      current: () => ({ url: tab.url, documentUrl: alive(view.webContents) ? view.webContents.getURL() : '',
+        alive: !destroyed && !retiring && tabs.get(id) === tab && alive(view.webContents) }),
+      changed: () => emit('state', tab) });
+    tab.connectionSecurity = createBrowserConnectionSecurity({ partition, now,
+      current: () => ({ url: tab.url, epoch: tab.navigationEpoch, alive: !destroyed && !retiring && tabs.get(id) === tab && alive(view.webContents) }),
+      changed: () => {
+        const connection = tab.connectionSecurity.snapshot();
+        if (connection.state === 'certificate-error') { tab.loading = false; tab.error = connection.errorCode; }
+        else if (connection.state === 'certificate-exception') tab.error = null;
+        emit('state', tab);
+      } });
     if (ownerConversationId) tab.ownerConversationId = ownerConversationId;
     if (recovery) Object.assign(tab, { recoveryId: recovery.id, conversationId: recovery.conversationId, title: recovery.title,
       taskState: 'paused', restored: true });
@@ -574,7 +594,11 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     });
     wc.on('did-start-navigation', (event, _url, inPlace, isMainFrame) => {
       const main = typeof event?.isMainFrame === 'boolean' ? event.isMainFrame : isMainFrame;
-      if (main !== false) { tab.navigationEpoch++; tab.inputDocumentToken = null; tab.automationPopupOperationId = null; cancelAnnotation(tab); cancelAutomationInput(tab); }
+      if (main !== false) {
+        tab.navigationEpoch++; tab.inputDocumentToken = null; tab.automationPopupOperationId = null; cancelAnnotation(tab); cancelAutomationInput(tab);
+        const targetUrl = event?.url || _url;
+        if (!inPlace && tabNavigationAllowed(tab, targetUrl)) { tab.url = targetUrl; tab.connectionSecurity.target(targetUrl); tab.faviconReader.reset(); }
+      }
     });
     wc.on('dom-ready', () => {
       tab.inputDocumentToken = crypto.randomUUID();
@@ -634,6 +658,12 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
         && !event.defaultPrevented && tabNavigationAllowed(tab, event.url || url)) emit('navigation-start', tab);
     });
     wc.on('will-frame-navigate', guard); wc.on('will-redirect', guard);
+    wc.on('did-redirect-navigation', (event, url, _inPlace, isMainFrame) => {
+      if (event?.isMainFrame === false || isMainFrame === false) return;
+      const targetUrl = event?.url || url;
+      if (tabNavigationAllowed(tab, targetUrl)) { tab.url = targetUrl; tab.connectionSecurity.target(targetUrl); tab.faviconReader.reset(); }
+    });
+    wc.on('certificate-error', (...args) => tab.connectionSecurity.certificateError(...args));
     wc.on('will-attach-webview', event => event.preventDefault());
     wc.on('content-bounds-updated', event => event.preventDefault());
     wc.setWindowOpenHandler(details => {
@@ -646,7 +676,10 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       } catch (error) { tab.error = text(error.message); emit('state', tab); }
       return { action: 'deny' };
     });
-    wc.on('did-start-loading', () => { tab.loading = true; tab.error = null; update(tab); });
+    wc.on('did-start-loading', () => {
+      if (tab.connectionSecurity.snapshot().state !== 'certificate-error') { tab.loading = true; tab.error = null; }
+      update(tab);
+    });
     wc.on('did-stop-loading', () => { tab.loading = false; update(tab); });
     function remember(value) {
       if (tab.privateSession || value === 'about:blank') return;
@@ -659,12 +692,17 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       try { if (!tab.privateSession && tab.historyId && tab.url !== 'about:blank') store.visit({ url: tab.url, title: tab.title, id: tab.historyId }); } catch (_) {}
       update(tab);
     });
+    wc.on('page-favicon-updated', (_event, urls) => { void tab.faviconReader.update(urls); });
     wc.on('media-started-playing', () => update(tab)); wc.on('media-paused', () => update(tab));
     wc.on('did-fail-load', (_event, code, description, failedUrl, isMainFrame) => {
       if (isMainFrame === false || code === -3 || failedUrl && failedUrl !== tab.url) return;
+      tab.faviconReader.reset();
       tab.loading = false; tab.error = text(description || '网页加载失败'); emit('state', tab);
     });
-    wc.on('render-process-gone', (_event, details) => { tab.loading = false; tab.error = `网页进程已结束（${text(details && details.reason, 80)}），可以重新加载`; emit('state', tab); });
+    wc.on('render-process-gone', (_event, details) => {
+      tab.connectionSecurity.cancel(); tab.faviconReader.reset(); tab.navigationEpoch++;
+      tab.loading = false; tab.error = `网页进程已结束（${text(details && details.reason, 80)}），可以重新加载`; emit('state', tab);
+    });
     wc.on('found-in-page', (_event, result) => emit('find', tab, { requestId: result.requestId, matches: result.matches,
       activeMatchOrdinal: result.activeMatchOrdinal, finalUpdate: !!result.finalUpdate }));
     wc.on('destroyed', () => { if (tabs.has(id)) remove(tab, false); });
@@ -673,6 +711,8 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     emit('created', tab, createdMetadata); navigate(tab, target); return state(id);
   }
   function remove(tab, closeContents = true) {
+    tab.faviconReader?.close();
+    tab.connectionSecurity?.close();
     releaseBackgroundPaint(tab);
     releaseBackgroundWindow(tab);
     tab.automationPopupOperationId = null;
@@ -720,28 +760,28 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     if (notify) emit('annotation-cancelled', tab, { requestId: pending.requestId, conversationId: pending.conversationId });
     return { ok: true };
   }
-  function annotationViewport(tab) {
+  function annotationGeometry(tab) {
     const bounds = tab.appliedBounds || tab.view.getBounds?.() || boundedRect();
-    const zoom = tab.view.webContents.getZoomFactor?.() || 1;
-    // Native Electron/Chromium innerWidth and innerHeight floor the view's
-    // DIP extent divided by page zoom (including nonintegral 125%/150% sizes).
-    return { width: Math.floor(bounds.width / zoom), height: Math.floor(bounds.height / zoom) };
+    return { width: bounds.width, height: bounds.height, zoom: tab.view.webContents.getZoomFactor?.() || 1 };
+  }
+  function annotationViewport(geometry, round = Math.floor) {
+    return { width: round(geometry.width / geometry.zoom), height: round(geometry.height / geometry.zoom) };
   }
   function sameViewport(left, right) { return !!left && !!right && left.width === right.width && left.height === right.height; }
+  function sameAnnotationGeometry(left, right) { return sameViewport(left, right) && left.zoom === right.zoom; }
   function sendAnnotationPreparation(tab, pending) {
     return sendPage(tab.view.webContents, 'relay:browser-annotation-start', { requestId: pending.requestId, mode: pending.mode,
-      revision: pending.revision, viewport: pending.viewport });
+      revision: pending.revision, viewport: pending.viewport, viewportMax: annotationViewport(pending.geometry, Math.ceil) });
   }
   function refreshAnnotationViewport(tab) {
     const pending = tab.annotation;
     if (!pending) return;
-    const viewport = annotationViewport(tab);
-    if (sameViewport(viewport, pending.viewport)) return;
+    const geometry = annotationGeometry(tab);
+    if (sameAnnotationGeometry(geometry, pending.geometry)) return;
     if (pending.ready) { cancelAnnotation(tab); return; }
-    // A bounds IPC acknowledgement only means native layout was requested.
-    // Replace the preparation revision while Chromium applies the new size;
-    // an acknowledgement for a previous viewport cannot open the picker.
-    pending.viewport = viewport; pending.revision++;
+    // Native layout and Chromium paint travel separately. Bind each preparation
+    // revision to exact native bounds/zoom, then latch the page's measured size.
+    pending.geometry = geometry; pending.viewport = annotationViewport(geometry); pending.revision++;
     if (!sendAnnotationPreparation(tab, pending)) cancelAnnotation(tab);
   }
   function cancelAutomationInput(tab, reason = '网页控制状态已改变', code = 'STALE_LEASE') {
@@ -838,7 +878,7 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     return !destroyed && !retiring && tabs.get(tab.id) === tab && alive(wc) && tab.presented && activeId === tab.id
       && tab.conversationId === pending.conversationId && tab.navigationEpoch === pending.epoch
       && tab.annotationGeneration === pending.generation && wc.getURL() === pending.url
-      && sameViewport(annotationViewport(tab), pending.viewport);
+      && sameAnnotationGeometry(annotationGeometry(tab), pending.geometry);
   }
   // Main-process guard across the trusted task-directory lookup. A page that
   // navigates, is hidden, or is paused and shown again is still a new target.
@@ -880,7 +920,8 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     let resolveReady, rejectReady;
     const readiness = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
     const pending = { requestId: crypto.randomUUID(), conversationId, mode, directory, epoch: tab.navigationEpoch,
-      generation: tab.annotationGeneration, url, viewport: annotationViewport(tab), revision: 1, ready: false, resolveReady, rejectReady };
+      generation: tab.annotationGeneration, url, geometry: annotationGeometry(tab), revision: 1, ready: false, resolveReady, rejectReady };
+    pending.viewport = annotationViewport(pending.geometry);
     tab.annotation = pending;
     onPaused({ requestId: pending.requestId });
     pending.readyTimer = setTimeout(() => {
@@ -898,8 +939,15 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
     const pending = tab.annotation;
     if (!pending || !payload || typeof payload !== 'object' || Array.isArray(payload) || payload.requestId !== pending.requestId) return;
     if (payload.type === 'annotation-ready') {
-      if (pending.ready || payload.revision !== pending.revision || !sameViewport(payload.viewport, pending.viewport)
+      const minimum = annotationViewport(pending.geometry), maximum = annotationViewport(pending.geometry, Math.ceil);
+      // Fractional page zoom rounds CSS pixels differently across native sizes.
+      // Accept only the integer floor/ceil interval during preparation; every
+      // selection and capture remains tied to this exact measured viewport.
+      if (pending.ready || payload.revision !== pending.revision || !payload.viewport
+        || !['width', 'height'].every(key => Number.isInteger(payload.viewport[key]) && payload.viewport[key] > 0
+          && payload.viewport[key] >= minimum[key] && payload.viewport[key] <= maximum[key])
         || !annotationCurrent(tab, pending)) return;
+      pending.viewport = { width: payload.viewport.width, height: payload.viewport.height };
       pending.ready = true; clearTimeout(pending.readyTimer); pending.resolveReady(); return;
     }
     if (payload.type === 'annotation-cancel') {
@@ -1192,6 +1240,14 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       const tab = requireTab(id || activeId), wc = tab.view.webContents;
       if (action === 'close') return remove(tab);
       if (!alive(wc)) throw browserError('TAB_CLOSED', '网页进程已关闭');
+      if (action === 'security.continue') {
+        tab.connectionSecurity.proceed(input.challengeId); tab.loading = true; return state(tab.id);
+      }
+      if (action === 'security.useHttp') {
+        const target = new URL(tab.url);
+        if (target.protocol !== 'https:' || !tab.error) throw browserError('HTTP_FALLBACK_UNAVAILABLE', '当前网页不需要切换为 HTTP');
+        target.protocol = 'http:'; return navigate(tab, target.href);
+      }
       if (action === 'passwords.fill' || action === 'contacts.fill') return await fillPage(tab, input);
       if (action === 'savePdf' || action === 'saveScreenshot') return await savePage(tab, action);
       if (action === 'print') return await new Promise(resolve => wc.print({ silent: false, printBackground: true }, (success, reason) => resolve(success ? { ok: true } : { ok: false, code: 'PRINT_CANCELLED', error: text(reason || '打印已取消') })));
@@ -1204,11 +1260,11 @@ function createBrowserPanelHost({ owner, WebContentsView, BaseWindow, screen, se
       if (action === 'navigate') return navigate(tab, input.url);
       if (action === 'back' || action === 'forward') {
         const history = wc.navigationHistory;
-        if (action === 'back' ? history.canGoBack() : history.canGoForward()) history[action === 'back' ? 'goBack' : 'goForward']();
-      } else if (action === 'reload') { tab.error = null; wc.reload(); }
+        if (action === 'back' ? history.canGoBack() : history.canGoForward()) { tab.faviconReader.reset(); history[action === 'back' ? 'goBack' : 'goForward'](); }
+      } else if (action === 'reload') { tab.connectionSecurity.target(tab.url); tab.faviconReader.reset(); tab.error = null; wc.reload(); }
       else if (action === 'devTools') { if (input.open === false || input.open == null && wc.isDevToolsOpened()) wc.closeDevTools(); else wc.openDevTools({ mode: 'detach' }); }
       else if (action === 'mute') { if (typeof input.muted !== 'boolean') throw browserError('INVALID_MUTE', '静音状态无效'); wc.setAudioMuted(input.muted); }
-      else if (action === 'stop') { tab.navigationEpoch++; tab.loading = false; wc.stop(); }
+      else if (action === 'stop') { tab.connectionSecurity.cancel(); tab.faviconReader.reset(); tab.navigationEpoch++; tab.loading = false; wc.stop(); }
       else if (action === 'focus') {
         if (tab.presented && activeId === tab.id && owner.isVisible?.() !== false && !owner.isMinimized?.()) wc.focus();
       }

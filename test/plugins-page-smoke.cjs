@@ -16,7 +16,13 @@ const checks = {}, failures = [];
 let step = 'starting';
 const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ checks, failures, step }, null, 2));
 const deadline = setTimeout(() => { failures.push('Overall timeout at ' + step); save(); app.exit(1); }, 180000);
-const evaluate = code => win.webContents.executeJavaScript(code);
+async function bounded(work, label, timeoutMs = 8000) {
+  let timer;
+  try { return await Promise.race([work, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Error('Timed out: ' + label)), timeoutMs);
+  })]); } finally { clearTimeout(timer); }
+}
+const evaluate = code => bounded(win.webContents.executeJavaScript(code), 'renderer evaluation');
 const act = code => evaluate(`(() => { ${code}\n })()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function settleUI() {
@@ -49,9 +55,9 @@ async function rightClick(selector) {
 async function capture(name) {
   step = 'capture ' + name;
   await evaluate("document.getAnimations().forEach(a=>{ if(a.effect?.getComputedTiming().iterations!==Infinity)try{a.finish()}catch(_){} }); new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
-  await win.webContents.capturePage(); await delay(130);
+  await bounded(win.webContents.capturePage(), 'capture ' + name, 5000); await delay(130);
   await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
-  fs.writeFileSync(path.join(output, name + '.png'), (await win.webContents.capturePage()).toPNG());
+  fs.writeFileSync(path.join(output, name + '.png'), (await bounded(win.webContents.capturePage(), 'capture ' + name, 5000)).toPNG());
 }
 
 app.whenReady().then(async () => {
@@ -63,7 +69,7 @@ app.whenReady().then(async () => {
   const html = fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + '\nlocalStorage.clear();</script>');
   const page = path.join(output, 'fixture.html'); fs.writeFileSync(page, html);
   win = new BrowserWindow({ width:1320, height:920, show:false, webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,backgroundThrottling:false} });
-  await win.loadFile(page);
+  await bounded(win.loadFile(page), 'load renderer', 15000);
   await waitFor("!!window.relayPluginsPage&&providerRoutingLoaded&&!restoringActiveRuns");
   await act("window.visible=selector=>{const e=document.querySelector(selector);return !!e&&!!e.getClientRects().length&&!e.closest('[hidden],.hidden,[inert]');}; inputEl.value='插件导航期间的对话草稿';pluginsFixture.chatNode=inputEl;");
   await evaluate(`(async()=>{ await window.api.history.save({id:'plugins-history',title:'插件管理验收',mode:'plain',model:'opus',memoryMode:'read',turns:[],createdAt:'2026-09-07T01:00:00Z',updatedAt:'2026-09-07T01:00:00Z'}); await loadConversation('plugins-history'); inputEl.value='插件导航期间的对话草稿'; pluginsFixture.chatNode=inputEl; })()`);
@@ -74,7 +80,54 @@ app.whenReady().then(async () => {
   await waitFor("document.getElementById('settingsHint').textContent.includes('未保存')");
   await act("pluginsFixture.settingsHint=document.getElementById('settingsHint').textContent;");
   await check('settingsNoLongerContainsPluginCategories', "!document.querySelector('#setNav [data-cat=skill],#setNav [data-cat=agent],#setNav [data-cat=data]')&&!document.querySelector('#settingsBody #skillSection,#settingsBody #agentSection,#settingsBody #mcpSection')");
-  await click('#btnPlugins'); await waitFor("document.querySelectorAll('#skillSection > [data-list] > .dp-item:not(.skill-list-skeleton)').length===6&&!document.getElementById('pluginsRefresh').disabled");
+
+  await act("pluginsFixture.overviewMode='hold';pluginsFixture.configMode='hold';");
+  await click('#btnPlugins');
+  await waitFor('!!pluginsFixture.pendingOverview&&!!pluginsFixture.pendingConfig');
+  await check('skillNavigationFilterAndSearchVisibleBeforeFirstDataOrConfig',
+    "visible('.plugins-skill-navigation')&&document.querySelectorAll('[data-skill-view]').length===3&&visible('#pluginsSkillFilter')&&visible('[data-plugin-search=skill]')&&document.querySelector('[data-skill-view=library]').getAttribute('aria-selected')==='true'&&!visible('#skillSection .plugins-maintenance')&&!visible('#skillSection [data-draft-review]')&&!visible('#pluginsCategory-skill .plugins-search-empty')&&document.getElementById('pluginsRefresh').disabled");
+  await act("pluginsFixture.firstSkillNav=document.querySelector('.plugins-skill-navigation');pluginsFixture.firstSkillSearch=document.querySelector('[data-plugin-search=skill]');pluginsFixture.panelFrames=[];pluginsFixture.watchSkillFrames=true;pluginsFixture.expectedSkillView='library';const watch=()=>{if(!pluginsFixture.watchSkillFrames)return;const selected=document.querySelector('[data-skill-view][aria-selected=true]')?.dataset.skillView;const bad=selected!==pluginsFixture.expectedSkillView||(selected!=='library'&&visible('#skillSection [data-list]'))||(selected!=='updates'&&visible('#skillSection [data-draft-review]'))||(selected!=='maintenance'&&visible('#skillSection .plugins-maintenance'));if(bad)pluginsFixture.panelFrames.push({selected,expected:pluginsFixture.expectedSkillView});requestAnimationFrame(watch);};requestAnimationFrame(watch);");
+  await act("document.documentElement.dataset.theme='light';"); await capture('skills-first-frame-light');
+  await act("document.documentElement.dataset.theme='dark';"); await capture('skills-first-frame-dark');
+  await act("document.documentElement.dataset.theme='light';const e=document.querySelector('[data-plugin-search=skill]');e.value='文档';e.dispatchEvent(new Event('input',{bubbles:true}));");
+  await click('#pluginsSkillFilter .cs-trigger'); await click('#pluginsSkillFilter [data-value=protected]');
+  await act("pluginsFixture.expectedSkillView='updates';document.querySelector('[data-skill-view=updates]').click();");
+  await check('pendingInitialLoadCanSwitchToUpdatesWithoutShowingOtherPanels',
+    "visible('#skillSection [data-draft-review]')&&!visible('#skillSection [data-list]')&&!visible('#skillSection .plugins-maintenance')&&!visible('#pluginsSkillFilter')&&visible('[data-plugin-search=skill]')");
+  await act("pluginsFixture.expectedSkillView='maintenance';document.querySelector('[data-skill-view=maintenance]').click();");
+  await check('pendingInitialLoadCanSwitchToMaintenanceWithoutShowingOtherPanels',
+    "visible('#skillSection .plugins-maintenance')&&!visible('#skillSection [data-list]')&&!visible('#skillSection [data-draft-review]')&&!visible('[data-plugin-search=skill]')");
+  await act("pluginsFixture.expectedSkillView='library';document.querySelector('[data-skill-view=library]').click();pluginsFixture.pendingOverview();");
+  await waitFor("document.querySelectorAll('#skillSection [data-list] > .dp-item:not(.skill-list-skeleton)').length===6");
+  await check('earlySkillRowsRespectSearchAndFilterWhileConfigIsStillPending',
+    "!!pluginsFixture.pendingConfig&&document.getElementById('pluginsRefresh').disabled&&document.querySelector('[data-skill-filter]').dataset.value==='protected'&&document.querySelector('[data-plugin-search=skill]').value==='文档'&&document.querySelectorAll('#skillSection [data-list] > .dp-item:not([hidden])').length===1&&document.querySelector('#skillSection [data-list] > .dp-item:not([hidden]) .dp-item-name').textContent==='文档阅读'&&!visible('#skillSection .plugins-maintenance')&&!visible('#pluginsCategory-skill .plugins-search-empty')");
+  await act("pluginsFixture.expectedSkillView='updates';document.querySelector('[data-skill-view=updates]').click();pluginsFixture.configMode='ok';pluginsFixture.overviewMode='ok';pluginsFixture.pendingConfig();");
+  await waitFor("!document.getElementById('pluginsRefresh').disabled"); await settleUI();
+  await check('lateInitialConfigKeepsUpdatesViewAndOriginalNavigationNodes',
+    "document.querySelector('[data-skill-view=updates]').getAttribute('aria-selected')==='true'&&visible('#skillSection [data-draft-review]')&&!visible('#skillSection [data-list]')&&!visible('#skillSection .plugins-maintenance')&&document.querySelector('.plugins-skill-navigation')===pluginsFixture.firstSkillNav&&document.querySelector('[data-plugin-search=skill]')===pluginsFixture.firstSkillSearch&&pluginsFixture.panelFrames.length===0");
+
+  await act("pluginsFixture.skillFail=true;pluginsFixture.overviewMode='hold';");
+  await click('#pluginsRefresh'); await waitFor('!!pluginsFixture.pendingOverview');
+  await act('pluginsFixture.pendingOverview();');
+  await waitFor("!!document.querySelector('#skillSection .plugins-load-error')");
+  await check('skillLoadFailureRetainsNavigationSearchAndSelectedView',
+    "visible('.plugins-skill-navigation')&&visible('[data-plugin-search=skill]')&&document.querySelector('[data-skill-view=updates]').getAttribute('aria-selected')==='true'&&document.querySelector('[data-plugin-search=skill]').value==='文档'&&document.querySelector('[data-skill-filter]').dataset.value==='protected'&&document.querySelector('.plugins-skill-navigation')===pluginsFixture.firstSkillNav&&!visible('#pluginsCategory-skill .plugins-search-empty')");
+  await act("pluginsFixture.skillFail=false;pluginsFixture.configMode='hold';");
+  await click('#skillSection .plugins-load-error button');
+  await waitFor('!!pluginsFixture.pendingOverview&&!!pluginsFixture.pendingConfig');
+  await check('retryKeepsUpdatesViewWhileBothReadsArePending',
+    "document.querySelector('[data-skill-view=updates]').getAttribute('aria-selected')==='true'&&visible('#skillSection [data-draft-review]')&&!visible('#skillSection .plugins-maintenance')&&!visible('#skillSection [data-list]')&&document.querySelector('.plugins-skill-navigation')===pluginsFixture.firstSkillNav");
+  await act("pluginsFixture.expectedSkillView='maintenance';document.querySelector('[data-skill-view=maintenance]').click();pluginsFixture.overviewMode='ok';pluginsFixture.configMode='ok';pluginsFixture.pendingOverview();pluginsFixture.pendingConfig();");
+  await waitFor("!document.getElementById('pluginsRefresh').disabled"); await settleUI();
+  await check('lateRetryCompletionKeepsMaintenanceWithoutFlashingOtherPanels',
+    "document.querySelector('[data-skill-view=maintenance]').getAttribute('aria-selected')==='true'&&visible('#skillSection .plugins-maintenance')&&!visible('#skillSection [data-list]')&&!visible('#skillSection [data-draft-review]')&&!visible('[data-plugin-search=skill]')&&pluginsFixture.panelFrames.length===0");
+  await capture('skills-maintenance-after-retry');
+  await act("pluginsFixture.expectedSkillView='library';document.querySelector('[data-skill-view=library]').click();");
+  await check('searchAndFilterSurviveInitialLoadingAndFailureRetry',
+    "document.querySelector('[data-plugin-search=skill]').value==='文档'&&document.querySelector('[data-skill-filter]').dataset.value==='protected'&&document.querySelectorAll('#skillSection [data-list] > .dp-item:not([hidden])').length===1&&document.querySelector('#skillSection [data-list] > .dp-item:not([hidden]) .dp-item-name').textContent==='文档阅读'");
+  await act("pluginsFixture.watchSkillFrames=false;const e=document.querySelector('[data-plugin-search=skill]');e.value='';e.dispatchEvent(new Event('input',{bubbles:true}));");
+  await click('#pluginsSkillFilter .cs-trigger'); await click('#pluginsSkillFilter [data-value=all]');
+
   await check('pluginsLoadsRealSkillManagerInsideMainPage', "activeView==='plugins'&&visible('#pluginsPage')&&!visible('#settingsModal')&&document.getElementById('btnPlugins').getAttribute('aria-current')==='page'&&document.querySelectorAll('#pluginsPage [data-plugin-tab]').length===4");
   await check('installedSkillsUseTwoColumnLayoutAndSeparateMaintenanceView', "getComputedStyle(document.querySelector('#skillSection > [data-list]')).gridTemplateColumns.split(' ').length===2&&document.querySelector('#skillSection .plugins-maintenance').hidden&&!document.querySelector('#skillSection details.plugins-maintenance')&&document.querySelector('[data-skill-view=library]').getAttribute('aria-selected')==='true'&&!visible('#skillSection [data-draft-review]')");
   await act("pluginsFixture.skillImport=document.querySelector('#pluginsCategory-skill .plugins-intro-actions [data-import]');");

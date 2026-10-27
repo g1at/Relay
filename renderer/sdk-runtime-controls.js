@@ -44,17 +44,18 @@
       const section = node('section', 'rgp-section sdk-runtime-controls sdk-settings-section');
       section.dataset.sdkGroup = key; section.setAttribute('aria-label', title);
       section.append(node('div', 'set-section-head', title));
-      if (note) section.append(node('p', 'sdk-settings-note', note));
+      if (note) section.querySelector('.set-section-head').title = note;
       const panel = node('div', 'set-panel rgp-panel sdk-settings-panel'); section.append(panel);
       destinations[destination].append(section); sections.push(section);
       return { section, panel };
     }
 
-    function row(group, key, label, note, { icon = 'limits', multiline = false } = {}) {
+    function row(group, key, label, note, { icon = 'limits', multiline = false, detail = false } = {}) {
       const item = node('div', 'set-row rgp-row sdk-settings-row' + (multiline ? ' sdk-settings-row--multiline' : ''));
       item.dataset.sdkPreference = key;
       const symbol = node('div', 'set-icon'); symbol.innerHTML = svg(icon);
-      const caption = node('div', 'rgp-label'); caption.append(node('label', '', label)); if (note) caption.append(node('p', '', note));
+      const caption = node('div', 'rgp-label'); caption.append(node('label', '', label));
+      if (note?.trim()) { if (detail) caption.append(node('p', '', note)); else caption.title = note; }
       const controls = node('div', 'rgp-controls sdk-settings-control'); controls.dataset.sdkControl = key;
       item.append(symbol, caption, controls); group.panel.append(item); return controls;
     }
@@ -65,14 +66,16 @@
       const wrapper = host.firstElementChild, previous = wrapper.querySelector('.cs-trigger'), trigger = node('button', 'cs-trigger');
       trigger.type = 'button'; trigger.innerHTML = previous.innerHTML; previous.replaceWith(trigger);
       trigger.setAttribute('aria-label', label); trigger.setAttribute('aria-haspopup', 'listbox'); trigger.setAttribute('aria-expanded', 'false'); trigger.dataset.sdkSetting = key;
-      const description = descriptions && slot.parentElement.querySelector('.rgp-label p');
-      if (description) { description.id = id + '-' + key + '-description'; trigger.setAttribute('aria-describedby', description.id); }
       const popup = wrapper.querySelector('.cs-popup'); popup.id = wrapper.id + '-options'; popup.setAttribute('role', 'listbox'); trigger.setAttribute('aria-controls', popup.id);
       const items = [...popup.querySelectorAll('.cs-option')];
       const paint = () => {
         const selected = get(), option = options.find(([value]) => value === selected) || options[0];
         wrapper.dataset.value = option[0]; trigger.querySelector('.cs-text').textContent = option[1];
-        if (description) description.textContent = descriptions[option[0]];
+        if (descriptions) {
+          trigger.title = descriptions[option[0]] || '';
+          if (trigger.title) trigger.setAttribute('aria-description', trigger.title);
+          else trigger.removeAttribute('aria-description');
+        }
         items.forEach(item => { const active = item.dataset.value === option[0]; item.setAttribute('aria-selected', String(active)); item.classList.toggle('selected', active); });
       };
       items.forEach(item => {
@@ -113,27 +116,27 @@
     const conversation = group('conversation', 'context', '上下文与计划');
     choice(row(conversation, 'autoCompact', '自动压缩上下文', ' ', { icon: 'context' }),
       'autoCompact', '自动压缩上下文', [['inherit', '自动'], ['enabled', '开启'], ['disabled', '关闭']], { descriptions: {
-        inherit: '使用默认压缩策略（默认开启）；下次启动会话时生效。',
-        enabled: '开启自动压缩，接近上限时整理上下文；保存后尝试应用于当前对话。',
-        disabled: '关闭自动压缩，不自动整理上下文；保存后尝试应用于当前对话。',
+        inherit: '默认开启，下次会话生效。',
+        enabled: '接近上限时整理上下文。',
+        disabled: '',
       } });
-    toggle(row(conversation, 'showClearContextOnPlanAccept', '接受计划时提供清空选项', '清空前需要确认，Relay 历史对话会保留。', { icon: 'plan' }), 'showClearContextOnPlanAccept', '接受计划时提供清空选项');
+    toggle(row(conversation, 'showClearContextOnPlanAccept', '接受计划时提供清空选项', '清空需确认，历史保留。', { icon: 'plan' }), 'showClearContextOnPlanAccept', '接受计划时提供清空选项');
 
-    const summaries = group('conversation', 'summaries', '过程摘要', { note: '思考摘要需服务商支持，不改变推理强度。' });
-    toggle(row(summaries, 'agentProgressSummaries', '生成子任务进度摘要', '由 SDK 额外调用模型生成摘要，会增加用量。', { icon: 'summary' }), 'agentProgressSummaries', '生成子任务进度摘要');
+    const summaries = group('conversation', 'summaries', '过程摘要', { note: '需服务商支持，不影响推理强度。' });
+    toggle(row(summaries, 'agentProgressSummaries', '生成子任务进度摘要', '会额外消耗模型用量。', { icon: 'summary' }), 'agentProgressSummaries', '生成子任务进度摘要');
     choice(row(summaries, 'showThinkingSummaries', '请求思考摘要', ' ', { icon: 'summary' }),
       'showThinkingSummaries', '请求思考摘要', [['inherit', '自动'], ['enabled', '开启'], ['disabled', '关闭']], { descriptions: {
-        inherit: '使用默认摘要策略；下次启动会话时生效。',
-        enabled: '请求服务商提供思考摘要；保存后尝试应用于当前对话。',
-        disabled: '不请求额外摘要，模型仍可进行推理；保存后尝试应用于当前对话。',
+        inherit: '默认策略，下次会话生效。',
+        enabled: '',
+        disabled: '',
       } });
 
-    const tools = group('toolRules', 'tool-rules', '工具规则', { note: '为指定工具设置批准和禁止规则。' });
-    listInput(row(tools, 'allowedTools', '自动批准的工具', '例如 Read。拒绝规则优先，计划模式仍限制写入。', { icon: 'shield', multiline: true }), 'allowedTools', '自动批准的工具');
+    const tools = group('toolRules', 'tool-rules', '工具规则');
+    listInput(row(tools, 'allowedTools', '自动批准的工具', '拒绝优先；计划模式仍限制写入。', { icon: 'shield', multiline: true }), 'allowedTools', '自动批准的工具', { placeholder: '每行一条，如 Read' });
     listInput(row(tools, 'disallowedTools', '禁止的工具', '同样适用于子智能体。', { icon: 'shield', multiline: true }), 'disallowedTools', '禁止的工具');
-    toggle(row(tools, 'disableSkillShellExecution', '禁止技能内的命令替换', '控制技能加载时的内联命令，与对话中的命令权限分别管理。', { icon: 'tools' }), 'disableSkillShellExecution', '禁止技能内的命令替换');
+    toggle(row(tools, 'disableSkillShellExecution', '禁止技能内的命令替换', '仅限技能加载时的内联命令。', { icon: 'tools' }), 'disableSkillShellExecution', '禁止技能内的命令替换');
 
-    const compatibility = group('toolRules', 'compatibility', '已有兼容配置', { note: '旧版配置继续生效。可逐项恢复默认，保存后应用。' });
+    const compatibility = group('toolRules', 'compatibility', '已有兼容配置', { note: '旧配置仍生效，可恢复默认。' });
     function compatibilitySummary(key, value) {
       if (key === 'thinking') return ({ adaptive: '自适应', enabled: '固定预算', disabled: '已关闭' })[value] + (value === 'adaptive' && modelCapability?.supportsAdaptiveThinking === false ? ' · 当前模型不支持' : '');
       if (key === 'thinkingBudget' || key === 'autoCompactWindow') return Number(value).toLocaleString() + ' Token';
@@ -152,7 +155,7 @@
       const keys = Object.keys(compatibilityDefaults).filter(key => draft[key] !== undefined && JSON.stringify(draft[key]) !== JSON.stringify(compatibilityDefaults[key]));
       compatibility.section.hidden = !keys.length;
       for (const key of keys) {
-        const slot = row(compatibility, 'compatibility-' + key, compatibilityLabels[key], compatibilitySummary(key, draft[key]), { icon: 'history' });
+        const slot = row(compatibility, 'compatibility-' + key, compatibilityLabels[key], compatibilitySummary(key, draft[key]), { icon: 'history', detail: true });
         slot.parentElement.dataset.sdkCompatibility = key;
         const reset = node('button', 'rgp-button rgp-reset', '恢复默认'); reset.type = 'button'; reset.dataset.sdkReset = key;
         reset.setAttribute('aria-label', '恢复' + compatibilityLabels[key] + '的默认值');

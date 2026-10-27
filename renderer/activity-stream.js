@@ -2057,12 +2057,12 @@
     updateSummary(element, state, opts);
     const groupPreferences = element._processGroupExpanded || new Map();
     element._processGroupExpanded = groupPreferences;
-    // Restored completed processes open collapsed. Keep their full state and
-    // summary, but avoid constructing thousands of invisible rows on navigation.
-    // Once mounted, retain the existing DOM and its expansion/scroll state.
+    // Restored histories and processes the user folded keep their complete
+    // state/summary without repeatedly walking invisible rows. Existing nodes
+    // retain inspector expansion and scroll; opening catches up once.
     const body = element.querySelector('.process-items');
-    const deferItems = opts.deferCollapsed && wasCollapsed && /^(complete|error|canceled)$/.test(state.phase)
-      && !body.firstChild;
+    const deferItems = wasCollapsed && (element.dataset.userToggled
+      || opts.deferCollapsed && /^(complete|error|canceled)$/.test(state.phase) && !body.firstChild);
     if (deferItems) element._processItemsDeferred = true;
     else {
       element._processItemsDeferred = false;

@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { TaskEventJournal } = require('../src/main/tasks/task-event-journal');
 const { TaskProgressStore } = require('../src/main/tasks/task-progress-store');
+const { completeConversationTurn } = require('../src/main/app/conversation-mutations');
 
 const ledgerTask = (runId, state, turnIndex) => ({
   runId, kind: 'chat', state, source: { conversationId: 'conv', turnIndex },
@@ -20,10 +21,11 @@ function recoveryFixture(turns, tasks, events = []) {
   Object.assign(h.conv, { kind: 'chat', updatedAt: 'synthetic-original-order', turns: clone(turns).map((turn, index) => ({
     ...turn, ts: turn.ts || new Date(Date.UTC(2026, 8, 28, 9, 0, index)).toISOString(),
   })) });
-  c.runs.clear(); c.jobToConv.clear(); c.currentConv = null;
+  c.runs.clear(); c.recoveryRuns.clear(); c.jobToConv.clear(); c.currentConv = null;
   const saved = [], registered = [], warnings = [];
   Object.assign(c, {
-    activeView: 'settings', pendingConversationViewReloads: new Set(), cvJobs: new Map(),
+    activeView: 'settings', pendingConversationViewReloads: new Set(), cvJobs: new Map(), cvIsRunning: () => false,
+    pendingConversationSends: new Set(), pendingConversationSaves: new Map(),
     restoringActiveRuns: true, restoringTaskLifecycle: true,
     bufferedClaudeEvents: [], bufferedTaskLifecycleEvents: [],
     TERMINAL_LEDGER_STATES: new Set(['succeeded', 'failed', 'canceled', 'interrupted']),
@@ -37,27 +39,26 @@ function recoveryFixture(turns, tasks, events = []) {
     Object.assign(h.conv, next); saved.push(clone(next));
     return { updatedAt: next.updatedAt };
   };
-  const completeTurn = c.window.api.history.completeTurn;
-  c.window.api.history.completeTurn = async (...args) => {
-    const completed = await completeTurn(...args);
-    if (completed.error) return completed;
-    await c.window.api.history.save(completed.conversation);
-    return { ...completed, updatedAt: h.conv.updatedAt, conversation: clone(h.conv) };
-  };
+  c.window.api.history.completeTurn = async (...args) => completeConversationTurn({
+    load: () => clone(h.conv),
+    persist(value) { Object.assign(h.conv, clone(value)); saved.push(clone(value)); },
+  }, ...args);
   c.window.api.tasks = {
     snapshot: async () => ({ ok: true, epoch: 'synthetic-new-instance', items: tasks }),
     replayStream: async () => {
-      registered.push(...c.runs.values());
+      registered.push(...c.runs.values(), ...c.recoveryRuns.values());
       return { ok: true, hasMore: false, events: events.map((event, index) => ({
         seq: index + 1, runId: event.jobId, payload: { event },
       })) };
     },
   };
   for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation',
-    'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskHasEmptyInterruptedProgress', 'taskTurnLocation', 'taskErrorText',
+    'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskCanRepairInterruption', 'taskIsAppInterrupted',
+    'recoveryTime', 'recoveredRunFinishedAt', 'recoveredTerminalSucceeded', 'finishRecoveredChatRun',
+    'runForJob', 'isConvRunning', 'isMountedChatJob', 'taskTurnLocation', 'taskErrorText', 'applyRunSupplement',
     'finishRun', 'reconcileRestoredChatTask', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
   return {
-    ...h, saved, registered,
+    ...h, saved, registered, warnings,
     async restore() {
       c.restoringActiveRuns = true; c.restoringTaskLifecycle = true;
       await c.restoreActiveRunsFromLedger();
@@ -134,7 +135,7 @@ test('an unmarked historical placeholder recovers its final journal reply withou
   assert.equal(h.saved.length, 1);
   assert.equal(h.conv.turns[0].assistant, 'synthetic recovered final');
   assert.equal(h.conv.turns[0].output.status, 'complete');
-  assert.equal(h.conv.updatedAt, 'synthetic-save-1');
+  assert.equal(h.conv.updatedAt, 'synthetic-original-order', 'repair preserves sidebar order');
   assert.deepEqual(h.conv.turns[1], laterBefore);
   assert.equal(h.context.runs.size, 0);
   const savedBeforeRestart = clone(h.conv);
@@ -215,7 +216,7 @@ test('a real previous-process journal restores thinking, tool receipts and parti
   const requests = [];
   h.context.window.api.tasks.replayStream = async request => {
     requests.push(request);
-    h.registered.push(...h.context.runs.values());
+    h.registered.push(...h.context.runs.values(), ...h.context.recoveryRuns.values());
     return { ok: true, ...journal.replayEpoch(clone(request)) };
   };
   const later = clone(h.conv.turns[1]);
@@ -223,7 +224,7 @@ test('a real previous-process journal restores thinking, tool receipts and parti
   assert.equal(requests[0].epoch, 'previous-process');
   assert.equal(requests[0].runId, 'old-job');
   const turn = h.conv.turns[0];
-  assert.equal(turn.status, 'error');
+  assert.equal(turn.status, 'paused');
   assert.equal(turn.assistant, '', 'partial narration must never become a final answer');
   assert.ok(turn.activity.items.some(item => item.type === 'thinking'));
   assert.equal(turn.activity.items.find(item => item.toolUseId === 'tool-1').result, 'Synthetic file contents');
@@ -246,13 +247,13 @@ test('a durable progress snapshot survives missing old journals and repairs an a
     output: { status: 'error', messages: [] } }], [interruptedTask()]);
   h.context.window.api.tasks.progress = async runId => ({ ok: true, progress: await reader.load(runId) });
   h.context.window.api.tasks.replayStream = async request => {
-    h.registered.push(...h.context.runs.values());
+    h.registered.push(...h.context.runs.values(), ...h.context.recoveryRuns.values());
     assert.ok(request.sinceSeq > 0);
     return { ok: true, missing: true, resetRequired: true, events: [], hasMore: false };
   };
   await h.restore();
   assert.equal(h.conv.turns[0].assistant, '');
-  assert.equal(h.conv.turns[0].status, 'error');
+  assert.equal(h.conv.turns[0].status, 'paused');
   assert.equal(h.conv.turns[0].activity.items.filter(item => item.type === 'thinking').length, 1);
   assert.ok(h.conv.turns[0].activity.items.some(item => item.toolUseId === 'tool-1'));
   assert.match(h.conv.turns[0].outputNotice, /部分执行过程/);
@@ -260,11 +261,15 @@ test('a durable progress snapshot survives missing old journals and repairs an a
   assert.equal(h.saved.length, 1);
 });
 
-test('a blank historical restart error without recoverable evidence stays unchanged', async () => {
+test('a blank historical restart error becomes a single resumable pause without fabricating output', async () => {
   const h = recoveryFixture([{ runId: 'old-job', assistant: '', status: 'error', activity: { items: [] } }], [interruptedTask()]);
   await h.restore();
-  assert.equal(h.saved.length, 0);
-  assert.equal(h.registered.length, 0);
+  assert.equal(h.saved.length, 1);
+  assert.equal(h.conv.turns[0].status, 'paused');
+  assert.equal(h.conv.turns[0].assistant, '');
+  assert.equal(h.conv.paused.runId, 'old-job');
+  await h.restore();
+  assert.equal(h.saved.length, 1);
 });
 
 test('snapshot cursor prevents buffered stream deltas from being appended twice', async () => {
@@ -310,10 +315,173 @@ test('a checkpoint after the only job-done frame retains its authoritative final
 test('a journal read failure is disclosed when settling an interrupted run', async () => {
   const h = recoveryFixture([{ runId: 'old-job', assistant: '' }], [interruptedTask()]);
   h.context.window.api.tasks.replayStream = async () => {
-    h.registered.push(...h.context.runs.values());
+    h.registered.push(...h.context.runs.values(), ...h.context.recoveryRuns.values());
     return { ok: false, error: 'Synthetic unavailable journal' };
   };
   await h.restore();
-  assert.equal(h.conv.turns[0].status, 'error');
+  assert.equal(h.conv.turns[0].status, 'paused');
   assert.match(h.conv.turns[0].outputNotice, /部分执行过程/);
+});
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+};
+
+test('known interruption stays off live UI during replay and settles before an unavailable second snapshot', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', user: 'durable original input', assistant: '' }], [interruptedTask()]);
+  const gate = deferred(), entered = deferred();
+  let snapshots = 0, launches = 0;
+  h.context.currentConv = h.conv; h.context.activeView = 'chat';
+  h.context.loadConversation = async () => true;
+  h.context.maybeGenerateTitle = h.context.maybeAutoReviewSkills = () => { launches++; };
+  h.context.window.api.tasks.snapshot = async () => {
+    if (++snapshots === 1) return { ok: true, epoch: 'new-process', items: [interruptedTask()] };
+    assert.equal(h.conv.turns[0].status, 'paused', 'first known terminal settled before the second snapshot');
+    return { ok: false };
+  };
+  h.context.window.api.tasks.replayStream = async () => {
+    entered.resolve(); await gate.promise;
+    return { ok: true, events: [], hasMore: false };
+  };
+  const restoring = h.restore(); await entered.promise;
+  assert.equal(h.context.runs.size, 0);
+  assert.equal(h.context.recoveryRuns.size, 1);
+  assert.equal(h.context.isConvRunning('conv'), false);
+  assert.equal(h.context.isMountedChatJob('old-job'), false);
+  assert.equal(h.saved.length, 0);
+  gate.resolve(); await restoring;
+  assert.equal(h.context.recoveryRuns.size, 0);
+  assert.equal(h.conv.paused.runId, 'old-job');
+  assert.equal(h.conv.turns[0].user, 'durable original input');
+  assert.equal(h.conv.updatedAt, 'synthetic-original-order');
+  assert.equal(launches, 0, 'repair never starts title generation or a curator');
+});
+
+test('a new user run and later turn retain ownership while the old journal is recovered', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', user: 'old input', assistant: '' }], [interruptedTask()]);
+  const newer = { runId: 'new-job', user: 'new independent request', ts: '2026-09-28T10:00:00.000Z', status: 'running' };
+  const live = { jobId: 'new-job', convId: 'conv', turn: newer };
+  h.context.currentConv = h.conv; h.context.activeView = 'chat';
+  h.context.loadConversation = async () => { assert.fail('old repair must not reload the new live transcript'); };
+  h.context.window.api.tasks.replayStream = async () => {
+    h.conv.turns.push(clone(newer));
+    h.context.runs.set('conv', live); h.context.jobToConv.set('new-job', 'conv');
+    return { ok: true, events: [], hasMore: false };
+  };
+  await h.restore();
+  assert.equal(h.context.runForJob('new-job'), live);
+  assert.equal(h.context.isConvRunning('conv'), true);
+  assert.equal(h.conv.paused, undefined, 'an older paused turn cannot become the current resume target');
+  assert.deepEqual(h.conv.turns[1], newer);
+  assert.equal(h.conv.turns[0].status, 'paused');
+});
+
+test('a competing completion after replay wins the atomic recovery write', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', user: 'original', assistant: '' }], [interruptedTask()]);
+  const complete = h.context.window.api.history.completeTurn;
+  h.context.window.api.history.completeTurn = async (...args) => {
+    Object.assign(h.conv.turns[0], { status: 'complete', assistant: 'another writer confirmed this result' });
+    return complete(...args);
+  };
+  await h.restore();
+  assert.equal(h.conv.turns[0].assistant, 'another writer confirmed this result');
+  assert.equal(h.conv.turns[0].status, 'complete');
+  assert.equal(h.conv.paused, undefined);
+  assert.equal(h.saved.length, 0, 'stale outcome is not written a second time');
+  assert.equal(h.context.recoveryRuns.size, 0);
+});
+
+test('deleting the original during replay cannot reconstruct or save the removed history', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', user: 'original', assistant: '' }], [interruptedTask()]);
+  let recoveries = 0;
+  h.context.window.api.history.recoverTurn = async () => { recoveries++; return { ok: false }; };
+  h.context.window.api.tasks.replayStream = async () => {
+    h.context.window.api.history.load = async () => null;
+    return { ok: true, events: [], hasMore: false };
+  };
+  await h.restore();
+  assert.equal(recoveries, 0);
+  assert.equal(h.saved.length, 0);
+  assert.equal(h.context.recoveryRuns.size, 0);
+});
+
+test('old restart errors with process evidence become paused and remove previously charged downtime', async () => {
+  const start = Date.parse('2026-09-28T09:00:00.000Z'), stop = start + 30000;
+  const continuity = require('../renderer/task-continuity');
+  const polluted = continuity.finish(continuity.begin({ runId: 'old-job', startedAt: start }), { finishedAt: start + 86400000 });
+  const task = { ...interruptedTask(), recovery: { lastActiveAt: new Date(stop).toISOString() } };
+  const original = { runId: 'old-job', user: 'original question', files: [{ name: 'attachment.txt', path: 'synthetic.txt' }],
+    assistant: '', status: 'error', error: 'Relay 在任务完成前关闭，本次任务已中断。', taskRun: polluted,
+    activity: { phase: 'error', error: 'Relay 在任务完成前关闭，本次任务已中断。', taskRun: polluted,
+      taskFinishedAt: start + 86400000, items: [{ id: 'saved-tool', type: 'tool', title: 'Read', status: 'success', result: 'retained receipt' }] } };
+  const h = recoveryFixture([original], [task]); await h.restore();
+  const turn = h.conv.turns[0];
+  assert.equal(turn.status, 'paused'); assert.equal(turn.error, null);
+  assert.equal(turn.taskRun.segmentFinishedAt, stop); assert.equal(turn.taskRun.elapsedMs, 30000);
+  assert.equal(turn.activity.taskFinishedAt, stop);
+  assert.equal(turn.activity.items[0].result, 'retained receipt');
+  assert.deepEqual(turn.files, original.files);
+  assert.equal(turn.user, original.user);
+  const resumed = continuity.begin({ runId: 'resume-job', startedAt: start + 86410000, conversation: h.conv, resumedFromRunId: 'old-job' });
+  assert.equal(resumed.elapsedBeforeMs, 30000, 'manual continuation excludes a day of downtime');
+  const saved = clone(h.conv); await h.restore();
+  assert.deepEqual(h.conv, saved); assert.equal(h.saved.length, 1);
+});
+
+test('a successful terminal checkpoint wins an interrupted ledger without starting auxiliary work', async () => {
+  const h = recoveryFixture([{ runId: 'old-job', user: 'original', assistant: '' }], [interruptedTask()]);
+  h.context.maybeGenerateTitle = h.context.maybeAutoReviewSkills = () => assert.fail('recovery cannot launch SDK work');
+  h.context.window.api.tasks.progress = async () => ({ ok: true, progress: {
+    runId: 'old-job', epoch: 'previous-process', seq: 1, activity: { items: [] }, output: {},
+    terminalEvent: { type: 'job-done', exitCode: 0, finalResult: result('already completed final answer') },
+  } });
+  await h.restore();
+  assert.equal(h.conv.turns[0].status, 'complete');
+  assert.equal(h.conv.turns[0].assistant, 'already completed final answer');
+  assert.equal(h.conv.paused, undefined);
+});
+
+test('true provider failure receipts and deliberate user cancellations remain failures or cancellations', async () => {
+  for (const prior of [
+    { status: 'error', error: 'Provider authentication failed' },
+    { status: 'canceled', output: { status: 'canceled' } },
+    { status: 'paused', output: { status: 'canceled' } },
+  ]) {
+    const h = recoveryFixture([{ runId: 'old-job', user: 'original', assistant: '', ...prior }], [interruptedTask()]);
+    const before = clone(h.conv); await h.restore();
+    assert.deepEqual(h.conv, before); assert.equal(h.saved.length, 0);
+  }
+  const h = recoveryFixture([{ runId: 'old-job', user: 'original', assistant: '' }], [interruptedTask()], [
+    { jobId: 'old-job', type: 'job-done', exitCode: 1, error: 'Provider unavailable' },
+  ]);
+  await h.restore();
+  assert.equal(h.conv.turns[0].status, 'error');
+  assert.equal(h.conv.turns[0].error, 'Provider unavailable');
+  assert.equal(h.conv.paused, undefined);
+});
+
+test('an unavailable progress checkpoint falls back to the journal without blocking other recoveries', async () => {
+  const second = { ...interruptedTask('second-job'), source: { conversationId: 'conv', turnIndex: 1 } };
+  const h = recoveryFixture([{ runId: 'old-job', user: 'first', assistant: '' },
+    { runId: 'second-job', user: 'second', assistant: '' }], [interruptedTask(), second]);
+  h.context.window.api.tasks.progress = async () => { throw new Error('synthetic unavailable checkpoint'); };
+  await h.restore();
+  assert.deepEqual(h.conv.turns.map(turn => turn.status), ['paused', 'paused']);
+  assert.equal(h.conv.paused.runId, 'second-job');
+  assert.equal(h.saved.length, 2);
+  assert.equal(h.context.recoveryRuns.size, 0);
+});
+
+test('a restored live run pauses when the APP_EXIT lifecycle precedes its shutdown frame', async () => {
+  const task = { ...ledgerTask('live-job', 'running', 0), execution: { appInstanceId: 'synthetic-new-instance' } };
+  const h = recoveryFixture([{ runId: 'live-job', user: 'original', assistant: '' }], [task]);
+  await h.restore(); assert.equal(h.context.isConvRunning('conv'), true);
+  await h.context.reconcileRestoredChatTask({ ...task, state: 'interrupted',
+    result: { error: { code: 'APP_EXIT', message: 'Relay is shutting down' } },
+    recovery: { lastActiveAt: '2026-09-28T09:00:30.000Z' } });
+  assert.equal(h.context.runs.size, 0);
+  assert.equal(h.conv.turns[0].status, 'paused');
+  assert.equal(h.conv.paused.runId, 'live-job');
 });

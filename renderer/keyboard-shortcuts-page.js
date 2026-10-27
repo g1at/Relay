@@ -25,14 +25,14 @@
     const actionById = new Map(actions.map(action => [action.id, action]));
     const primary = isMac ? '⌘' : 'Ctrl';
     const basics = [
-      { id: 'basic-send', label: '发送消息', description: '在对话和 AI 创作输入框中发送', keys: ['Enter'] },
-      { id: 'basic-followup', label: '切换本次跟进方式', description: '任务运行时，在加入队列与调整方向之间临时切换', keys: [primary, 'Enter'] },
-      { id: 'basic-newline', label: '插入换行', description: '在消息输入框中换行', keys: ['Shift', 'Enter'] },
-      { id: 'basic-dismiss', label: '关闭弹窗', description: '关闭当前弹窗或取消当前操作', keys: ['Esc'] },
-      { id: 'basic-submit-request', label: '提交请求选项', description: '在请求选择界面中提交已选答案', keys: [primary, 'Enter'] },
-      { id: 'basic-sidebar-width', label: '调整侧栏宽度', description: '侧栏分隔线获得焦点时使用', keys: ['←', '→'], alternatives: true },
-      { id: 'basic-feature-order', label: '调整入口顺序', description: '自定义列表中的拖动手柄获得焦点时使用', keys: ['Alt', '↑ / ↓'] },
-      { id: 'basic-plugin-tab', label: '切换插件标签', description: '技能、Agent 或 MCP 标签获得焦点时使用', keys: ['←', '→'], alternatives: true },
+      { id: 'basic-send', label: '发送消息', description: '对话与 AI 创作输入框', keys: ['Enter'] },
+      { id: 'basic-followup', label: '切换本次跟进方式', description: '运行时切换排队或调整方向', keys: [primary, 'Enter'] },
+      { id: 'basic-newline', label: '插入换行', description: '', keys: ['Shift', 'Enter'] },
+      { id: 'basic-dismiss', label: '关闭弹窗', description: '', keys: ['Esc'] },
+      { id: 'basic-submit-request', label: '提交请求选项', description: '', keys: [primary, 'Enter'] },
+      { id: 'basic-sidebar-width', label: '调整侧栏宽度', description: '聚焦侧栏分隔线时可用', keys: ['←', '→'], alternatives: true },
+      { id: 'basic-feature-order', label: '调整入口顺序', description: '聚焦自定义列表拖动手柄时可用', keys: ['Alt', '↑ / ↓'] },
+      { id: 'basic-plugin-tab', label: '切换插件标签', description: '聚焦技能、Agent 或 MCP 标签时可用', keys: ['←', '→'], alternatives: true },
     ];
     let recording = null;
     let rowError = '';
@@ -66,7 +66,8 @@
     page.setAttribute('aria-label', '键盘快捷键');
     const heading = element('header', 'ksp-heading');
     const headingText = element('div', 'ksp-heading-text');
-    headingText.append(element('h2', '', '键盘快捷键'), element('p', '', '查看全局快捷键，或按你的习惯调整主窗口快捷键。'));
+    headingText.append(element('h2', '', '键盘快捷键'));
+    headingText.title = '自动保存，每项最多 3 个快捷键';
     const reset = button('恢复默认快捷键', 'reset', 'ksp-reset');
     reset.dataset.shortcutReset = '';
     reset.append(element('span', '', '恢复默认'));
@@ -88,7 +89,7 @@
     notice.setAttribute('role', 'status');
     notice.setAttribute('aria-live', 'polite');
     notice.dataset.shortcutStatus = '';
-    notice.textContent = '修改会自动保存在本机。每个操作最多可设置 3 个快捷键。';
+    notice.hidden = true;
     const groups = element('div', 'ksp-groups');
     groups.dataset.shortcutGroups = '';
     page.append(heading, searchBox, notice, groups);
@@ -101,6 +102,7 @@
     }
     function setNotice(message, error = false) {
       notice.textContent = message;
+      notice.hidden = !message;
       notice.classList.toggle('is-error', error);
       notice.dataset.error = String(error);
     }
@@ -148,31 +150,38 @@
       });
       return node;
     }
-    function actionInfo(action) {
+    function actionInfo(action, showDescription = false) {
       const node = element('div', 'ksp-action-info');
-      node.append(element('div', 'ksp-action-name', action.label), element('div', 'ksp-action-description', action.description));
+      const name = element('div', 'ksp-action-name', action.label);
+      if (action.description) {
+        name.title = action.description;
+        name.setAttribute('aria-description', action.description);
+      }
+      node.append(name);
+      if (showDescription && action.description) node.append(element('div', 'ksp-action-description', action.description));
       return node;
     }
     function globalSection() {
       const descriptions = {
-        loading: '默认 Alt+Space，正在读取当前快捷键。',
-        active: '在任意应用中唤起或收起迷你输入框。',
-        fallback: 'Alt+Space 已被占用，当前使用备用组合键。',
-        disabled: '默认 Alt+Space；已关闭，可在「设置 → 常规」中开启。',
-        unavailable: '默认 Alt+Space；快捷键注册失败，可从托盘菜单打开。',
-        error: '默认 Alt+Space；暂时无法读取状态，重新进入此页可重试。',
+        loading: '',
+        active: '唤起或收起迷你输入框',
+        fallback: 'Alt+Space 被占用，已使用备用键。',
+        disabled: '可在「常规」中开启。',
+        unavailable: '注册失败，可从托盘打开。',
+        error: '无法读取，重新进入此页重试。',
       };
       const action = { label: '快捷小窗', description: descriptions[miniShortcut.status], group: '全局快捷键 迷你输入框' };
       if (!matches(action, ['Alt+Space', miniShortcut.chord].filter(Boolean))) return null;
       const section = element('section', 'ksp-group');
       section.dataset.shortcutGlobalGroup = '';
       const title = element('div', 'ksp-group-heading');
-      title.append(element('h3', '', '全局快捷键'), element('span', '', '在其他应用中也可使用'));
+      title.append(element('h3', '', '全局快捷键'));
+      title.title = '其他应用中也可用';
       const card = element('div', 'ksp-card');
       const row = element('div', 'ksp-row ksp-row-readonly');
       row.dataset.shortcutGlobal = 'miniWindow';
       row.dataset.shortcutState = miniShortcut.status;
-      row.append(actionInfo(action));
+      row.append(actionInfo(action, !['loading', 'active'].includes(miniShortcut.status)));
       if (miniShortcut.chord) row.append(keycaps(core.formatChord(miniShortcut.chord, isMac)));
       else {
         const labels = { loading: '读取中…', disabled: '已关闭', unavailable: '未注册', error: '暂不可用' };
@@ -187,7 +196,7 @@
       if (groups.querySelector('[data-shortcut-action], [data-shortcut-basic], [data-shortcut-global]')) return;
       const empty = element('div', 'ksp-empty');
       empty.dataset.shortcutEmpty = '';
-      empty.append(icon('search'), element('p', '', '没有找到匹配的快捷键'), element('span', '', '试试操作名称或 Ctrl K 这样的组合键。'));
+      empty.append(icon('search'), element('p', '', '没有找到匹配的快捷键'));
       groups.append(empty);
     }
     async function refreshMiniShortcut() {
@@ -224,12 +233,16 @@
       input.readOnly = true;
       input.placeholder = '按下快捷键';
       input.setAttribute('aria-label', `为“${action.label}”录制快捷键`);
+      input.setAttribute('aria-description', '按下组合键保存，Esc 取消');
       input.setAttribute('aria-describedby', `ksp-record-help-${action.id}`);
+      input.setAttribute('aria-invalid', String(!!rowError));
       input.dataset.shortcutRecordInput = '';
-      const cancel = button('取消录制快捷键', 'close');
+      const cancel = button('取消录制快捷键', null, 'ksp-record-cancel');
+      cancel.textContent = '取消';
       cancel.dataset.shortcutCancel = '';
       controls.append(input, cancel);
-      const help = element('div', `ksp-record-help${rowError ? ' is-error' : ''}`, rowError || '按下组合键以保存，Esc 取消');
+      const help = element('div', `ksp-record-help${rowError ? ' is-error' : ''}`, rowError);
+      help.hidden = !rowError;
       help.id = `ksp-record-help-${action.id}`;
       help.setAttribute('aria-live', 'polite');
       if (rowError) help.dataset.shortcutError = '';
@@ -241,8 +254,9 @@
       row.dataset.shortcutAction = action.id;
       row.append(actionInfo(action));
       const controls = element('div', 'ksp-bindings');
+      const recordingAction = recording && recording.type === 'binding' && recording.id === action.id;
       bindings.forEach((chord, index) => {
-        if (recording && recording.type === 'binding' && recording.id === action.id && recording.index === index) {
+        if (recordingAction && recording.index === index) {
           controls.append(recorder(action, index));
           return;
         }
@@ -254,9 +268,9 @@
         binding.append(keycaps(core.formatChord(chord, isMac)), edit, remove);
         controls.append(binding);
       });
-      const adding = recording && recording.type === 'binding' && recording.id === action.id && recording.index >= bindings.length;
+      const adding = recordingAction && recording.index >= bindings.length;
       if (adding) controls.append(recorder(action, bindings.length));
-      else if (bindings.length < 3) {
+      else if (!recordingAction && bindings.length < 3) {
         const add = button(bindings.length ? `为“${action.label}”添加快捷键` : `为“${action.label}”分配快捷键`, bindings.length ? 'plus' : 'edit', 'ksp-add');
         add.dataset.shortcutAdd = '';
         add.append(element('span', '', bindings.length ? '添加快捷键' : '未分配'));
@@ -284,20 +298,20 @@
         const node = element('section', 'ksp-group');
         const title = element('div', 'ksp-group-heading');
         title.append(element('h3', '', label));
-        if (hint) title.append(element('span', '', hint));
+        if (hint) title.title = hint;
         const card = element('div', 'ksp-card');
         card.append(...rows);
         node.append(title, card);
         fragment.append(node);
       }
-      for (const [label, rows] of grouped) section(label, rows, label === '右侧工作区' ? '在浏览器和终端中也可使用，修改后立即生效' : null);
+      for (const [label, rows] of grouped) section(label, rows, label === '右侧工作区' ? '浏览器和终端中也可用' : null);
       const basicRows = basics.filter(action => matches({ ...action, group: '基础操作' }, [action.keys.join('+')])).map(action => {
         const row = element('div', 'ksp-row ksp-row-readonly');
         row.dataset.shortcutBasic = action.id;
         row.append(actionInfo(action), keycaps(action.keys, action.alternatives));
         return row;
       });
-      section('基础操作', basicRows, '在对应界面中使用，不支持修改');
+      section('基础操作', basicRows, '不可修改');
       groups.replaceChildren(fragment);
       syncEmptyState();
     }
@@ -385,6 +399,11 @@
       // Tab must still move focus; other recording keys must not reach app shortcuts.
       event.stopImmediatePropagation();
       if (event.key === 'Tab') { cancelRecording(); return true; }
+      if (event.target?.closest?.('[data-shortcut-cancel]') && ['Enter', ' '].includes(event.key)) {
+        event.preventDefault();
+        cancelRecording();
+        return true;
+      }
       event.preventDefault();
       if (event.key === 'Escape') { cancelRecording(); return true; }
       if (event.repeat || event.isComposing || event.keyCode === 229) return true;
@@ -400,7 +419,8 @@
       if (!validated.ok) {
         rowError = describeError(validated);
         const help = groups.querySelector('.ksp-record-help');
-        if (help) { help.textContent = rowError; help.classList.add('is-error'); help.dataset.shortcutError = ''; }
+        if (help) { help.textContent = rowError; help.hidden = false; help.classList.add('is-error'); help.dataset.shortcutError = ''; }
+        groups.querySelector('[data-shortcut-record-input]')?.setAttribute('aria-invalid', 'true');
         return true;
       }
       const { id, index } = recording;

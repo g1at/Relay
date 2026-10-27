@@ -16,7 +16,7 @@ const evaluate = code => win.webContents.executeJavaScript(code);
 const act = code => evaluate(`(() => { ${code}\n })()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(code) { await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+6000;const tick=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(tick,20)};tick()})`); }
-async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); console.log(name); if (!checks[name]) throw Error(name); }
+async function check(name, code) { step = name; const result = await evaluate('(()=>{try{return{value:!!('+code+')}}catch(error){return{error:error.stack||String(error)}}})()'); if (result.error) throw Error(name+': '+result.error); checks[name] = result.value; save(); console.log(name); if (!checks[name]) throw Error(name); }
 async function click(selector) { await evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`); await delay(70); }
 async function input(selector, value) { await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.value=${JSON.stringify(value)};e.dispatchEvent(new Event('input',{bubbles:true}))})()`); }
 async function key(keyCode, modifiers = []) { win.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers }); win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers }); await delay(80); }
@@ -37,7 +37,7 @@ app.whenReady().then(async () => {
     window.agentFixture={agents:[{name:'planner',displayName:'任务规划',desc:'拆解需求，梳理执行步骤。'},{name:'writer',displayName:'内容写作',desc:'撰写清晰、自然的内容。'},{name:'reviewer',displayName:'质量审查',desc:'核对细节，检查结果。'}],mode:'ok',pending:null,runs:[],history:new Map(),writes:0,pmCalls:0};
     const f=agentFixture;
     const data=new Proxy(base.data,{get(t,k){if(k==='listAgents')return async()=>{if(f.mode==='fail')throw Error('Synthetic failure');if(f.mode==='hold')return new Promise(r=>f.pending=r);return {ok:true,items:f.mode==='empty'?[]:f.agents}};return t[k]}});
-    const history=new Proxy(base.history,{get(t,k){if(k==='save')return async conv=>{f.writes++;const next=JSON.parse(JSON.stringify({...conv,id:conv.id||'agent-history-'+f.writes}));f.history.set(next.id,next);return next};if(k==='load')return async id=>JSON.parse(JSON.stringify(f.history.get(id)||null));if(k==='list')return async()=>[...f.history.values()];return t[k]}});
+    const history=new Proxy(base.history,{get(t,k){if(k==='save')return async conv=>{f.writes++;const next=JSON.parse(JSON.stringify({...conv,id:conv.id||'agent-history-'+f.writes}));await t.save(next);f.history.set(next.id,next);return next};if(k==='completeTurn')return async(...args)=>{const result=await t.completeTurn(...args);if(result.ok&&result.conversation)f.history.set(args[0],JSON.parse(JSON.stringify(result.conversation)));return result};if(k==='load')return async id=>JSON.parse(JSON.stringify(f.history.get(id)||null));if(k==='list')return async()=>[...f.history.values()];return t[k]}});
     window.api=new Proxy(base,{get(t,k){if(k==='data')return data;if(k==='history')return history;if(k==='pm')return new Proxy(t.pm,{get(p,n){return (...a)=>{f.pmCalls++;return p[n](...a)}}});if(k==='runClaude')return async(...a)=>{f.runs.push(a);return base.runClaude(...a)};return t[k]}});
     localStorage.setItem('relay.sidebar.features.v1',JSON.stringify({version:3,order:['search','settings','orchestrate','agent','plugins','library','scheduler','create'],pinned:['search','settings','orchestrate']}));
   })();`;
@@ -46,6 +46,8 @@ app.whenReady().then(async () => {
   win = new BrowserWindow({ width: 1140, height: 800, show: true, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
   await win.loadFile(page); await waitFor('!!window.relayKeyboardShortcuts && providerRoutingLoaded && !restoringActiveRuns');
   await check('legacyPinnedCollaborationUsesSingleAgentEntry', "!document.getElementById('btnTeam') && document.querySelectorAll('#btnNewAnalysis').length===1 && relaySidebarExplore.getPreferences().pinned.includes('agent') && !relaySidebarExplore.getPreferences().order.includes('orchestrate')");
+  await act("agentFixture.history.set('agent-source-draft',{id:'agent-source-draft',title:'原对话',mode:'plain',turns:[]});");
+  await evaluate("loadConversation('agent-source-draft')");
   await act("inputEl.value='保留的对话草稿';document.getElementById('btnNewAnalysis').focus();"); await click('#btnNewAnalysis');
   await waitFor("document.querySelectorAll('[data-agent]').length===3");
   await check('selectionStartsEmptyAndIsAccessible', "document.querySelector('.agent-selection-start').disabled && document.querySelector('[role=dialog][aria-modal=true]') && document.activeElement.matches('.agent-selection-search input')");
@@ -67,7 +69,11 @@ app.whenReady().then(async () => {
   await key('ESCAPE');
   await check('cancelPreservesDraftAndMode', "!document.querySelector('.agent-selection-dialog') && currentMode==='plain' && inputEl.value==='保留的对话草稿' && document.activeElement.id==='btnNewAnalysis'");
   await click('#btnNewAnalysis'); await waitFor("document.querySelectorAll('[data-agent]').length===3"); await click(row('writer')); await click('.agent-selection-start');
-  await check('singleAgentRoutesThroughExistingChat', "currentMode==='agent' && currentAgent==='writer' && currentOrchestrateAgents===null && chatTitle.textContent==='内容写作' && inputEl.value==='保留的对话草稿'");
+  await check('singleAgentRoutesThroughExistingChat', "currentMode==='agent' && currentAgent==='writer' && currentOrchestrateAgents===null && chatTitle.textContent==='内容写作' && inputEl.value==='' && composerDrafts.get('agent-source-draft').prompt==='保留的对话草稿'");
+  await evaluate("loadConversation('agent-source-draft')");
+  await check('returningToOriginalConversationRestoresItsDraft', "currentMode==='plain' && currentAgent===null && currentConv.id==='agent-source-draft' && inputEl.value==='保留的对话草稿'");
+  await click('#btnNewAnalysis'); await waitFor("document.querySelectorAll('[data-agent]').length===3"); await click(row('writer')); await click('.agent-selection-start');
+  await check('newAgentDraftRemainsIndependentOnReentry', "currentMode==='agent' && currentAgent==='writer' && chatTitle.textContent==='内容写作' && inputEl.value==='' && composerDrafts.get('agent-source-draft').prompt==='保留的对话草稿'");
   await input('#input', '单个 Agent 验证'); await evaluate('send()'); await waitFor('agentFixture.runs.length===1');
   await check('singleAgentSendUsesExactIdentity', "agentFixture.runs[0][2]==='agent' && agentFixture.runs[0][6]==='writer' && agentFixture.runs[0][8]===null");
   await act("handleClaudeEvent({jobId:uiFixture.runId,type:'result',subtype:'success',result:'单个 Agent 完成'});handleClaudeEvent({jobId:uiFixture.runId,type:'job-done',code:0});");
@@ -134,7 +140,7 @@ app.whenReady().then(async () => {
   await waitFor("document.querySelectorAll('[data-agent]').length===3"); await click(row('planner')); await click(row('reviewer')); await capture('agent-selection-dark');
   win.setSize(420, 520); await delay(200);
   await check('pickerFitsNarrowShortWindowWithoutHorizontalScroll', "(()=>{const d=document.querySelector('.agent-selection-dialog'),r=d.getBoundingClientRect(),b=document.querySelector('.agent-selection-start').getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.top>=36&&r.bottom<=innerHeight&&d.scrollWidth<=d.clientWidth+1&&b.bottom<=innerHeight})()");
-  await check('agentListUsesRelayScrollbar', "(()=>{const e=document.querySelector('.agent-selection-list');return getComputedStyle(e,'::-webkit-scrollbar').width==='6px'&&getComputedStyle(e,'::-webkit-scrollbar-button').display==='none'})()");
+  await check('agentListUsesRelayScrollbar', "(()=>{const e=document.querySelector('.agent-selection-list');return getComputedStyle(e,'::-webkit-scrollbar').width==='9px'&&getComputedStyle(e,'::-webkit-scrollbar').height==='9px'&&getComputedStyle(e,'::-webkit-scrollbar-track').backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(e,'::-webkit-scrollbar-button').display==='none'})()");
   await capture('agent-selection-narrow');
   await act("document.querySelector('[data-agent=reviewer] input').focus()"); await key('SPACE');
   await check('keyboardCanSwitchTeamBackToSingleAgent', "!document.querySelector('[data-agent=reviewer] input').checked && document.querySelector('.agent-selection-start').textContent==='开始对话'");

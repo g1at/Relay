@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createHistorySearchCore, makeSnippet, savedAssistant } = require('../src/main/app/history-search-core');
+const { createHistorySearchCore, makeSnippet, savedAssistant, SEARCH_INDEX_VERSION } = require('../src/main/app/history-search-core');
 function fixture(t, options = {}) {
   const historyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-search-core-')); t.after(() => fs.rmSync(historyDir, { recursive: true, force: true }));
   const indexFile = path.join(historyDir, 'index.json'); const items = [];
@@ -114,4 +114,161 @@ test('query limits and metadata prevent oversized response payloads', async t =>
   let result = await f.core.search({ query: 'needle', limit: -1 }); assert.equal(result.items.length, 1); assert.equal(result.items[0].title.length, 256); assert.equal(result.items[0].fromScheduled.name.length, 256); assert.equal(result.items[0].fromScheduled.privateDump, undefined);
   result = await f.core.search({ query: 'x'.repeat(513) }); assert.equal(result.code, 'HISTORY_SEARCH_QUERY_TOO_LONG');
   assert.deepEqual(await f.core.search({ query: '  ' }), { ok: true, items: [] });
+});
+
+test('visible Markdown and saved supplemental input are searchable with stable message identities', async t => {
+  const f = fixture(t);
+  f.add('visible', { turns: [{ runId: 'run-1', user: 'Keep **literal** input.',
+    output: { status: 'complete', final: '记忆**架构**\nAlpha\n\tBeta &amp; details.' },
+    supplements: [{ id: 'input-1', text: 'Supplement A+B? exact', status: 'applied' }] }] });
+  const supplement = (await f.core.search({ query: 'supplement a+b?' })).items[0];
+  assert.equal(supplement.turnIndex, 0); assert.equal(supplement.turnId, 'run-1');
+  assert.equal(supplement.matchSide, 'user'); assert.equal(supplement.messageKey, 'supplement:input-1');
+  const markdown = (await f.core.search({ query: '记忆架构' })).items[0];
+  assert.equal(markdown.matchSide, 'assistant'); assert.equal(markdown.messageKey, 'assistant');
+  assert.match(markdown.snippet, /\x00记忆架构\x01/);
+  assert.equal((await f.core.search({ query: 'ALPHA beta & details' })).items.length, 1);
+  assert.equal((await f.core.search({ query: 'Keep literal input' })).items.length, 0, 'user text is not interpreted as Markdown');
+  assert.equal((await f.core.search({ query: 'Keep **literal** input' })).items.length, 1);
+});
+
+test('pagination makes older exact matches reachable without changing conversation order', async t => {
+  const f = fixture(t);
+  for (let i = 0; i < 61; i++) f.add('match-' + i, { title: i === 60 ? 'needle' : 'recent ' + i,
+    updatedAt: new Date(Date.UTC(2026, 9, 22, 0, 61 - i)).toISOString(), turns: [{ user: 'needle' }, { assistant: 'needle again' }] });
+  const first = await f.core.search({ query: 'needle', limit: 50 });
+  assert.equal(first.items.length, 50); assert.equal(first.hasMore, true); assert.equal(first.nextOffset, 50);
+  const second = await f.core.search({ query: 'needle', limit: 50, offset: first.nextOffset });
+  assert.equal(second.items.length, 11); assert.equal(second.hasMore, false); assert.equal(second.nextOffset, null);
+  assert.equal(second.items.at(-1).id, 'match-60'); assert.equal(second.items.at(-1).matchField, 'title');
+  assert.equal(new Set([...first.items, ...second.items].map(item => item.id)).size, 61);
+  assert.equal((await f.core.search({ query: 'needle', offset: 61 })).items.length, 0);
+  assert.equal((await f.core.search({ query: 'needle', limit: 1, offset: -1 })).items[0].id, 'match-0');
+});
+
+test('compact disk indexes survive worker restarts and memory evictions without reading full tool logs again', async t => {
+  const f = fixture(t, { cacheMaxBytes: 3000 });
+  for (let i = 0; i < 5; i++) f.add('persisted-' + i, { turns: [{ user: 'needle ' + i, assistant: 'answer',
+    activity: { items: [{ text: 'excluded-tool-log-' + 'x'.repeat(128 * 1024) }] } }] });
+  await f.core.search({ query: 'no-hit' });
+  assert.equal(f.core.diagnostics().bodyReads, 5); assert.ok(f.core.diagnostics().cacheEntries <= 1);
+  const indexes = fs.readdirSync(path.join(f.historyDir, '.search-index'));
+  assert.equal(indexes.length, 5);
+  const stored = fs.readFileSync(path.join(f.historyDir, '.search-index', 'persisted-0.json'), 'utf8');
+  assert.doesNotMatch(stored, /excluded-tool-log/); assert.ok(stored.length < 4096);
+  await f.core.search({ query: 'another-no-hit' });
+  assert.equal(f.core.diagnostics().bodyReads, 5, 'eviction reloads only the compact index');
+  const restarted = createHistorySearchCore({ historyDir: f.historyDir, cacheMaxBytes: 0 });
+  assert.equal((await restarted.search({ query: 'needle' })).items.length, 5);
+  assert.equal(restarted.diagnostics().bodyReads, 0); assert.equal(restarted.diagnostics().indexHits, 5);
+});
+
+test('invalid, outdated and stale disk projections rebuild automatically from authoritative history', async t => {
+  const f = fixture(t); const document = f.add('editable', { turns: [{ assistant: 'before' }] });
+  await f.core.search({ query: 'before' });
+  const cacheFile = path.join(f.historyDir, '.search-index', 'editable.json');
+  for (const corrupt of ['{', JSON.stringify({ version: -1 }), JSON.stringify({ version: SEARCH_INDEX_VERSION, id: 'editable', projection: {} })]) {
+    fs.writeFileSync(cacheFile, corrupt);
+    const core = createHistorySearchCore({ historyDir: f.historyDir });
+    assert.equal((await core.search({ query: 'before' })).items.length, 1);
+    assert.equal(core.diagnostics().bodyReads, 1);
+    assert.equal(JSON.parse(fs.readFileSync(cacheFile, 'utf8')).version, SEARCH_INDEX_VERSION);
+  }
+  document.turns[0].assistant = 'after'; f.write(document);
+  const restarted = createHistorySearchCore({ historyDir: f.historyDir });
+  assert.equal((await restarted.search({ query: 'before' })).items.length, 0);
+  assert.equal((await restarted.search({ query: 'after' })).items.length, 1);
+  assert.equal(restarted.diagnostics().bodyReads, 1);
+});
+
+test('a derived-index write failure never hides valid matches or changes the history body', async t => {
+  const f = fixture(t); f.add('readable', { turns: [{ user: 'needle' }] });
+  const bodyFile = path.join(f.historyDir, 'readable.json'), before = fs.readFileSync(bodyFile, 'utf8');
+  const fileSystem = { promises: { ...fs.promises, writeFile: async file => {
+    assert.equal(path.dirname(file), path.join(f.historyDir, '.search-index'));
+    throw Object.assign(Error('synthetic disk is read-only'), { code: 'EACCES' });
+  } } };
+  const core = createHistorySearchCore({ historyDir: f.historyDir, fileSystem });
+  const result = await core.search({ query: 'needle' });
+  assert.equal(result.items.length, 1); assert.equal(result.partial, undefined);
+  assert.equal(core.diagnostics().indexWriteFailures, 1);
+  assert.equal(fs.readFileSync(bodyFile, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(path.join(f.historyDir, '.search-index')), []);
+});
+
+test('deleting a conversation during index installation leaves neither hits nor orphaned projections', async t => {
+  const f = fixture(t); f.add('deleted', { turns: [{ user: 'needle' }] });
+  let deleted = false;
+  const fileSystem = { promises: { ...fs.promises, rename: async (from, to) => {
+    await fs.promises.rename(from, to);
+    if (!deleted && path.basename(to) === 'deleted.json') {
+      deleted = true; f.items.length = 0; f.index(); fs.unlinkSync(path.join(f.historyDir, 'deleted.json'));
+    }
+  } } };
+  const core = createHistorySearchCore({ historyDir: f.historyDir, fileSystem });
+  assert.deepEqual((await core.search({ query: 'needle' })).items, []);
+  assert.equal(fs.existsSync(path.join(f.historyDir, '.search-index', 'deleted.json')), false);
+  assert.deepEqual(fs.readdirSync(path.join(f.historyDir, '.search-index')), []);
+});
+
+test('cold reads are concurrent but bounded and cancellation stops subsequent batches', { timeout: 5000 }, async t => {
+  const f = fixture(t); for (let i = 0; i < 8; i++) f.add('parallel-' + i, { turns: [{ user: 'needle' }] });
+  let reads = 0, active = 0, peak = 0, canceled = false; const gates = [];
+  const fileSystem = { promises: { ...fs.promises, readFile: async (file, ...args) => {
+    if (path.dirname(file) !== f.historyDir || path.basename(file) === 'index.json') return fs.promises.readFile(file, ...args);
+    reads++; active++; peak = Math.max(peak, active);
+    await new Promise(resolve => { gates.push(resolve); if (gates.length === 4) { canceled = true; gates.splice(0).forEach(release => release()); } });
+    try { return await fs.promises.readFile(file, ...args); } finally { active--; }
+  } } };
+  const core = createHistorySearchCore({ historyDir: f.historyDir, fileSystem });
+  assert.deepEqual(await core.search({ query: 'needle', isCanceled: () => canceled }), { ok: true, items: [], canceled: true });
+  assert.equal(peak, 4); assert.equal(reads, 4); assert.equal(active, 0);
+});
+
+test('safe empty-final snapshot recovery matches history load without reading journals or changing saved bytes', async t => {
+  const { createHistoryStore } = require('../src/main/app/history-store');
+  const { createLegacyOutputRecovery } = require('../src/main/projects/legacy-output-recovery');
+  const Output = require('../renderer/assistant-output');
+  const Text = require('../renderer/history-search-text');
+  const f = fixture(t), id = '11111111-1111-4111-8111-111111111111', runId = '22222222-2222-4222-8222-222222222222';
+  const state = Output.createState();
+  Output.ingest(state, { type: 'assistant', uuid: 'final-frame', message: { id: 'final-message',
+    content: [{ type: 'thinking', thinking: 'excluded-private-thought' }, { type: 'text', text: 'Recovered exact final answer.' }], stop_reason: 'end_turn' } });
+  Output.ingest(state, { type: 'result', subtype: 'success', uuid: 'result', jobId: runId, session_id: 'fixture',
+    user_message_uuid: runId, user_message_uuids: [runId], num_turns: 1, result: '', terminal_reason: 'completed', queued_turn_count: 0 });
+  const output = Output.serialize(state);
+  Object.assign(output, { status: 'complete', final: '', finalMessageId: null, answers: [] });
+  const record = f.add(id, { turns: [{ runId, user: 'question', status: 'complete', assistant: '', output }] });
+  const file = path.join(f.historyDir, id + '.json'), before = fs.readFileSync(file, 'utf8');
+  const noJournalReads = { readFileSync() { assert.fail('search recovery must not read journals'); },
+    statSync() { assert.fail('search recovery must not stat journals'); }, promises: fs.promises };
+  // Real loadConversation always resolves <userData>/history; point its body read
+  // at this fixture through the store's public path without invoking bootstrap.
+  const userData = path.join(f.historyDir, 'load-fixture');
+  const store = createHistoryStore({ getUserDataDir: () => userData,
+    recoverLegacyOutput: createLegacyOutputRecovery({ fileSystem: noJournalReads }) });
+  fs.mkdirSync(store.getHistoryDir(), { recursive: true });
+  fs.writeFileSync(store.convFilePath(id), before);
+  const loaded = store.loadConversation(id);
+  assert.equal(Text.savedAssistant(loaded.turns[0]), 'Recovered exact final answer.');
+  const core = createHistorySearchCore({ historyDir: f.historyDir, fileSystem: noJournalReads });
+  assert.equal((await core.search({ query: 'Recovered exact final answer.' })).items[0].turnId, runId);
+  assert.equal((await core.search({ query: 'excluded-private-thought' })).items.length, 0);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.equal(fs.readFileSync(store.convFilePath(id), 'utf8'), before);
+  record.turns[0].output.retractedMessageUuids = ['withdrawn-frame']; f.write(record);
+  assert.equal((await core.search({ query: 'Recovered exact final answer.' })).items.length, 0, 'retraction still forbids recovery');
+});
+
+test('membership pruning removes crashed temporary copies only for absent conversations', async t => {
+  const f = fixture(t); f.add('kept', { turns: [{ user: 'needle' }] });
+  const directory = path.join(f.historyDir, '.search-index'); fs.mkdirSync(directory);
+  const uuid = '00000000-0000-4000-8000-000000000000';
+  const deleted = path.join(directory, `.deleted.${uuid}.tmp`), active = path.join(directory, `.kept.${uuid}.tmp`);
+  const unrelated = path.join(directory, 'unrelated.tmp');
+  for (const file of [deleted, active, unrelated]) fs.writeFileSync(file, 'synthetic cached text');
+  assert.equal((await f.core.search({ query: 'needle' })).items.length, 1);
+  assert.equal(fs.existsSync(deleted), false);
+  assert.equal(fs.existsSync(active), true, 'a current writer is not pruned');
+  assert.equal(fs.existsSync(unrelated), true, 'unrelated files are untouched');
 });

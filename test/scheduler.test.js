@@ -36,7 +36,7 @@ function createHarness(t, options = {}) {
   const scheduler = loadFreshScheduler(options.spawn || null);
   const finished = [];
   const finishedSignal = deferred();
-  const runId = options.runId || 'scheduled-run-1';
+  let runId = null;
   const deps = {
     userDataDir,
     agentDir: options.agentDir || path.join(userDataDir, 'agents'),
@@ -53,7 +53,7 @@ function createHarness(t, options = {}) {
     getMainWindow: () => null,
     refreshTray: () => {},
     notify: () => {},
-    taskRunStart: () => runId,
+    taskRunStart: (input) => { runId = input.runId; return runId; },
     taskRunFinish: (id, result) => {
       finished.push({ id, result });
       finishedSignal.resolve(result);
@@ -61,6 +61,11 @@ function createHarness(t, options = {}) {
     },
     onSkillCuratorStart: options.onSkillCuratorStart,
     onSkillCuratorDone: options.onSkillCuratorDone,
+    runMemoryMaintenance: options.runMemoryMaintenance,
+    taskRunEvent: options.taskRunEvent,
+    taskRunPhase: options.taskRunPhase,
+    taskRunAcquire: options.taskRunAcquire,
+    taskRunRelease: options.taskRunRelease,
   };
   scheduler.init(deps);
   t.after(() => {
@@ -68,7 +73,7 @@ function createHarness(t, options = {}) {
     fs.rmSync(userDataDir, { recursive: true, force: true });
     delete require.cache[schedulerModulePath];
   });
-  return { scheduler, runId, finished, finishedSignal, userDataDir, deps };
+  return { scheduler, get runId() { return runId; }, finished, finishedSignal, userDataDir, deps };
 }
 
 function createDisabledTask(scheduler, action, extra = {}) {
@@ -391,12 +396,12 @@ test('cron MCP 创建的命令任务可由 scheduler 直接执行', async (t) =>
 
   const harness = createHarness(t, { runId: 'cron-command-run', spawn: spawnStub });
   const file = path.join(harness.userDataDir, 'schedules.json');
-  assert.match(execCronTool(file, 'cron_add', {
+  assert.match((await execCronTool(harness.scheduler, 'cron_add', {
     name: 'cron command smoke',
     type: 'command',
     command: 'Write-Output "relay-command-smoke"',
     everyMs: 60 * 60 * 1000,
-  }), /已创建/);
+  })).content[0].text, /已创建/);
   const task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
 
   await harness.scheduler.runNow(task.id);
@@ -707,6 +712,110 @@ test('Windows command cancellation uses taskkill /T /F for the entire process tr
   delete require.cache[schedulerModulePath];
 });
 
+test('built-in memory maintenance fails closed when its host service is absent', async t => {
+  let chats = 0, saved = 0;
+  const harness = createHarness(t, {
+    runClaudeJob() { chats++; throw new Error('memory maintenance cannot fall back to chat'); },
+    saveConversation() { saved++; },
+  });
+  const task = createDisabledTask(harness.scheduler, { type: 'chat', prompt: 'maintenance', memory: 'readwrite' }, { builtin: 'memory-consolidate' });
+  await harness.scheduler.runNow(task.id);
+  const result = await harness.finishedSignal.promise;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /记忆提炼服务不可用/);
+  assert.equal(chats, 0);
+  assert.equal(saved, 0);
+  assert.equal(harness.scheduler.runs(task.id)[0].status, 'error');
+});
+
+test('built-in memory maintenance runs the host service and saves only its summary to chat and task history', async t => {
+  let received, chats = 0;
+  const saved = [], events = [], phases = [];
+  const harness = createHarness(t, {
+    runClaudeJob() { chats++; throw new Error('must not launch a conversation Query'); },
+    runMemoryMaintenance: async options => {
+      received = options;
+      return { ok: true, summary: '已提炼 2 条待确认候选。', rawCandidates: [{ content: 'fixture-source-private-text' }] };
+    },
+    saveConversation: conversation => saved.push(conversation),
+    taskRunEvent: (id, event) => events.push({ id, event }),
+    taskRunPhase: (id, phase, label) => phases.push({ id, phase, label }),
+  });
+  const task = harness.scheduler.create({
+    name: 'memory learning', enabled: false, builtin: 'memory-consolidate',
+    schedule: { kind: 'every', everyMs: 60000 },
+    action: { type: 'chat', prompt: '维护记忆', model: 'haiku', memory: 'readwrite' },
+    delivery: { notify: false, saveToHistory: true },
+  }).task;
+  await harness.scheduler.runNow(task.id);
+  const result = await harness.finishedSignal.promise;
+  assert.equal(result.ok, true);
+  assert.equal(received.model, 'haiku');
+  assert.ok(received.signal instanceof AbortSignal);
+  assert.equal(received.signal.aborted, false);
+  assert.equal(chats, 0);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].turns[0].assistant, '已提炼 2 条待确认候选。');
+  assert.equal(saved[0].sessionId, null);
+  assert.equal(events[0].event.message.content[0].text, '已提炼 2 条待确认候选。');
+  assert.equal(phases[0].phase, 'running');
+  assert.equal(harness.scheduler.runs(task.id)[0].summary, '已提炼 2 条待确认候选。');
+  assert.equal(JSON.stringify({ saved, events, runs: harness.scheduler.runs(task.id) }).includes('fixture-source-private-text'), false);
+});
+
+test('canceling memory maintenance aborts its signal and late host results cannot save history or events', async t => {
+  const started = deferred(), gate = deferred(), saved = [], events = [];
+  let received;
+  const harness = createHarness(t, {
+    runMemoryMaintenance: options => { received = options; started.resolve(); return gate.promise; },
+    saveConversation: conversation => saved.push(conversation),
+    taskRunEvent: (_id, event) => events.push(event),
+  });
+  const task = harness.scheduler.create({
+    name: 'cancel memory', enabled: false, builtin: 'memory-consolidate',
+    schedule: { kind: 'every', everyMs: 60000 },
+    action: { type: 'chat', prompt: '维护记忆' },
+    delivery: { notify: false, saveToHistory: true },
+  }).task;
+  await harness.scheduler.runNow(task.id);
+  await started.promise;
+  assert.equal(harness.scheduler.cancelRun(harness.runId), true);
+  assert.equal(received.signal.aborted, true);
+  const result = await harness.finishedSignal.promise;
+  assert.equal(result.canceled, true);
+  assert.equal(saved.length, 0);
+  gate.resolve({ ok: true, summary: 'late output must not be saved' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(saved.length, 0);
+  assert.equal(events.length, 0);
+  assert.equal(harness.finished.length, 1);
+  const runs = harness.scheduler.runs(task.id);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].status, 'canceled');
+  assert.equal(runs[0].summary.includes('late output'), false);
+});
+
+test('resource lease cancellation aborts memory maintenance and late rejection remains handled', async t => {
+  const controller = new AbortController(), started = deferred(), gate = deferred();
+  let received, released = 0;
+  const harness = createHarness(t, {
+    taskRunAcquire: async () => ({ signal: controller.signal }),
+    taskRunRelease: () => { released++; },
+    runMemoryMaintenance: options => { received = options; started.resolve(); return gate.promise; },
+  });
+  const task = createDisabledTask(harness.scheduler, { type: 'chat', prompt: 'maintenance' }, { builtin: 'memory-consolidate' });
+  await harness.scheduler.runNow(task.id);
+  await started.promise;
+  controller.abort();
+  const result = await harness.finishedSignal.promise;
+  assert.equal(received.signal.aborted, true);
+  assert.equal(result.canceled, true);
+  gate.reject(new Error('late host rejection'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(released, 1);
+  assert.equal(harness.finished.length, 1);
+});
+
 test('cancelRun terminates a running chat child and finishes exactly once as canceled', async (t) => {
   let eventSink = null;
   let killCalls = 0;
@@ -731,7 +840,11 @@ test('cancelRun terminates a running chat child and finishes exactly once as can
   });
   const task = createDisabledTask(harness.scheduler, { type: 'chat', prompt: 'wait' });
 
-  assert.deepEqual(await harness.scheduler.runNow(task.id), { ok: true, code: 'TASK_STARTED' });
+  const receipt = await harness.scheduler.runNow(task.id);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.status, 'accepted');
+  assert.equal(receipt.runId, harness.runId);
+  assert.equal(receipt.taskId, task.id);
   assert.equal(harness.scheduler.cancelRun(harness.runId), true);
   assert.equal(harness.scheduler.cancelRun(harness.runId), true, 'repeated request remains idempotently accepted while stopping');
   const result = await harness.finishedSignal.promise;

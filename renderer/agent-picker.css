@@ -7,7 +7,7 @@
 .agent-selection-search { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; margin: 0 20px 8px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 10px; color: var(--text-dim); }
 .agent-selection-search > span { display: flex; align-items: center; }
 .agent-selection-search input { width: 100%; min-width: 0; padding: 0; color: var(--text); background: transparent; border: 0; outline: none; font: inherit; font-size: 13px; }
-.agent-selection-search:focus-within { border-color: var(--border-strong); box-shadow: 0 0 0 2px var(--accent-soft); }
+.agent-selection-search:focus-within { border-color: var(--border-strong); box-shadow: none; }
 .agent-selection-list { flex: 1 1 auto; min-height: 0; max-height: 312px; padding: 0 10px 4px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; }
 .agent-selection-list::-webkit-scrollbar { width: 6px; height: 6px; background: transparent; }
 .agent-selection-list::-webkit-scrollbar-track { background: transparent; }

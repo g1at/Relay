@@ -2,6 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const { HistorySearchClient } = require('../src/main/app/history-search-client');
 const { registerHistoryIpc } = require('../src/main/app/history-ipc');
@@ -56,6 +58,13 @@ test('empty and overlong queries never start the worker', async t => {
   const c = fixture(t); assert.deepEqual(await c.search('   '), { ok: true, items: [] });
   assert.equal((await c.search('x'.repeat(513))).code, 'HISTORY_SEARCH_QUERY_TOO_LONG'); assert.equal(c.worker, null);
 });
+test('client preserves pagination requests and response metadata', async t => {
+  const c = fixture(t), pending = c.search('needle', 50, 'window-a', 100);
+  const request = c.worker.sent.at(-1);
+  assert.equal(request.offset, 100); assert.equal(request.limit, 50); assert.equal(request.clientId, 'window-a');
+  c.worker.emit('message', { requestId: request.requestId, result: { ok: true, items: [{ id: 'page-3' }], hasMore: true, nextOffset: 150 } });
+  assert.deepEqual(await pending, { ok: true, items: [{ id: 'page-3' }], hasMore: true, nextOffset: 150 });
+});
 function ipcFixture(service, assertConversationAvailable) {
   const handlers = new Map();
   const registered = registerHistoryIpc({ ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
@@ -80,4 +89,17 @@ test('unavailable deletion state and worker failures cannot masquerade as no mat
   assert.equal((await f.call('search', {}, { query: 'text' })).ok, false);
   const g = ipcFixture({ search: async () => { throw Error('worker failed'); } });
   assert.equal((await g.call('search', {}, { query: 'text' })).ok, false);
+});
+test('real preload forwards pagination through history IPC without changing the client identity', async () => {
+  const calls = [];
+  const f = ipcFixture({ search: async (...args) => { calls.push(args); return { ok: true, items: [], hasMore: false, nextOffset: null }; } });
+  const source = fs.readFileSync(path.join(__dirname, '../preload.js'), 'utf8');
+  const start = source.indexOf('  history: {'), end = source.indexOf('\n  },', start) + '\n  },'.length;
+  assert.ok(start >= 0 && end > start);
+  const api = vm.runInNewContext(`({${source.slice(start, end)}})`, { ipcRenderer: {
+    invoke: (name, payload) => f.call(name.slice('history:'.length), { sender: { id: 42 } }, payload),
+  } }).history;
+  await api.search('precise phrase', 50, 50);
+  await api.search('first page', 50);
+  assert.deepEqual(calls, [['precise phrase', 50, '42', 50], ['first page', 50, '42', 0]]);
 });

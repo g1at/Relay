@@ -72,14 +72,16 @@ async function until(predicate, message = 'condition was not reached') {
   assert.fail(message);
 }
 
-test('默认资源池分别限制 Claude=2、图片=1、命令=1，并在任务结束后补位', async (t) => {
+test('默认资源池分别限制 Claude=2、图片=3、视频=2、命令=1，并在任务结束后补位', async (t) => {
   const { ledger, orchestrator } = makeHarness(t);
-  assert.deepEqual(DEFAULT_RESOURCE_LIMITS, { claude: 2, image: 1, command: 1 });
+  assert.deepEqual(DEFAULT_RESOURCE_LIMITS, { claude: 2, image: 3, video: 2, command: 1 });
   assert.equal(inferResource({ kind: 'scheduled_image' }), 'image');
+  assert.equal(inferResource({ kind: 'video' }), 'video');
+  assert.equal(inferResource({ kind: 'scheduled_video' }), 'video');
   assert.equal(inferResource({ kind: 'scheduled_command' }), 'command');
   assert.equal(inferResource({ kind: 'agent' }), 'claude');
 
-  const started = { claude: [], image: [], command: [] };
+  const started = { claude: [], image: [], video: [], command: [] };
   const pending = new Map();
   for (const resource of Object.keys(started)) {
     orchestrator.registerExecutor(resource, (run) => {
@@ -92,28 +94,35 @@ test('默认资源池分别限制 Claude=2、图片=1、命令=1，并在任务�
   for (let index = 1; index <= 5; index += 1) {
     orchestrator.enqueue({ runId: `claude-${index}`, kind: 'chat' });
   }
-  for (let index = 1; index <= 2; index += 1) {
+  for (let index = 1; index <= 4; index += 1) {
     orchestrator.enqueue({ runId: `image-${index}`, kind: 'image' });
-    orchestrator.enqueue({ runId: `command-${index}`, kind: 'command' });
   }
+  for (let index = 1; index <= 3; index++) orchestrator.enqueue({ runId: `video-${index}`, kind: 'scheduled_video' });
+  for (let index = 1; index <= 2; index++) orchestrator.enqueue({ runId: `command-${index}`, kind: 'command' });
 
   orchestrator.start();
   assert.deepEqual(started.claude, ['claude-1', 'claude-2']);
-  assert.deepEqual(started.image, ['image-1']);
+  assert.deepEqual(started.image, ['image-1', 'image-2', 'image-3']);
+  assert.deepEqual(started.video, ['video-1', 'video-2']);
   assert.deepEqual(started.command, ['command-1']);
   assert.equal(orchestrator.getStats().byResource.claude.active, 2);
   assert.equal(orchestrator.getStats().byResource.claude.queued, 3);
   assert.equal(ledger.get('claude-3').state, RUN_STATES.QUEUED);
+  assert.equal(ledger.get('image-4').state, RUN_STATES.QUEUED);
+  assert.equal(ledger.get('video-3').state, RUN_STATES.QUEUED);
 
   pending.get('claude-1').resolve({ result: { summary: 'done' } });
   pending.get('image-1').resolve();
+  pending.get('video-1').resolve();
   pending.get('command-1').resolve();
   await until(() => started.claude.length === 3
-    && started.image.length === 2
+    && started.image.length === 4
+    && started.video.length === 3
     && started.command.length === 2);
   assert.equal(ledger.get('claude-1').state, RUN_STATES.SUCCEEDED);
   assert.equal(ledger.get('claude-3').state, RUN_STATES.RUNNING);
-  assert.equal(ledger.get('image-2').state, RUN_STATES.RUNNING);
+  assert.equal(ledger.get('image-4').state, RUN_STATES.RUNNING);
+  assert.equal(ledger.get('video-3').state, RUN_STATES.RUNNING);
   assert.equal(ledger.get('command-2').state, RUN_STATES.RUNNING);
   assert.equal(orchestrator.getStats().byResource.claude.active, 2);
   assert.equal(orchestrator.getStats().byResource.claude.queued, 2);
@@ -179,7 +188,7 @@ test('raising the limit immediately releases waiting leases; lowering it never i
   orchestrator.setPoolLimits({ claude: 0 });
   const fifth = await promises[4];
   assert.equal(JSON.parse(JSON.stringify(orchestrator.getStats())).byResource.claude.limit, 0);
-  assert.equal(orchestrator.getStats().byResource.image.limit, 1);
+  assert.equal(orchestrator.getStats().byResource.image.limit, 3);
   finish(fourth); finish(fifth);
 });
 

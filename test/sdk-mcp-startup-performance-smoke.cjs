@@ -150,10 +150,15 @@ function create(name) {
       await approval.promise;
       return { behavior: 'allow', updatedInput: input };
     },
-    onMessage: event => { if (event.type === 'result') state.results.push({ is_error: event.is_error, result: event.result, at: Date.now() - state.started }); },
+    onMessage: event => {
+      if ((event.type === 'assistant' || event.type === 'stream_event' && event.event?.type === 'message_start' || event.type === 'result') && (event.user_message_uuid || event.user_message_uuids)) {
+        (state.responseIdentities ||= []).push({ type: event.type, uuid: event.user_message_uuid, uuids: event.user_message_uuids, at: Date.now() - state.started });
+      }
+      if (event.type === 'result') state.results.push({ is_error: event.is_error, result: event.result, at: Date.now() - state.started }); },
     onExit: (code, error) => { state.exit = { code, error }; },
   });
   const host = { child, busy: true, dead: false, jobId: randomUUID() };
+  state.inputId = host.jobId;
   const dispatch = (extra = {}) => dispatchLiveInput({ session: host, jobId: host.jobId,
     prompt: 'Use ToolSearch to discover slow echo and call it once with the synthetic fixture value.',
     loadServers: () => servers, isSessionCurrent: () => !host.dead,

@@ -107,16 +107,21 @@
     const allowLocalFiles = !!(options.context || options.preview || options.fileLinks === true);
     if (!allowLocalFiles) { fileLinks.get(container)?.destroy(); fileLinks.delete(container); }
     const value = String(text == null ? '' : text);
-    const previousCode = root.RelayCodeBlocks?.snapshot(container) || [];
+    let previousCode = [];
     try {
       if (typeof root.relayRenderMarkdown !== 'function') throw new Error('Markdown renderer unavailable');
       // Only the narration stream opts in. File/image-enabled readers keep the
       // existing policy-specific full pass and link binding lifecycle.
       const stream = options.incremental === true && !allowLocalFiles && options.localImages !== true
         ? incrementalRenderer() : null;
-      if (stream) stream.render(container, value);
+      if (stream) stream.render(container, value, { beforeReplace(nodes) {
+        previousCode = root.RelayCodeBlocks?.snapshot(container, {
+          include: pre => nodes.some(node => node === pre || node.contains?.(pre)),
+        }) || [];
+      } });
       else {
         incremental?.release(container);
+        previousCode = root.RelayCodeBlocks?.snapshot(container) || [];
         const template = container.ownerDocument.createElement('template');
         template.innerHTML = root.relayRenderMarkdown(value);
         sanitize(template.content, allowLocalFiles, options.localImages === true);

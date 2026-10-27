@@ -31,7 +31,7 @@
     const refresh = page.querySelector('#pluginsRefresh');
     const tabs = [...page.querySelectorAll('[data-plugin-tab]')];
     const body = page.querySelector('.plugins-body');
-    for (const [id, category] of Object.entries(categories)) {
+    for (const id of Object.keys(categories)) {
       const section = page.querySelector(`#pluginsCategory-${id}`);
       const state = { id, section, mount: section.querySelector('.plugins-panel'), query: '', status: 'idle', promise: null, manager: null, observer: null, scroll: 0, detail: null, skillView: 'library', skillFilter: 'all' };
       states.set(id, state);
@@ -56,7 +56,7 @@
       }
       const scoped = state.id === 'skill' && state.skillView === 'library' && state.skillFilter !== 'all';
       const empty = state.section.querySelector('.plugins-search-empty');
-      empty.hidden = state.id === 'skill' && state.skillView === 'maintenance'
+      empty.hidden = state.status !== 'ready' || state.id === 'skill' && state.skillView === 'maintenance'
         || (!query && !scoped) || (!rows.length && !scoped) || matches > 0;
       empty.textContent = query ? '没有匹配的内容，试试其他关键词。'
         : state.skillFilter === 'archived' ? '没有已归档的技能。' : '这个筛选下还没有技能。';
@@ -190,17 +190,21 @@
       const state = states.get(id);
       if (state.promise) return state.promise;
       if (state.status === 'ready' && !force) return true;
-      state.status = 'loading'; syncRefresh();
+      state.status = 'loading'; syncRefresh(); filter(state);
       state.promise = (async () => {
         try {
           if (force && state.manager && typeof state.manager.refresh === 'function') await state.manager.refresh();
           else {
-            state.manager = await render(id, state.mount);
+            // Renderers create their shell synchronously, then await data.
+            // Place the navigation and apply the selected view before that wait.
+            const pending = render(id, state.mount);
             decorate(state);
             if (!state.observer) {
               state.observer = new MutationObserver(() => filter(state));
               state.observer.observe(state.mount, { childList: true, subtree: true, characterData: true });
             }
+            state.manager = await pending;
+            decorate(state);
           }
           state.status = 'ready'; filter(state); return true;
         } catch (error) {

@@ -89,16 +89,21 @@ function dispatchLiveInput({ session, jobId, prompt, files, prepareInput, loadSe
     if (!current()) return;
     const preparedPrompt = preparedInput && typeof preparedInput.prompt === 'string' ? preparedInput.prompt : prompt;
     const preparedFiles = preparedInput && Object.hasOwn(preparedInput, 'files') ? snapshotAttachments(preparedInput.files) : attachments;
+    // Register before enqueueing so an immediate native response cannot be lost.
+    // Unstamped/older producers must not trigger an eager reconnect as fallback.
+    const responseReady = !result.ok && !result.canceled && typeof session.child.whenInputResponse === 'function'
+      ? session.child.whenInputResponse(jobId, { signal: pending.controller.signal }) : null;
     if (!session.child.push(preparedPrompt, { uuid: jobId, ...(preparedFiles.length ? { files: preparedFiles } : {}) })) throw new Error('输入未能发送，请重试');
     if (session.pendingInput === pending) session.pendingInput = null;
     try { if (typeof onTiming === 'function') onTiming({ ...timing, totalMs: Date.now() - startedAt }); } catch (_) {}
-    if (!result.ok && !result.canceled) {
-      // Do not keep the composer waiting for unrelated offline servers to retry.
+    if (responseReady) {
+      // Native reconnect control can stall the first API even without a JS await.
+      // Retry only after this exact input has a real attributed response.
       // Only the owning live run may receive later status; no prompt is resent.
       const belongsToRun = () => !pending.controller.signal.aborted && !session.dead
         && session.busy && session.jobId === jobId && isSessionCurrent();
       session.mcpBackgroundPreparation = Promise.resolve().then(async () => {
-        if (!belongsToRun()) return;
+        if (!await responseReady || !belongsToRun()) return;
         const settled = await session.child.prepareMcp({ servers: loadServers(), timeoutMs: 15000,
           signal: pending.controller.signal });
         if (belongsToRun() && !settled.canceled && !settled.stale) status({ phase: 'settled', ...settled });

@@ -1,22 +1,27 @@
 'use strict';
-// Real renderer and disk checkpoint; all history, commands and model events are
+// Real renderer, ledger recovery, history mutations, journal and disk checkpoint; all commands and model events are
 // synthetic. No SDK import, user profile access, network, or actual tool calls.
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, session, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { pathToFileURL } = require('node:url');
 const { TaskProgressStore } = require('../src/main/tasks/task-progress-store');
+const { TaskLedger } = require('../src/main/tasks/task-ledger');
+const { TaskEventJournal } = require('../src/main/tasks/task-event-journal');
+const { createHistoryStore } = require('../src/main/app/history-store');
+const { completeConversationTurn } = require('../src/main/app/conversation-mutations');
+const Continuity = require('../renderer/task-continuity');
 const root = path.resolve(__dirname, '..');
 const out = process.env.RELAY_SMOKE_OUTPUT ? path.resolve(process.env.RELAY_SMOKE_OUTPUT) : path.join(root, '.codex-tmp/crash-progress-smoke');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');
 app.on('window-all-closed', () => {});
-let win, step = 'starting';
+let win, diskHost, step = 'starting';
 const checks = {}, failures = [];
 const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, checks, failures }, null, 2));
-const deadline = setTimeout(() => { failures.push('timeout: ' + step); save(); app.exit(1); }, 90000);
+const deadline = setTimeout(() => { failures.push('timeout: ' + step); save(); app.exit(1); }, 150000);
 const evaluate = code => win.webContents.executeJavaScript(code);
 const act = code => evaluate(`(()=>{${code}\n})()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -32,25 +37,102 @@ async function capture(name) {
   fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG());
 }
 
-// This is injected before actual app.js. Its methods implement only in-memory
-// APIs, including explicit old-process replay and an already persisted failure.
+async function createDiskFixture(data) {
+  if (win && !win.isDestroyed()) win.destroy();
+  if (diskHost) await diskHost.close();
+  const dir = fs.mkdtempSync(path.join(out, 'store-'));
+  const history = createHistoryStore({ getUserDataDir: () => dir, recoverLegacyOutput: value => value });
+  history.writeHistoryIndex([]);
+  for (const conversation of data.history) history.persistConversationRecord(conversation);
+  const ledgerDir = path.join(dir, 'task-ledger'), journalDir = path.join(dir, 'stream-events'), progressDir = path.join(dir, 'progress');
+  const oldLedger = new TaskLedger({ rootDir: ledgerDir });
+  for (const task of data.tasks) {
+    oldLedger.create({ ...task, state: 'running', phase: 'running', result: null });
+    if (task.result?.error?.code === 'APP_EXIT') oldLedger.terminal(task.runId, 'interrupted', {
+      result: task.result, executorState: 'stopped', phase: 'terminal',
+    }, { at: task.endedAt });
+  }
+  oldLedger.flush();
+  const previous = new TaskEventJournal({ rootDir: journalDir, epoch: 'fixture-old-process',
+    now: () => new Date(data.tasks[0].createdAt) });
+  const envelopes = (data.journalEvents || data.events || []).map(envelope => previous.append({
+    type: 'claude.event', runId: envelope.runId, payload: envelope.payload,
+  }, { at: envelope.emittedAt || data.tasks.find(task => task.runId === envelope.runId).createdAt }));
+  const writer = new TaskProgressStore({ rootDir: progressDir, flushIntervalMs: 60000 });
+  for (const [runId, count] of Object.entries(data.checkpointCounts || {})) writer.observe(envelopes.filter(envelope => envelope.runId === runId).slice(0, count));
+  await writer.close();
+  let ledger, journal, progress;
+  function reopen() {
+    ledger = new TaskLedger({ rootDir: ledgerDir });
+    ledger.recover({ reason: 'Relay restarted before the task reached a terminal state', retainQueued: false,
+      includeTerminal: false, at: data.recoveredAt || data.tasks[0].endedAt });
+    journal = new TaskEventJournal({ rootDir: journalDir, epoch: 'fixture-new-process' });
+    progress = new TaskProgressStore({ rootDir: progressDir });
+  }
+  reopen();
+  diskHost = {
+    dir, history, get ledger() { return ledger; },
+    async reopen() { await progress.close(); ledger.flush(); reopen(); },
+    async close() { await progress.close(); ledger.flush(); },
+    async invoke(method, args) {
+      if (method === 'list') return history.readHistoryIndex();
+      if (method === 'load') return history.loadConversation(args[0]);
+      if (method === 'save') {
+        const value = { ...args[0], id: args[0].id || 'crash-conversation', updatedAt: new Date().toISOString() };
+        history.persistConversationRecord(value); return value;
+      }
+      if (method === 'completeTurn') {
+        const [id, runId, turnTs, payload] = args, task = ledger.get(runId);
+        if (!task || task.source?.conversationId !== id || task.metadata?.turnTs !== turnTs) return { ok: false, error: 'Synthetic ledger identity mismatch' };
+        try { return completeConversationTurn({ load: history.loadConversation, persist: history.persistConversationRecord }, id, runId, turnTs, payload); }
+        catch (error) { return { ok: false, code: error.code, error: error.message }; }
+      }
+      if (method === 'snapshot') return { ok: true, epoch: 'fixture-new-process', items: ledger.list() };
+      if (method === 'progress') return { ok: true, progress: await progress.load(args[0]) };
+      if (method === 'replayStream') return { ok: true, ...journal.replayEpoch(args[0]) };
+      throw Error('Unknown synthetic storage method: ' + method);
+    },
+  };
+  assert.ok(data.tasks.every(task => diskHost.ledger.get(task.runId).state === 'interrupted'));
+  checks.RealLedgerReopenMarkedActiveTasksInterrupted = true;
+  return diskHost;
+}
+
+const preload = path.join(out, 'crash-store-preload.cjs');
+fs.writeFileSync(preload, `const {contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('crashHost',{invoke:(method,...args)=>ipcRenderer.invoke('crash-fixture-store',method,args)});`);
+ipcMain.handle('crash-fixture-store', (event, method, args) => {
+  assert.ok(win && event.sender === win.webContents, 'Only the isolated fixture window may access synthetic stores');
+  assert.ok(diskHost, 'Synthetic store was initialized');
+  return diskHost.invoke(method, args);
+});
+
+// Injection adapts the fixture API to real isolated stores, with explicit gates
+// around replay/persistence so transient renderer states can be inspected.
 function seed(data) {
   const base = window.api, clone = value => JSON.parse(JSON.stringify(value));
   const records = new Map((data.history || []).map(value => [value.id, clone(value)]));
-  const f = window.crashFixture = { ...data, saves: 0, launches: 0, snapshots: 0, progressCalls: [], replayCalls: [],
+  const f = window.crashFixture = { ...data, saves: 0, launches: 0, launchArgs: [], snapshots: 0, progressCalls: [], replayCalls: [],
     read: id => clone(records.get(id) || null),
   };
+  const remember = value => { if (value?.id) records.set(value.id, clone(value)); return value; };
   window.api = new Proxy(base, { get(target, key) {
-    if (key === 'runClaude') return async (...args) => { f.launches++; return target.runClaude(...args); };
+    if (key === 'runClaude') return async (...args) => { f.launches++; f.launchArgs.push(clone(args)); return target.runClaude(...args); };
     if (key === 'history') return new Proxy(target.history, { get(original, method) {
-      if (method === 'list') return async () => clone([...records.values()]);
-      if (method === 'load') return async id => clone(records.get(id) || null);
+      if (method === 'list') return async () => data.disk ? window.crashHost.invoke('list') : clone([...records.values()]);
+      if (method === 'load') return async id => data.disk ? remember(await window.crashHost.invoke('load', id)) : clone(records.get(id) || null);
       if (method === 'save') return async value => {
         f.saves++;
+        if (data.disk) return remember(await window.crashHost.invoke('save', value));
         const next = clone({ ...value, id: value.id || 'crash-conversation', updatedAt: new Date().toISOString() });
         records.set(next.id, next); return clone(next);
       };
       if (method === 'completeTurn') return async (id, runId, ts, payload) => {
+        if (f.holdSave) { f.holdSave = false; await new Promise(resolve => { f.releaseSave = () => { f.releaseSave = null; resolve(); }; }); }
+        if (data.disk) {
+          const result = await window.crashHost.invoke('completeTurn', id, runId, ts, payload);
+          if (result.ok) { f.saves++; remember(result.conversation); }
+          return result;
+        }
         const next = clone(records.get(id) || null);
         const index = next?.turns?.findIndex(turn => turn.runId === runId && turn.ts === ts) ?? -1;
         if (index < 0) return { ok: false, error: 'Synthetic crash recovery identity mismatch' };
@@ -66,12 +148,18 @@ function seed(data) {
       return original[method];
     } });
     if (key === 'tasks') return new Proxy(target.tasks, { get(original, method) {
-      if (method === 'snapshot') return async () => { f.snapshots++; return { ok: true, epoch: 'fixture-new-process', items: clone(data.tasks || []) }; };
+      if (method === 'snapshot') return async () => {
+        f.snapshots++;
+        if (f.failSecondSnapshot && f.snapshots === 2) return { ok: false, error: 'Synthetic second snapshot unavailable' };
+        return data.disk ? window.crashHost.invoke('snapshot') : { ok: true, epoch: 'fixture-new-process', items: clone(data.tasks || []) };
+      };
       if (method === 'progress') return async runId => {
-        f.progressCalls.push(runId); return { ok: true, progress: clone(data.progress?.[runId] || null) };
+        f.progressCalls.push(runId); return data.disk ? window.crashHost.invoke('progress', runId) : { ok: true, progress: clone(data.progress?.[runId] || null) };
       };
       if (method === 'replayStream') return async input => {
         f.replayCalls.push(clone(input));
+        if (f.holdReplay) { f.holdReplay = false; await new Promise(resolve => { f.releaseReplay = () => { f.releaseReplay = null; resolve(); }; }); }
+        if (data.disk) return window.crashHost.invoke('replayStream', input);
         const events = (data.events || []).filter(event => event.runId === input.runId
           && event.epoch === input.epoch && event.seq > (input.sinceSeq || 0));
         return { ok: true, epoch: input.epoch, events: clone(events), hasMore: false };
@@ -82,7 +170,7 @@ function seed(data) {
   } });
 }
 
-async function openRenderer(data, name) {
+async function openRenderer(data, name, { waitRecovery = true } = {}) {
   if (win && !win.isDestroyed()) win.destroy();
   const fixture = ['ui-api-fixture.js', 'workspace-api-fixture.js']
     .map(file => fs.readFileSync(path.join(root, 'test', file), 'utf8')).join('\n')
@@ -91,9 +179,9 @@ async function openRenderer(data, name) {
   fs.writeFileSync(page, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8')
     .replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + '</script>'));
   win = new BrowserWindow({ width: 1220, height: 900, show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+    webPreferences: { preload, nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   await win.loadFile(page); win.showInactive();
-  await waitFor('providerRoutingLoaded&&!restoringTaskLifecycle');
+  await waitFor(waitRecovery ? 'providerRoutingLoaded&&!restoringTaskLifecycle' : 'providerRoutingLoaded');
 }
 
 app.whenReady().then(async () => {
@@ -152,20 +240,31 @@ app.whenReady().then(async () => {
   // One repeated UUID after the checkpoint exercises replay overlap deduplication.
   const duplicate = { ...envelopes[1], seq: 7 };
   const restart = { conversationId: conversation.id, runId, legacyId: legacy.id, legacyRunId, error,
-    displayedError: 'Relay 在任务完成前关闭，本次任务已中断。',
+    disk: true, holdReplay: true, holdSave: true,
     expectedLater: later, history: [conversation, legacy], tasks: [task, legacyTask],
-    progress: { [runId]: progress }, events: [...envelopes.slice(3), duplicate, ...legacyEvents] };
-  await openRenderer(restart, 'restart');
-  await waitFor('runs.size===0&&crashFixture.read(crashFixture.conversationId).turns[0].activity.items.length>0&&crashFixture.read(crashFixture.legacyId).turns[0].activity.items.length>0');
+    checkpointCounts: { [runId]: 3 }, journalEvents: [...envelopes, duplicate, ...legacyEvents] };
+  await createDiskFixture(restart);
+  await openRenderer(restart, 'restart', { waitRecovery: false });
+  await waitFor('typeof crashFixture.releaseReplay==="function"&&recoveryRuns.size>0');
+  await evaluate('loadConversation(crashFixture.conversationId,null,{forceReload:true})');
+  await evaluate('refreshHistoryList()');
+  await check('KnownInterruptedReplayNeverClaimsLiveExecution', 'runs.size===0&&!isRunning&&!document.querySelector(".history-item.running")&&!document.querySelector(".process-stream.is-running")&&!$("btnSend").classList.contains("is-stop")&&crashFixture.launches===0');
+  await act('crashFixture.releaseReplay()');
+  await waitFor('typeof crashFixture.releaseSave==="function"');
+  await evaluate('refreshHistoryList()');
+  await check('DelayedRecoverySaveNeverClaimsLiveExecution', 'runs.size===0&&recoveryRuns.size>0&&!isRunning&&!document.querySelector(".history-item.running")&&!$("btnSend").classList.contains("is-stop")&&crashFixture.launches===0');
+  await act('crashFixture.releaseSave()');
+  await waitFor('!restoringTaskLifecycle&&recoveryRuns.size===0&&runs.size===0&&crashFixture.read(crashFixture.conversationId).turns[0].activity.items.length>0&&crashFixture.read(crashFixture.legacyId).turns[0].activity.items.length>0');
   await evaluate('loadConversation(crashFixture.conversationId,null,{forceReload:true})');
   await check('RestartReadsTheOldEpochAndCheckpointCursor', 'crashFixture.progressCalls.includes(crashFixture.runId)&&crashFixture.replayCalls.some(call=>call.runId===crashFixture.runId&&call.epoch==="fixture-old-process"&&call.sinceSeq===3)&&crashFixture.replayCalls.every(call=>call.epoch==="fixture-old-process")');
   await check('CheckpointAndJournalTailRestoreAllProcessItems', 'currentConv.turns[0].activity.items.filter(item=>item.type==="thinking").length===2&&currentConv.turns[0].activity.items.filter(item=>item.type==="tool").length===1&&RelayAssistantOutput.processItems(RelayAssistantOutput.createState(currentConv.turns[0].output)).filter(item=>item.type==="narration").length===2');
   await check('RecoveredToolKeepsItsRealResultReceipt', 'currentConv.turns[0].activity.items.some(item=>item.toolUseId==="synthetic-read"&&item.resultConfirmed&&item.status==="success"&&item.result.includes("合成工具结果"))');
-  await check('InterruptedRunNeverBecomesAFinalAnswer', 'currentConv.turns[0].status==="error"&&currentConv.turns[0].error===crashFixture.displayedError&&currentConv.turns[0].output.status==="error"&&!currentConv.turns[0].assistant&&!currentConv.turns[0].output.final&&currentConv.turns[0].output.answers.length===0');
+  await check('InterruptedRunBecomesPausedWithoutInventingAFinalAnswer', 'currentConv.turns[0].status==="paused"&&!currentConv.turns[0].error&&currentConv.turns[0].output.status!=="complete"&&!currentConv.turns[0].assistant&&!currentConv.turns[0].output.final&&currentConv.turns[0].output.answers.length===0');
   await check('RecoveryTargetsTheOriginalTurnAndPreservesLaterAnswer', 'JSON.stringify(currentConv.turns[1])===JSON.stringify(crashFixture.expectedLater)&&document.querySelectorAll(".message.assistant").length===1&&document.querySelector(".message.assistant").textContent.includes("后续正常任务的最终结论")');
+  await check('OlderInterruptedTurnDoesNotTakeOverTheCurrentContinuation', '!currentConv.paused&&!$("btnSend").classList.contains("is-resume")');
   await act('for(const button of document.querySelectorAll(".process-stream.is-collapsed .process-summary"))button.click();');
   await delay(220);
-  await check('ExpandedRestoredProcessIsVisibleAndIncomplete', 'document.querySelector(".process-summary-title").textContent==="处理未完成"&&document.querySelectorAll(".process-item.is-thinking").length===2&&document.querySelectorAll(".process-item.is-narration").length===2&&document.querySelector(".process-items").getBoundingClientRect().height>50&&!document.querySelector(".process-items").inert');
+  await check('ExpandedRestoredProcessIsVisibleAndPaused', '/暂停|中断/.test(document.querySelector(".process-summary-title").textContent)&&document.querySelectorAll(".process-item.is-thinking").length===2&&document.querySelectorAll(".process-item.is-narration").length===2&&document.querySelector(".process-items").getBoundingClientRect().height>50&&!document.querySelector(".process-items").inert');
   await capture('recovered-progress-light');
   await act('document.querySelector(".process-item.is-thinking").click();document.querySelector(".process-item.is-tool").click();');
   await delay(220);
@@ -174,21 +273,79 @@ app.whenReady().then(async () => {
   await capture('recovered-details-light');
   await act('crashFixture.saved=JSON.stringify(currentConv.turns);crashFixture.savedAt=currentConv.updatedAt;crashFixture.savesBefore=crashFixture.saves;startNewConv();');
   await evaluate('loadConversation(crashFixture.conversationId,null,{forceReload:true})');
+  await act('for(const button of document.querySelectorAll(".process-stream.is-collapsed .process-summary"))button.click();');
   await check('ReopeningDoesNotDuplicateOrResaveRecoveredItems', 'JSON.stringify(currentConv.turns)===crashFixture.saved&&currentConv.updatedAt===crashFixture.savedAt&&crashFixture.saves===crashFixture.savesBefore&&document.querySelectorAll(".process-item.is-tool").length===1');
   await evaluate('restoreActiveRunsFromLedger()');
   await check('RepeatedStartupRecoveryIsIdempotent', 'crashFixture.saves===crashFixture.savesBefore&&JSON.stringify(crashFixture.read(crashFixture.conversationId).turns)===crashFixture.saved');
   await evaluate('loadConversation(crashFixture.legacyId,null,{forceReload:true})');
-  await check('LegacyEmptyRestartErrorRecoversWithoutCheckpoint', 'crashFixture.replayCalls.some(call=>call.runId===crashFixture.legacyRunId&&call.sinceSeq===0)&&currentConv.turns[0].activity.items.filter(item=>item.type==="thinking").length===2&&currentConv.turns[0].error===crashFixture.displayedError&&!currentConv.turns[0].assistant&&document.querySelectorAll(".message.assistant").length===0');
+  await check('LegacyEmptyRestartErrorRecoversWithoutCheckpoint', 'crashFixture.replayCalls.some(call=>call.runId===crashFixture.legacyRunId&&call.sinceSeq===0)&&currentConv.turns[0].activity.items.filter(item=>item.type==="thinking").length===2&&currentConv.turns[0].status==="paused"&&!currentConv.turns[0].error&&!currentConv.turns[0].assistant&&document.querySelectorAll(".message.assistant").length===0');
+  await check('LatestRestartedTurnOffersExplicitContinuation', 'currentConv.paused?.runId===crashFixture.legacyRunId&&$("btnSend").classList.contains("is-resume")&&$("btnSend").getAttribute("aria-label")==="继续任务"&&crashFixture.launches===0');
   await act('for(const button of document.querySelectorAll(".process-stream.is-collapsed .process-summary"))button.click();document.documentElement.dataset.theme="dark";');
   win.setSize(940, 820); await delay(180);
   await check('RestoredProgressFitsCompactDarkLayout', 'document.documentElement.scrollWidth<=innerWidth&&document.querySelector(".process-stream").getBoundingClientRect().right<=innerWidth');
   await capture('legacy-recovered-progress-dark');
   await check('RecoveryDoesNotLaunchModelOrExposeNode', 'crashFixture.launches===0&&uiFixture.errors.length===0&&typeof require==="undefined"&&typeof process==="undefined"');
+
+  const beforeRestart = new Map(restart.history.map(value => [value.id, fs.readFileSync(diskHost.history.convFilePath(value.id), 'utf8')]));
+  await diskHost.reopen();
+  await openRenderer({ ...restart, holdReplay: false, holdSave: false,
+    history: restart.history.map(value => diskHost.history.loadConversation(value.id)) }, 'second-real-restart');
+  await waitFor('recoveryRuns.size===0&&runs.size===0');
+  await check('FreshRendererAndRealStoreRestartIsIdempotent', 'crashFixture.saves===0&&crashFixture.launches===0');
+  for (const [id, bytes] of beforeRestart) assert.equal(fs.readFileSync(diskHost.history.convFilePath(id), 'utf8'), bytes);
+  checks.SecondRestartPreservesHistoryBytesAndActivityOrder = true;
+
+  function singleRecovery(label, { code = 'APP_RESTART', terminal = false, firstSession = false } = {}) {
+    const runId = 'synthetic-' + label + '-run', id = 'synthetic-' + label + '-conversation';
+    const started = Date.now() - 120000, ts = new Date(started).toISOString(), endedAt = new Date(started + 30000).toISOString();
+    const taskRun = Continuity.begin({ runId, startedAt: started });
+    const conversation = { id, title: '合成恢复 ' + label, titleGenerated: true, kind: 'chat', mode: 'plain',
+      createdAt: ts, updatedAt: ts, sessionId: firstSession ? null : 'synthetic-saved-session', model: 'sonnet', sessionModel: 'sonnet', sessionAgentEnvironment: 'native',
+      sessionProviderId: 'fixture', sessionProviderRevision: 1, sessionRouteTier: 'sonnet',
+      turns: [{ runId, ts, user: '合成原始请求应完整保留', assistant: '', status: 'running', taskRun }] };
+    const task = { runId, kind: 'chat', state: 'interrupted', phase: 'terminal', createdAt: ts, startedAt: ts, endedAt,
+      source: { type: 'chat', conversationId: id, mode: 'plain' }, metadata: { turnIndex: 0, turnTs: ts, taskRun },
+      execution: { appInstanceId: 'fixture-old-process' }, result: { error: { code, message: 'Synthetic interrupted process' } } };
+    const event = terminal ? { jobId: runId, type: 'job-done', exitCode: 0,
+      relay_task_finished_at: started + 29000, relay_task_duration_ms: 29000,
+      finalResult: { type: 'result', subtype: 'success', jobId: runId, result: '合成终态先落盘的完整答案', num_turns: 1, terminal_reason: 'completed' } }
+      : { jobId: runId, type: 'assistant', uuid: 'partial-' + label,
+        message: { id: 'partial-' + label, content: [{ type: 'text', text: '合成已保存过程，尚未交付最终答案。' }] } };
+    const expectedSession = firstSession ? 'synthetic-first-session-from-init' : conversation.sessionId;
+    const events = firstSession ? [{ jobId: runId, type: 'system', subtype: 'init', session_id: expectedSession, model: 'sonnet' }, event] : [event];
+    return { disk: true, conversationId: id, runId, expectedSession, expectedTask: taskRun.taskId,
+      history: [conversation], tasks: [task], checkpointCounts: { [runId]: events.length },
+      journalEvents: events.map((event, index) => ({ runId, emittedAt: new Date(started + 1000 + index * 1000).toISOString(), payload: { event } })), recoveredAt: endedAt };
+  }
+
+  const exitCase = { ...singleRecovery('normal-exit', { code: 'APP_EXIT', firstSession: true }), failSecondSnapshot: true };
+  await createDiskFixture(exitCase); await openRenderer(exitCase, 'normal-exit');
+  await waitFor('recoveryRuns.size===0&&runs.size===0&&crashFixture.snapshots>=2');
+  await evaluate('loadConversation(crashFixture.conversationId,null,{forceReload:true})');
+  await check('AppExitRecoversDespiteSecondSnapshotFailure', 'currentConv.turns[0].status==="paused"&&!currentConv.turns[0].error&&currentConv.paused?.runId===crashFixture.runId&&!isRunning&&crashFixture.launches===0');
+  await check('AppExitOffersContinueOnlyAfterDurableRecovery', '$("btnSend").classList.contains("is-resume")&&!$("btnSend").disabled&&currentConv.sessionId===crashFixture.expectedSession&&currentConv.turns[0].user==="合成原始请求应完整保留"');
+  await check('FirstSessionIsRecoveredFromDurableInitReceipt', 'crashFixture.history[0].sessionId===null&&crashFixture.read(crashFixture.conversationId).sessionId===crashFixture.expectedSession');
+  await check('ControlledExitStopsElapsedTimeAtShutdown', 'currentConv.turns[0].taskRun.elapsedMs===30000&&currentConv.turns[0].taskRun.segmentFinishedAt===Date.parse(crashFixture.tasks[0].endedAt)&&currentConv.turns[0].activity.taskDurationMs===30000');
+  await act('$("input").value="";$("btnSend").click()');
+  await waitFor('crashFixture.launches===1&&runs.size===1');
+  await check('OnlyExplicitContinueLaunchesAndPreservesSessionIdentity', 'crashFixture.launchArgs.length===1&&crashFixture.launchArgs[0][1]===crashFixture.expectedSession&&crashFixture.launchArgs[0][13].inputKind==="resume"&&crashFixture.launchArgs[0][13].taskRun.resumedFromRunId===crashFixture.runId&&crashFixture.launchArgs[0][13].taskRun.taskId===crashFixture.expectedTask&&currentConv.turns[0].status==="paused"&&currentConv.turns.at(-1).user===""');
+
+  const completed = singleRecovery('terminal-before-ledger', { terminal: true });
+  await createDiskFixture(completed); await openRenderer(completed, 'terminal-before-ledger');
+  await waitFor('recoveryRuns.size===0&&runs.size===0');
+  await evaluate('loadConversation(crashFixture.conversationId,null,{forceReload:true})');
+  await check('DurableSuccessBeforeLedgerTerminalKeepsTheFinalAnswer', 'currentConv.turns[0].status==="complete"&&currentConv.turns[0].assistant==="合成终态先落盘的完整答案"&&currentConv.turns[0].output.final===currentConv.turns[0].assistant&&!currentConv.paused&&!currentConv.turns[0].error&&crashFixture.launches===0');
+  await check('DurableSuccessUsesOriginalTerminalTiming', 'currentConv.turns[0].taskRun.elapsedMs===29000&&currentConv.turns[0].activity.taskDurationMs===29000&&Date.parse(currentConv.turns[0].assistantTs)===Date.parse(crashFixture.tasks[0].createdAt)+29000');
+  await check('RealRecoveryNeverImportsRelayMainOrSdk', 'uiFixture.errors.length===0&&typeof require==="undefined"&&typeof process==="undefined"');
+  assert.ok(!Object.keys(require.cache).some(file => file === path.join(root, 'main.js')
+    || file === path.join(root, 'src/main/bootstrap.js') || file.includes('@anthropic-ai')));
+  await diskHost.close(); diskHost = null;
   step = 'completed'; save(); clearTimeout(deadline); win.destroy(); app.exit(0);
 }).catch(async error => {
   failures.push(String(error.stack || error)); console.error(error);
   if (win && !win.isDestroyed()) {
-    try { console.error(await evaluate('JSON.stringify({errors:uiFixture.errors,calls:crashFixture.replayCalls})')); await capture('failure'); } catch (_) {}
+    try { console.error(await evaluate('JSON.stringify({errors:uiFixture.errors,calls:crashFixture.replayCalls,saves:crashFixture.saves,savesBefore:crashFixture.savesBefore,updatedAt:currentConv?.updatedAt,savedAt:crashFixture.savedAt,turnsUnchanged:JSON.stringify(currentConv?.turns)===crashFixture.saved,visibleTools:document.querySelectorAll(".process-item.is-tool").length,session:currentConv?.sessionId,expectedSession:crashFixture.expectedSession,button:$("btnSend").outerHTML,paused:currentConv?.paused,user:currentConv?.turns?.[0]?.user})')); await capture('failure'); } catch (_) {}
   }
+  if (diskHost) await diskHost.close().catch(() => {});
   save(); clearTimeout(deadline); app.exit(1);
 });

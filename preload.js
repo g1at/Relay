@@ -146,6 +146,16 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   // AI 创作(文生图)
+  media: {
+    getConfig: () => ipcRenderer.invoke('media:getConfig'),
+    generate: (opts) => ipcRenderer.invoke('image:generate', opts),
+    list: (filter) => ipcRenderer.invoke('media:list', filter || {}),
+    get: (id) => ipcRenderer.invoke('media:get', id),
+    resume: (id) => ipcRenderer.invoke('media:resume', id),
+    stop: (id) => ipcRenderer.invoke('media:stop', id),
+    retryDownload: (id) => ipcRenderer.invoke('media:retryDownload', id),
+    onChanged: (handler) => { const listener = (_e, task) => handler(task); ipcRenderer.on('media:changed', listener); return () => ipcRenderer.removeListener('media:changed', listener); },
+  },
   image: {
     generate:  (opts)    => ipcRenderer.invoke('image:generate', opts),
     getConfig: ()        => ipcRenderer.invoke('image:getConfig'),
@@ -216,15 +226,23 @@ contextBridge.exposeInMainWorld('api', {
   },
   // 历史会话
   history: {
+    completionSnapshot: () => ipcRenderer.invoke('history:completionSnapshot'),
+    markCompletionRead: (id, runId) => ipcRenderer.invoke('history:markCompletionRead', { id, runId }),
+    onCompletionChanged: callback => {
+      const listener = (_event, snapshot) => callback(snapshot);
+      ipcRenderer.on('history:completionChanged', listener);
+      return () => ipcRenderer.removeListener('history:completionChanged', listener);
+    },
     native: input => ipcRenderer.invoke('history:native', input),
     fork: input => ipcRenderer.invoke('history:fork', input),
     subagents: input => ipcRenderer.invoke('history:subagents', input),
     subagentMessages: input => ipcRenderer.invoke('history:subagentMessages', input),
     list:     ()    => ipcRenderer.invoke('history:list'),
-    search:   (query, limit) => ipcRenderer.invoke('history:search', { query, limit }),
+    search:   (query, limit, offset = 0) => ipcRenderer.invoke('history:search', { query, limit, offset }),
     cancelSearch: () => ipcRenderer.invoke('history:search:cancel'),
     load:     (id)  => ipcRenderer.invoke('history:load', id),
     save:     (conv)=> ipcRenderer.invoke('history:save', conv),
+    updateCreationComposer: input => ipcRenderer.invoke('history:updateCreationComposer', input),
     recoverTurn: (id, runId) => ipcRenderer.invoke('history:recoverTurn', { id, runId }),
     completeTurn: (id, runId, turnTs, payload) => ipcRenderer.invoke('history:completeTurn', { id, runId, turnTs, payload }),
     invalidateSessionForProvider: (id, routeTier) => ipcRenderer.invoke(
@@ -261,6 +279,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   // Relay 服务商：密钥只在主进程解密，renderer 永远拿不到明文。
   providers: {
+    mediaPresets: () => ipcRenderer.invoke('providers:mediaPresets'),
+    listMediaModels: (filter) => ipcRenderer.invoke('providers:listMediaModels', filter || {}),
     list:          ()            => ipcRenderer.invoke('providers:list'),
     create:        (input)       => ipcRenderer.invoke('providers:create', input),
     update:        (id, patch)   => ipcRenderer.invoke('providers:update', { id, patch }),
@@ -355,17 +375,20 @@ contextBridge.exposeInMainWorld('api', {
     },
   },
 
-  // 长期记忆库：用户审核、编辑、移除、历史查看及恢复。
+  // 长期记忆库：用户审核、编辑、移除、归档恢复和短时撤销。
   memory: {
     list: (options) => ipcRenderer.invoke('memory:list', options),
+    check: (options) => ipcRenderer.invoke('memory:check', options),
+    learningStatus: () => ipcRenderer.invoke('memory:learningStatus'),
     archived: () => ipcRenderer.invoke('memory:archived'),
     read: (file) => ipcRenderer.invoke('memory:read', file),
     write: (file, content, expectedRevision) => ipcRenderer.invoke('memory:write', { file, content, expectedRevision }),
     setPinned: (file, pinned) => ipcRenderer.invoke('memory:setPinned', { file, pinned }),
     setStatus: (file, status, expectedRevision) => ipcRenderer.invoke('memory:setStatus', { file, status, expectedRevision }),
     remove: (file, expectedRevision) => ipcRenderer.invoke('memory:remove', { file, expectedRevision }),
-    history: (file) => ipcRenderer.invoke('memory:history', file),
-    restore: (file, versionId, expectedRevision) => ipcRenderer.invoke('memory:restore', { file, versionId, expectedRevision }),
+    purge: (file, expectedArchiveId) => ipcRenderer.invoke('memory:purge', { file, expectedArchiveId }),
+    undo: (file, undoId, expectedRevision) => ipcRenderer.invoke('memory:undo', { file, undoId, expectedRevision }),
+    restoreArchived: (file, archiveId) => ipcRenderer.invoke('memory:restoreArchived', { file, archiveId }),
     revealFile: (file) => ipcRenderer.invoke('memory:revealFile', file),
   },
 

@@ -57,6 +57,9 @@ function installAnnotationPicker(ipcRenderer, view, doc) {
     if (!request || typeof request.requestId !== 'string' || request.requestId.length > 200 || !['element', 'region'].includes(request.mode) || !doc.documentElement
       || !Number.isInteger(request.revision) || request.revision < 0 || !request.viewport
       || !['width', 'height'].every(key => Number.isFinite(request.viewport[key]) && request.viewport[key] > 0 && request.viewport[key] <= 16384)) return;
+    const maximum = request.viewportMax || request.viewport;
+    if (!['width', 'height'].every(key => Number.isInteger(maximum[key]) && maximum[key] >= request.viewport[key]
+      && maximum[key] - request.viewport[key] <= 1 && maximum[key] <= 16384)) return;
     if (active?.requestId === request.requestId && active.revision >= request.revision) return;
     end();
     const host = doc.createElement('div'); host.style.cssText = 'position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:auto!important;touch-action:none!important;';
@@ -73,7 +76,7 @@ function installAnnotationPicker(ipcRenderer, view, doc) {
       if (active !== selection) return;
       if (doc.visibilityState === 'hidden') { end(true, 'hidden'); return; }
       const viewport = { width: view.innerWidth, height: view.innerHeight }, signature = JSON.stringify(viewport);
-      const matches = viewport.width === request.viewport.width && viewport.height === request.viewport.height;
+      const matches = ['width', 'height'].every(key => viewport[key] >= request.viewport[key] && viewport[key] <= maximum[key]);
       stableFrames = matches && signature === previousViewport ? stableFrames + 1 : 0; previousViewport = signature;
       if (stableFrames < 2) { view.requestAnimationFrame(settle); return; }
       selection.viewport = viewport; selection.ready = true;

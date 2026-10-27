@@ -258,7 +258,7 @@ test('WSL keeps project cwd while translating scratch, SDK runtime storage and e
   const f = fixture(t), sdk = require('../src/main/sdk/claude-sdk');
   const cwd = 'D:\\Synthetic Project', scratchDir = 'C:\\Synthetic Relay\\conversation-scratch\\session', outputDir = cwd + '\\outputs';
   const input = sdk._buildOptions({ cwd, validWorkingDir: cwd, scratchDir, outputDir, permissionMode: 'default',
-    runtimeEnv: { RELAY_AGENT_ENVIRONMENT: 'wsl', CLAUDE_CODE_TMPDIR: 'C:\\Synthetic Relay\\sdk-runtime\\tmp',
+    runtimeEnv: { RELAY_AGENT_ENVIRONMENT: 'wsl', CLAUDE_CONFIG_DIR: f.configDir, CLAUDE_CODE_TMPDIR: 'C:\\Synthetic Relay\\sdk-runtime\\tmp',
       CLAUDE_CODE_DEBUG_LOGS_DIR: 'C:\\Synthetic Relay\\sdk-runtime\\debug', XDG_CACHE_HOME: 'C:\\Synthetic Relay\\sdk-runtime\\cache' },
     nativeAgent: { agent: 'writer', agents: { writer: { prompt: 'Original instruction' } } } });
   const before = JSON.stringify(input);

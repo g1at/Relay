@@ -47,7 +47,7 @@ class HistorySearchClient {
     worker.on('exit', () => this._failed(worker));
     worker.unref(); return worker;
   }
-  search(query, limit, clientId = 'default') {
+  search(query, limit, clientId = 'default', offset = 0) {
     clientId = String(clientId); this.cancel(clientId);
     if (this.closed) return Promise.resolve({ ok: false, items: [], code: 'HISTORY_SEARCH_CLOSED', error: '搜索服务已关闭。' });
     const q = String(query || '').trim();
@@ -60,7 +60,7 @@ class HistorySearchClient {
       const requestId = ++this.sequence;
       const timer = setTimeout(() => this._failed(worker, 'HISTORY_SEARCH_TIMEOUT'), this.timeoutMs);
       this.pending.set(requestId, { clientId, resolve, timer }); this.active.set(clientId, requestId); this._ref();
-      try { worker.postMessage({ type: 'search', requestId, clientId, query: q, limit }); }
+      try { worker.postMessage({ type: 'search', requestId, clientId, query: q, limit, offset }); }
       catch (_) { this._failed(worker); }
     });
   }

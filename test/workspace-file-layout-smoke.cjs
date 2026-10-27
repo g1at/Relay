@@ -37,8 +37,13 @@ async function sampleDrag(name, widths) {
   }
   save(); await endDrag();
 }
+async function armMotion() {
+  // Sample in the renderer before the native pointer event. IPC and report
+  // writes after a check can otherwise consume the entire 240 ms transition.
+  await evaluate("window.fileMotionCapture=new Promise(resolve=>{const values=[],start=performance.now();function tick(){const tree=$('workspaceTreePane').getBoundingClientRect(),body=$('workspaceFileBody').getBoundingClientRect();values.push({at:performance.now()-start,width:tree.width,rightGap:body.right-tree.right});if(performance.now()-start>=290)resolve(values);else requestAnimationFrame(tick)}tick()});void 0;");
+}
 async function sampleMotion(name) {
-  samples[name] = await evaluate("new Promise(resolve=>{const values=[],start=performance.now();function tick(){const tree=$('workspaceTreePane').getBoundingClientRect(),body=$('workspaceFileBody').getBoundingClientRect();values.push({at:performance.now()-start,width:tree.width,rightGap:body.right-tree.right});if(performance.now()-start>=290)resolve(values);else requestAnimationFrame(tick)}tick()})");
+  samples[name] = await evaluate('fileMotionCapture');
   save();
 }
 app.whenReady().then(async () => {
@@ -61,13 +66,13 @@ app.whenReady().then(async () => {
   await capture('wide-picker');
   await act("document.querySelector('[data-path=\"README.md\"]').click()"); await waitFor("!!$('workspacePreviewBody').querySelector('h1')"); await settle();
   await check('OpeningFilePreservesTheChosenDirectoryWidth', "relayWorkspaceFileLayout.getState().preferredWidth===310&&Math.abs($('workspaceTreePane').getBoundingClientRect().width-310)<1");
-  await beginDrag(); await move(127);
+  await beginDrag(); await armMotion(); await move(127);
   await check('CollapsedGestureKeepsNativePointerCaptureAndMovesToRightEdge', "relayWorkspaceFileLayout.getState().collapsed&&relayWorkspaceFileLayout.getState().dragging&&!$('workspaceTreeResizeHandle').hidden&&$('workspaceTreePane').inert&&$('workspaceFileBody').classList.contains('is-file-tree-snapping')");
   await sampleMotion('collapseFrames');
   await check('CollapseAnimatesThroughIntermediateWidthsAlongTheRightEdge', `(()=>{const a=${JSON.stringify(samples.collapseFrames)};return new Set(a.map(s=>Math.round(s.width))).size>=3&&a.some(s=>s.width>0&&s.width<310)&&a.every((s,i)=>Math.abs(s.rightGap)<=1&&(!i||s.width<=a[i-1].width+1))})()`);
   await settle(); await check('SettledCollapseLeavesNoDirectoryGap', "$('workspaceTreePane').getBoundingClientRect().width===0&&Math.abs($('workspacePreview').getBoundingClientRect().right-$('workspaceFileBody').getBoundingClientRect().right)<1");
   await move(159); await check('HysteresisRetainsCollapsedState', 'relayWorkspaceFileLayout.getState().width===0');
-  await move(160); await sampleMotion('reopenFrames');
+  await armMotion(); await move(160); await sampleMotion('reopenFrames');
   await check('ReverseGestureAnimatesContinuouslyBackIntoTheFileLayout', `(()=>{const a=${JSON.stringify(samples.reopenFrames)};return new Set(a.map(s=>Math.round(s.width))).size>=3&&a.some(s=>s.width>0&&s.width<160)&&a.every((s,i)=>Math.abs(s.rightGap)<=1&&(!i||s.width>=a[i-1].width-1))})()`);
   await check('SameCapturedGestureCanReopenTheTree', "relayWorkspaceFileLayout.getState().width===160&&!$('workspaceTreePane').inert&&relayWorkspaceFileLayout.getState().dragging");
   await move(127); await endDrag(); await check('CollapsedPreferenceRetainsLastUsefulWidth', "JSON.parse(localStorage.getItem('relay.workspace-file-layout.v1')).width===310&&JSON.parse(localStorage.getItem('relay.workspace-file-layout.v1')).collapsed&&$('workspaceTreeResizeHandle').hidden");

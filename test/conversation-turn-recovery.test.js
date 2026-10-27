@@ -14,6 +14,17 @@ const { recoverConversationTurn: recover, extractNativeUserInput } = require('..
 const bootstrap = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const hint = name => vm.runInNewContext(bootstrap.match(new RegExp(`const ${name} =[\\s\\S]*?;(?=\\r?\\n)`))[0] + `\n${name};`);
 const ASK = hint('ASK_HINT'), IMAGE = hint('IMAGE_HINT'), FEISHU = hint('FEISHU_HINT');
+// Frozen prior envelope: historical transcripts must remain recoverable after
+// the current prompt changes, without treating arbitrary quoted text as a hint.
+const LEGACY_FEISHU = '\n\n---\n[系统提示] 上面包含飞书(Feishu/Lark)文档链接。请务必使用 feishu-mcp-pro '
+  + '提供的 MCP 工具来读取和操作(如 wiki_get_node / doc_fetch / doc_read / doc_create / doc_write / '
+  + 'doc_update / bitable_ops / sheet_ops 等)。若这些工具此刻尚未就绪,请稍等片刻后重试调用,'
+  + '不要改用 WebFetch、WebSearch 或命令行(curl/Invoke-WebRequest)去抓取网页 —— 飞书文档需要登录鉴权,'
+  + '直接抓网页只会拿到登录页,无法获取正文。\n'
+  + '重要:飞书 MCP 提供约 50+ 个工具(涵盖文档读写、多维表格、电子表格、日历、任务、知识库等)。'
+  + '如果你的工具列表中只看到部分飞书工具(例如只有读取类没有写入类),这是 MCP 工具列表加载延迟导致的,'
+  + '请直接尝试调用你需要的工具名称(如 doc_create、doc_write、doc_update 等),不要因为工具列表中暂时'
+  + '看不到就放弃或告诉用户工具不可用——工具实际上是存在的,直接调用即可成功。';
 const TS = '2026-09-28T09:10:12.672Z';
 function fixture() {
   const conversation = { id: 'conversation', title: 'keep title', updatedAt: '2026-09-28T09:01:28.211Z',
@@ -160,10 +171,28 @@ test('multiline user content and blank lines survive removal of host hints exact
   assert.equal(result.conversation.turns[1].user, user);
 });
 
-test('Feishu host hint is stripped only as the complete known envelope', () => {
-  const f = fixture(), user = 'Read https://fixture.feishu.cn/docx/example';
-  const result = recover({ ...f, rawMessage: native(f, user + FEISHU + ASK + IMAGE) });
-  assert.equal(result.ok, true); assert.equal(result.conversation.turns[1].user, user);
+test('current and legacy Feishu envelopes restore the original input with or without bridged history', () => {
+  const user = 'Read https://fixture.feishu.cn/docx/example\n\nKeep this paragraph and trailing spaces.  ';
+  for (const feishuHint of [FEISHU, LEGACY_FEISHU]) {
+    for (const carryHistory of [false, true]) {
+      const f = fixture(), request = carryHistory ? bridge(f, user + feishuHint) : user + feishuHint + ASK + IMAGE;
+      const result = recover({ ...f, rawMessage: native(f, request) });
+      assert.equal(result.ok, true); assert.equal(result.conversation.turns[1].user, user);
+    }
+  }
+});
+
+test('partial, modified or quoted Feishu envelopes never truncate user history', () => {
+  for (const feishuHint of [FEISHU, LEGACY_FEISHU]) {
+    for (const input of ['request' + feishuHint.slice(0, -1) + ASK + IMAGE,
+      'request' + feishuHint + '\nquoted ending' + ASK + IMAGE,
+      'request' + feishuHint + feishuHint + ASK + IMAGE]) {
+      const f = fixture(), before = JSON.stringify(f.conversation);
+      const result = recover({ ...f, rawMessage: native(f, input) });
+      assert.equal(result.ok, false); assert.equal(result.code, 'RECOVERY_UNSUPPORTED_ENVELOPE');
+      assert.equal(JSON.stringify(f.conversation), before);
+    }
+  }
 });
 
 test('quoted or modified host envelopes are refused instead of truncating user content', () => {

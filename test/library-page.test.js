@@ -191,3 +191,19 @@ test('explicit delivered directories open normally but cannot invoke file deleti
   await h.context.deleteLibraryItem(directory); assert.deepEqual(h.calls.deleted, []);
   assert.match(h.calls.toasts.at(-1), /文件夹/); assert.equal(h.read('libraryItems().length'), 1);
 });
+
+
+test('generated videos and AVIF images retain their type, output filter and generated-file deletion', async () => {
+  const h = harness();
+  await h.load('images', [file('/generated/clip.mp4'), file('/generated/clip.webm'), file('/generated/still.avif')]);
+  assert.equal(h.read("LIB_TYPES.some(([type])=>type==='video')"), true);
+  h.set("libState.fileType='video'");
+  assert.deepEqual(h.read('filteredLibraryItems().map(item=>item.name)'), ['clip.mp4', 'clip.webm']);
+  await h.context.openLibraryItem(h.context.filteredLibraryItems()[0], h.context.libraryItems());
+  assert.deepEqual(h.calls.opened, ['/generated/clip.mp4']);
+  await h.context.deleteLibraryItem(h.context.filteredLibraryItems()[0]);
+  assert.deepEqual(h.calls.deletedImages, ['/generated/clip.mp4']);
+  assert.deepEqual(h.calls.deleted, []);
+  h.set("libState.fileType='image'");
+  assert.deepEqual(h.read('filteredLibraryItems().map(item=>item.name)'), ['still.avif']);
+});

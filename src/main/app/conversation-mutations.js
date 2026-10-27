@@ -5,6 +5,7 @@ const fail = (code, message) => Object.assign(new Error(message), { code });
 const tailKey = record => JSON.stringify((record?.turns || []).map(turn => [turn?.runId || null, turn?.ts || null]));
 const outcomeKeys = ['assistant', 'output', 'error', 'status', 'taskRun', 'inputKind', 'outputNotice', 'assistantTs', 'thinking', 'activity', 'chat', 'supplements'];
 const sessionKeys = ['sessionId', 'sessionProviderId', 'sessionProviderRevision', 'sessionRouteTier', 'sessionAgentEnvironment'];
+const recoverySessionContextKeys = [...sessionKeys, 'sessionModel', 'projectId', 'workingDir', 'carryContextOnNextTurn', 'model'];
 
 // Runtime controls may await an old process for minutes. Never retain a whole
 // conversation across that await, and never let its response undo a newer turn.
@@ -64,6 +65,13 @@ function completeConversationTurn({ load, persist }, id, runId, turnTs, payload 
   const matches = record.turns.map((turn, index) => ({ turn, index })).filter(({ turn }) => turn?.runId === runId);
   if (matches.length !== 1 || matches[0].turn.ts !== turnTs) throw fail('TURN_IDENTITY_MISMATCH', '回复与历史消息不匹配，已阻止覆盖其他轮次。');
   const { turn, index } = matches[0];
+  // Recovery replays persisted events asynchronously. Another window can finish
+  // or edit this turn before replay ends, so only reconcile the version read at
+  // its start. Appending later turns or changing conversation metadata is safe.
+  const isRecovery = Object.hasOwn(payload, 'recoveryExpectedTurn');
+  if (isRecovery && JSON.stringify(turn) !== JSON.stringify(payload.recoveryExpectedTurn)) {
+    return { ok: true, stale: true, id: record.id, updatedAt: record.updatedAt, conversation: record };
+  }
   if (payload.retryWithoutResume) {
     if (turn.assistant || turn.status === 'complete' || index !== record.turns.length - 1) {
       throw fail('TURN_RETRY_CONFLICT', '这条消息已有回复或后续消息，不能自动重试覆盖。');
@@ -75,13 +83,21 @@ function completeConversationTurn({ load, persist }, id, runId, turnTs, payload 
     for (const key of outcomeKeys) if (Object.hasOwn(payload.turn, key) && payload.turn[key] !== undefined) turn[key] = clone(payload.turn[key]);
     // A recovered old result must not restore an old session over a newer turn.
     if (index === record.turns.length - 1) {
-      for (const key of sessionKeys) if (Object.hasOwn(payload.session || {}, key)) record[key] = payload.session[key];
+      // Switching project/provider can invalidate a session without changing any
+      // turn. Keep that reset while still saving the recovered execution record.
+      const sessionUnchanged = !isRecovery || (!record.carryContextOnNextTurn && payload.recoveryExpectedSession
+        && recoverySessionContextKeys.every(key => JSON.stringify(record[key] ?? null)
+          === JSON.stringify(payload.recoveryExpectedSession[key] ?? null)));
+      if (sessionUnchanged) {
+        for (const key of sessionKeys) if (Object.hasOwn(payload.session || {}, key)) record[key] = payload.session[key];
+      }
       if (payload.paused) record.paused = clone(payload.paused);
       if (payload.clearPausedRunId && record.paused?.runId === payload.clearPausedRunId) delete record.paused;
       if (payload.clearCarryContextReason && record.carryContextOnNextTurn === payload.clearCarryContextReason) delete record.carryContextOnNextTurn;
     }
     const finished = turn.assistantTs || (Number.isFinite(turn.taskRun?.segmentFinishedAt) ? new Date(turn.taskRun.segmentFinishedAt).toISOString() : null);
-    if (finished && (!record.updatedAt || finished > record.updatedAt)) record.updatedAt = finished;
+    if (!(isRecovery && payload.recoveryPreserveUpdatedAt === true)
+      && finished && (!record.updatedAt || finished > record.updatedAt)) record.updatedAt = finished;
   }
   persist(record);
   return { ok: true, id: record.id, updatedAt: record.updatedAt, conversation: record };

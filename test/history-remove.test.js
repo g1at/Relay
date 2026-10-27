@@ -155,6 +155,41 @@ test('history-only removal reads just the index and never hydrates a transcript'
   assert.deepEqual(f.ids(), [OTHER]);
 });
 
+test('history removal also removes its search projection while preserving other projections', t => {
+  const f = fixture(t);
+  const directory = path.join(f.store.getHistoryDir(), '.search-index');
+  fs.mkdirSync(directory);
+  for (const id of [ID, OTHER]) fs.writeFileSync(path.join(directory, id + '.json'), 'synthetic cached messages');
+  const suffix = '.12345678-1234-4234-8234-123456789abc.tmp';
+  for (const id of [ID, OTHER]) fs.writeFileSync(path.join(directory, '.' + id + suffix), 'interrupted atomic write');
+  fs.writeFileSync(path.join(directory, '.' + ID + '.unrelated.tmp'), 'not a search writer file');
+  f.store.removeConversationRecord(ID, { loadRecord: false });
+  assert.equal(fs.existsSync(path.join(directory, ID + '.json')), false);
+  assert.equal(fs.existsSync(path.join(directory, '.' + ID + suffix)), false);
+  assert.equal(fs.readFileSync(path.join(directory, '.' + OTHER + suffix), 'utf8'), 'interrupted atomic write');
+  assert.equal(fs.readFileSync(path.join(directory, '.' + ID + '.unrelated.tmp'), 'utf8'), 'not a search writer file');
+  assert.equal(fs.readFileSync(path.join(directory, OTHER + '.json'), 'utf8'), 'synthetic cached messages');
+  assert.equal(fs.existsSync(f.store.convFilePath(ID)), false);
+  assert.equal(f.body(OTHER), f.bytes.get(OTHER));
+});
+
+test('search projection cleanup failure preserves the conversation and rolls back membership for retry', t => {
+  let deny = true;
+  const f = fixture(t, { rmSync(file, options) {
+    if (deny && String(file).includes('.search-index')) throw failure('EACCES');
+    return fs.rmSync(file, options);
+  } });
+  const directory = path.join(f.store.getHistoryDir(), '.search-index');
+  fs.mkdirSync(directory); fs.writeFileSync(path.join(directory, ID + '.json'), 'synthetic cached messages');
+  assert.throws(() => f.store.removeConversationRecord(ID, { loadRecord: false }), { code: 'EACCES' });
+  assert.deepEqual(f.ids(), [ID, OTHER]);
+  assert.equal(f.body(ID), f.bytes.get(ID));
+  deny = false;
+  f.store.removeConversationRecord(ID, { loadRecord: false });
+  assert.equal(fs.existsSync(path.join(directory, ID + '.json')), false);
+  assert.deepEqual(f.ids(), [OTHER]);
+});
+
 test('a damaged index never triggers cross-conversation rebuilding during deletion', t => {
   const reads = [];
   const f = fixture(t, { readFileSync(file, ...args) {

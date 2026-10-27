@@ -5,7 +5,7 @@
 //   · 持久化：userData/schedules.json，原子写（.tmp + rename，UTF-8 无 BOM），与 app-settings 一致。
 //   · 单 timer：每次取「最早 nextRunAt」setTimeout 一个；触发后重算、落盘、重新 arm。
 //     避免每任务一个 setInterval 在休眠/时钟漂移下累积误差。
-//   · 三种调度：cron（5 段，本地时区）/ at（一次性 ISO，跑完 enabled=false）/ every（固定间隔 ms）。
+//   · 三种调度：cron（5 段，固定 IANA / 跟随系统时区）/ at（一次性 ISO，跑完 enabled=false）/ every（固定间隔 ms）。
 //   · 错过补跑：启动时 nextRunAt<now → 补跑“最近一次”，随后重算未来触发点（不补 N 次，防刷屏）。
 //   · 周期整点抖动：cron 命中 :00/:30 时在同一分钟内加随机秒级抖动（错峰但不改变显示的触发分钟）。
 //   · 执行：复用注入的 runClaudeJob（headless claude -p），累积流式结果 → 落历史 + 完成通知。
@@ -20,6 +20,8 @@ const https = require('https');
 const net = require('net');
 const os = require('os');
 const { spawn } = require('child_process');
+const { nextCronAfter, zonedMinute } = require('./cron-time');
+const { upsertRun, trimRuns, recoverInterruptedRuns } = require('./run-history');
 
 // ── 注入的依赖（init 时填充）──
 let deps = null;
@@ -38,7 +40,8 @@ let deps = null;
 
 let timer = null;            // 当前 arm 的单一 setTimeout
 let started = false;
-let storeWatcher = null;     // schedules.json 文件监听（感知 MCP server 的外部写入）
+let lastObservedTimeZone = null;
+let storeWatcher = null;     // schedules.json 文件监听（兼容外部导入与旧版写入）
 let storeWatchDebounce = null;
 let missedCatchupTimer = null;
 const pendingMissedCatchups = new Map(); // taskId → scheduledFor（启动/恢复合并去重）
@@ -49,7 +52,6 @@ const activeWebhookDeliveries = new Map(); // deliveryId → AbortController（�
 
 // setTimeout 上限 ~24.8 天；超长间隔分段重 arm。
 const MAX_TIMEOUT = 2 ** 31 - 1;
-const RUNS_CAP = 200;        // runs 环形历史上限
 const WEBHOOK_TIMEOUT_MS = 10_000;
 const WEBHOOK_MAX_REQUEST_BYTES = 64 * 1024;
 const WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -59,7 +61,10 @@ const WEBHOOK_MAX_RETRIES = 2;
 // ─────────────────────────────────────────
 // 持久化
 // ─────────────────────────────────────────
-function storePath() { return path.join(deps.userDataDir, 'schedules.json'); }
+function storePath() {
+  if (!deps) throw Object.assign(new Error('定时服务尚未启动'), { code: 'SCHEDULER_UNAVAILABLE' });
+  return path.join(deps.userDataDir, 'schedules.json');
+}
 function storeFingerprint(raw) {
   return crypto.createHash('sha256').update(raw).digest('hex');
 }
@@ -148,72 +153,6 @@ function parseCron(expr) {
   };
 }
 
-// 某个本地时刻 date 是否命中 cron。
-function cronMatches(c, date) {
-  const min = date.getMinutes();
-  const hr = date.getHours();
-  const dom = date.getDate();
-  const mon = date.getMonth() + 1;
-  const dow = date.getDay();   // 0=周日
-  const hit = (set, v) => set === null || set.has(v);
-  if (!hit(c.minute, min)) return false;
-  if (!hit(c.hour, hr)) return false;
-  if (!hit(c.month, mon)) return false;
-  // dom/dow 的 OR 语义：两者都被限制时，命中任一即可；只限其一时按该项。
-  const domR = c.dom !== null;
-  const dowR = c.dow !== null;
-  if (domR && dowR) return c.dom.has(dom) || c.dow.has(dow);
-  if (domR) return c.dom.has(dom);
-  if (dowR) return c.dow.has(dow);
-  return true;
-}
-
-function cronValues(set, min, max) {
-  if (set === null) return Array.from({ length: max - min + 1 }, (_unused, index) => min + index);
-  return [...set].sort((a, b) => a - b);
-}
-
-// 从 after 之后找下一个 cron 命中时刻（本地时区）。按“日期 + 可选时分”跳跃，
-// 稀疏表达式不会再逐分钟扫描一整年、阻塞 Electron 主线程。
-function nextCronAfter(c, after) {
-  const threshold = new Date(after.getTime());
-  threshold.setSeconds(0, 0);
-  threshold.setMinutes(threshold.getMinutes() + 1); // 不含 after 本身
-  const hours = cronValues(c.hour, 0, 23);
-  const minutes = cronValues(c.minute, 0, 59);
-  const day = new Date(threshold.getFullYear(), threshold.getMonth(), threshold.getDate());
-
-  // 八年覆盖完整闰年周期，同时仍只有约三千次“按天”判断。
-  for (let offset = 0; offset <= 8 * 366; offset += 1) {
-    const probeDay = new Date(day.getFullYear(), day.getMonth(), day.getDate() + offset);
-    // 先用当天中午判断月 / 日 / 周，避开 DST 午夜归一化带来的边界噪声。
-    const dateProbe = new Date(
-      probeDay.getFullYear(), probeDay.getMonth(), probeDay.getDate(), 12, 0, 0, 0,
-    );
-    const monthHit = c.month === null || c.month.has(dateProbe.getMonth() + 1);
-    const domRestricted = c.dom !== null;
-    const dowRestricted = c.dow !== null;
-    const domHit = !domRestricted || c.dom.has(dateProbe.getDate());
-    const dowHit = !dowRestricted || c.dow.has(dateProbe.getDay());
-    const dateHit = monthHit && (domRestricted && dowRestricted
-      ? (domHit || dowHit)
-      : (domHit && dowHit));
-    if (!dateHit) continue;
-
-    for (const hour of hours) {
-      for (const minute of minutes) {
-        const candidate = new Date(
-          dateProbe.getFullYear(), dateProbe.getMonth(), dateProbe.getDate(), hour, minute, 0, 0,
-        );
-        // 本地时区 DST 跳时可能把不存在的 02:xx 归一化到 03:xx；必须复验字段。
-        if (candidate < threshold || !cronMatches(c, candidate)) continue;
-        return candidate;
-      }
-    }
-  }
-  return null;
-}
-
 // ─────────────────────────────────────────
 // nextRunAt 计算（三种调度统一出口）
 //   from = 计算基准（通常 now 或上次触发时刻）。返回 ms 时间戳或 null（无未来触发）。
@@ -239,7 +178,7 @@ function computeNextRun(task, fromMs) {
     }
     if (s.kind === 'cron') {
       const c = parseCron(s.cron);
-      let next = nextCronAfter(c, from);
+      let next = nextCronAfter(c, from, s.tz);
       if (!next) return null;
       let nextMs = next.getTime();
       // 周期整点抖动：命中 :00/:30 且未显式精确 → 加 jitter（默认几分钟内随机）。
@@ -273,8 +212,8 @@ function parseAtToMs(at, fromMs) {
 function applyJitter(task, ms) {
   const s = task.schedule || {};
   if (s.exact) return ms;                       // 用户要求精确，不抖
-  const d = new Date(ms);
-  const onTheDot = d.getMinutes() === 0 || d.getMinutes() === 30;
+  const minute = zonedMinute(ms, s.tz);
+  const onTheDot = minute === 0 || minute === 30;
   if (!onTheDot) return ms;                      // 只对整点/半点抖
   const capSec = Number.isFinite(s.jitterSec) && s.jitterSec > 0 ? s.jitterSec : 59;
   const jitter = Math.floor(Math.random() * capSec * 1000);
@@ -346,6 +285,20 @@ function shutdown() {
 }
 
 // 重新计算所有任务的 nextRunAt（仅 enabled 且尚未排定的），落盘，arm 最早的那个。
+function refreshLocalTimeZone(store) {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (zone === lastObservedTimeZone) return false;
+  lastObservedTimeZone = zone;
+  let changed = false;
+  for (const task of store.tasks) {
+    if (task.enabled && task.schedule?.kind === 'cron' && (!task.schedule.tz || task.schedule.tz === 'local')) {
+      task.nextRunAt = null;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function reschedule() {
   if (!started) return;
   clearTimer();
@@ -358,7 +311,7 @@ function reschedule() {
   const now = Date.now();
 
   // 确保每个 enabled 任务都有未来 nextRunAt
-  let dirty = false;
+  let dirty = refreshLocalTimeZone(store);
   for (const task of store.tasks) {
     if (!task.enabled) { if (task.nextRunAt) { task.nextRunAt = null; dirty = true; } continue; }
     const plannedAt = Date.parse(task.nextRunAt);
@@ -403,9 +356,10 @@ function onTick() {
     console.error('[scheduler] 触发失败，任务库结构无效: %s', e.message);
     return;
   }
+  if (refreshLocalTimeZone(store)) writeStore(store);
   const now = Date.now();
   const due = store.tasks.filter(
-    (t) => t.enabled && t.nextRunAt && Date.parse(t.nextRunAt) <= now + 1000
+    (t) => t.enabled && t.nextRunAt && Date.parse(t.nextRunAt) <= now
   );
   for (const task of due) {
     fireTask(task.id, { trigger: 'timer', scheduledFor: task.nextRunAt }).catch(() => {});   // 异步执行，错误内部已记
@@ -495,7 +449,14 @@ function onRunCancel(runContext, handler) {
 function cancelRun(runId) {
   const key = typeof runId === 'string' ? runId : String(runId || '');
   const control = key ? activeRuns.get(key) : null;
-  return control ? control.cancel() : false;
+  if (control) return control.cancel();
+  if (!started) return false;
+  const store = readStore({ strict: true });
+  const queued = store.runs.find((run) => run.runId === key && run.status === 'queued' && run.queueReason === 'overlap');
+  if (!queued) return false;
+  upsertRun(store, { runId: key, status: 'canceled', endedAt: new Date().toISOString(), error: '任务已取消' });
+  writeStore(store); notifyRenderer();
+  return true;
 }
 
 // ── Webhook 出站安全边界 ──
@@ -947,12 +908,75 @@ function prepareWebhookDelivery(task, result, runMeta) {
   };
 }
 
-async function fireTask(taskId, opts = {}) {
-  if (inflight.has(taskId)) {
-    return { ok: false, code: 'TASK_RUNNING', error: '任务正在运行，请稍候' };
+// 每个计划点只留下一个决策；手动重复请求不产生新的计划记录。
+function recordOverlap(store, task, opts, now) {
+  const scheduledFor = opts.scheduledFor || task.nextRunAt;
+  if (!scheduledFor) return { ok: false, status: 'already_running', code: 'TASK_RUNNING', taskId: task.id };
+  const previous = store.runs.find((run) => run.taskId === task.id && run.scheduledFor === scheduledFor);
+  if (previous) return { ok: previous.status === 'queued', status: previous.status === 'queued' ? 'queued' : 'failed',
+    code: 'ALREADY_PROCESSED', runId: previous.runId, taskId: task.id };
+  const at = new Date(now).toISOString();
+  const superseded = store.runs.some((run) => run.taskId === task.id
+    && ['queued', 'running'].includes(run.status) && Date.parse(run.scheduledFor) > Date.parse(scheduledFor));
+  const queued = task.overlapPolicy === 'queueLatest' && !superseded;
+  // 最新一次替换仍在等待的计划点，但保留被合并记录的原因。
+  if (queued) {
+    for (const run of store.runs.filter((run) => run.taskId === task.id && run.status === 'queued' && run.queueReason === 'overlap')) {
+      upsertRun(store, { runId: run.runId, status: 'skipped', endedAt: at,
+        reasonCode: 'SUPERSEDED', summary: '已合并到更新的计划触发点' });
+    }
   }
+  const runId = crypto.randomUUID();
+  const reason = superseded ? '已有更新的计划正在等待或执行，已跳过较早的触发点'
+    : queued ? '上轮尚未结束，等待补跑最近一次' : '上轮尚未结束，已按任务设置跳过本轮';
+  upsertRun(store, { taskId: task.id, taskName: task.name, runId, at, queuedAt: queued ? at : null,
+    startedAt: null, endedAt: queued ? null : at, trigger: opts.trigger || 'timer', scheduledFor,
+    status: queued ? 'queued' : 'skipped', queueReason: queued ? 'overlap' : null,
+    reasonCode: superseded ? 'SUPERSEDED' : queued ? 'QUEUED_OVERLAP' : 'SKIPPED_OVERLAP', ms: 0, summary: reason, error: null });
+  if (!queued) { task.lastSkippedAt = at; task.lastSkipReason = reason; }
+  // 外部编辑可能已排了新时间，不能让旧回调覆盖它。
+  if (task.nextRunAt === scheduledFor) {
+    task.scheduledLastRunAt = scheduledFor;
+    if (task.schedule.kind === 'at') { task.enabled = false; task.nextRunAt = null; }
+    else {
+      const next = computeNextRun(task, now);
+      task.nextRunAt = next ? new Date(next).toISOString() : null;
+    }
+  }
+  writeStore(store);
+  notifyRenderer();
+  return { ok: queued, status: queued ? 'queued' : 'failed', code: queued ? 'TASK_QUEUED' : 'SKIPPED_OVERLAP',
+    runId, taskId: task.id, nextRunAt: task.nextRunAt || null };
+}
+
+function cancelQueuedOverlaps(store, taskId, reason) {
+  for (const run of store.runs.filter((run) => run.taskId === taskId && run.status === 'queued' && run.queueReason === 'overlap')) {
+    upsertRun(store, { runId: run.runId, status: 'canceled', endedAt: new Date().toISOString(), error: reason });
+  }
+}
+
+function drainOverlap(taskId) {
+  if (!started || inflight.has(taskId)) return;
+  try {
+    const store = readStore({ strict: true });
+    const pending = store.runs.find((run) => run.taskId === taskId && run.status === 'queued' && run.queueReason === 'overlap');
+    if (!pending) return;
+    const task = store.tasks.find((item) => item.id === taskId);
+    if (!task || (!task.enabled && task.schedule.kind !== 'at')) {
+      cancelQueuedOverlaps(store, taskId, task ? '任务已停用，取消补跑' : '任务已删除，取消补跑');
+      writeStore(store); notifyRenderer(); return;
+    }
+    fireTask(taskId, { trigger: pending.trigger, scheduledFor: pending.scheduledFor, queuedRunId: pending.runId })
+      .catch((error) => console.warn('[scheduler] 重叠补跑失败: %s', error.message));
+  } catch (error) { console.warn('[scheduler] 读取重叠补跑失败: %s', error.message); }
+}
+
+async function fireTask(taskId, opts = {}) {
+  if (!started) return { ok: false, status: 'failed', code: 'SCHEDULER_UNAVAILABLE', error: '定时服务尚未启动', taskId };
   const startedAt = Date.now();
-  let shadowRunId = null;
+  const shadowRunId = opts.queuedRunId || crypto.randomUUID();
+  let executionStartedAt = null;
+  let historyFinished = false;
   let shadowFinishAttempted = false;
   let runControl = null;
   let resourceLease = null;
@@ -967,6 +991,16 @@ async function fireTask(taskId, opts = {}) {
   }
   let task = store.tasks.find((t) => t.id === taskId);
   if (!task) return { ok: false, code: 'TASK_NOT_FOUND', error: '任务不存在' };
+  if (inflight.has(taskId)) {
+    if (opts.trigger !== 'manual') return recordOverlap(store, task, opts, startedAt);
+    const active = [...activeRuns.values()].find((run) => run.taskId === taskId);
+    return { ok: false, status: 'already_running', code: 'TASK_RUNNING', error: '任务正在运行，请稍候', taskId, runId: active?.runId || null };
+  }
+  const previousRun = opts.trigger !== 'manual' && opts.scheduledFor
+    ? store.runs.find((run) => run.taskId === taskId && run.scheduledFor === opts.scheduledFor) : null;
+  if (previousRun && previousRun.runId !== opts.queuedRunId) {
+    return { ok: false, code: 'ALREADY_PROCESSED', status: 'failed', taskId, runId: previousRun.runId };
+  }
   // 投递配置以“本次执行启动时”的快照为准；运行中编辑只影响下一次。
   const deliveryTaskSnapshot = {
     id: task.id,
@@ -976,8 +1010,6 @@ async function fireTask(taskId, opts = {}) {
   const scheduledFor = opts.trigger === 'manual'
     ? null
     : (opts.scheduledFor || task.nextRunAt || null);
-  inflight.add(taskId);
-
   // 在执行前固定目录对应的会话 ID；首次落历史复用它，失败/重试也不会散落到新目录。
   if (!task.builtin && deps && typeof deps.resolveWorkspace === 'function') {
     const previous = task.lastConvId && typeof deps.loadConversation === 'function'
@@ -994,15 +1026,26 @@ async function fireTask(taskId, opts = {}) {
     task.manualLastRunAt = task.lastRunAt;
     task.manualRunCount = (task.manualRunCount || 0) + 1;
     // 手动运行不移动原有的 nextRunAt，也不消费一次性 at 计划。
+  } else if (opts.queuedRunId) {
+    // 重叠排队时已消费计划点；这里不能再次移动未来计划。
   } else if (task.schedule && task.schedule.kind === 'at' && !opts.keepEnabled) {
     task.scheduledLastRunAt = scheduledFor || task.lastRunAt;
     task.enabled = false;          // 一次性跑完归档
     task.nextRunAt = null;
   } else {
     task.scheduledLastRunAt = scheduledFor || task.lastRunAt;
-    const next = computeNextRun(task, startedAt + 1000);
+    const next = computeNextRun(task, startedAt);
     task.nextRunAt = next ? new Date(next).toISOString() : null;
   }
+  upsertRun(store, {
+    taskId, taskName: task.name, runId: shadowRunId,
+    at: previousRun?.at || new Date(startedAt).toISOString(),
+    queuedAt: previousRun?.queuedAt || new Date(startedAt).toISOString(),
+    admittedAt: new Date(startedAt).toISOString(),
+    startedAt: null, endedAt: null, trigger: opts.trigger || 'timer', scheduledFor,
+    status: 'queued', queueReason: 'resources', ms: 0, summary: '', error: null,
+  });
+  inflight.add(taskId);
   try {
     writeStore(store);
   } catch (e) {
@@ -1012,29 +1055,46 @@ async function fireTask(taskId, opts = {}) {
   }
   if (deps && typeof deps.taskRunStart === 'function') {
     try {
-      shadowRunId = deps.taskRunStart({
+      deps.taskRunStart({
+        runId: shadowRunId,
         task,
         trigger: opts.trigger || 'timer',
         scheduledFor,
         startedAt,
-      }) || null;
+      });
     } catch (e) { console.warn('[scheduler] 创建影子任务失败 taskId=%s: %s', taskId, e.message); }
   }
   runControl = createRunControl(shadowRunId, taskId, (task.action || {}).type || 'chat');
   if (shadowRunId) activeRuns.set(shadowRunId, runControl);
   notifyRenderer();
   if (typeof opts.onStarted === 'function') {
-    try { opts.onStarted({ ok: true, code: 'TASK_STARTED' }); } catch (_) {}
+    try { opts.onStarted({ ok: true, code: 'TASK_STARTED',
+      status: typeof deps.taskRunAcquire === 'function' ? 'queued' : 'accepted',
+      runId: shadowRunId, taskId, nextRunAt: task.nextRunAt || null,
+    }); } catch (_) {}
   }
 
   try {
     if (shadowRunId && deps && typeof deps.taskRunAcquire === 'function') {
-      resourceLease = await deps.taskRunAcquire(
-        shadowRunId,
-        (task.action || {}).type || 'chat',
-        task.id,
-      );
+      const acquisition = Promise.resolve().then(() => deps.taskRunAcquire(
+        shadowRunId, (task.action || {}).type || 'chat', task.id,
+      ));
+      // 取消排队不必等待资源可用；迟到的租约会释放，迟到的拒绝也被观察。
+      const guarded = acquisition.then((lease) => {
+        if (runControl.canceled) {
+          try { lease?.release?.(); } catch (_) {}
+          try { deps.taskRunRelease?.(shadowRunId); } catch (_) {}
+          return null;
+        }
+        return lease;
+      });
+      resourceLease = await Promise.race([guarded, runControl.whenCanceled.then(() => null)]);
       if (!resourceLease && runControl) runControl.cancel();
+    }
+    if (!runControl.canceled) {
+      executionStartedAt = Date.now();
+      appendRun({ runId: shadowRunId, status: 'running', startedAt: new Date(executionStartedAt).toISOString() });
+      notifyRenderer();
     }
     // 技能体检只在隔离工作区运行。准备钩子返回一次性 prompt/cwd；拿不到隔离上下文时
     // 必须失败关闭，绝不能退回正式技能目录直接修改。
@@ -1128,20 +1188,25 @@ async function fireTask(taskId, opts = {}) {
       appendRun({
         taskId,
         runId: shadowRunId,
-        at: new Date(startedAt).toISOString(),
+        at: previousRun?.at || new Date(startedAt).toISOString(),
         trigger: opts.trigger || 'timer',
         scheduledFor,
         status: result.canceled ? 'canceled' : (result.ok ? 'ok' : 'error'),
-        ms: Date.now() - startedAt,
+        startedAt: executionStartedAt ? new Date(executionStartedAt).toISOString() : null,
+        endedAt: new Date().toISOString(),
+        ms: executionStartedAt ? Date.now() - executionStartedAt : 0,
         summary: (result.ok || result.canceled) ? (result.summary || '') : '',
         error: result.ok ? null : (result.error || ''),
         conversationId: result.conversationId || null,
         conversationKind: result.conversationKind || null,
+        ...(result.mediaTaskId ? { mediaTaskId: result.mediaTaskId, mediaKind: result.mediaKind,
+          mediaState: result.mediaState || null, recoverable: !!result.recoverable } : {}),
         delivery: webhookDelivery ? { webhook: webhookDelivery.pending } : null,
       });
     } catch (e) {
       console.warn('[scheduler] 写入任务历史失败 taskId=%s: %s', taskId, e.message);
     }
+    historyFinished = true;
     if (webhookDelivery) webhookDelivery.start();
 
     // 完成通知
@@ -1154,6 +1219,20 @@ async function fireTask(taskId, opts = {}) {
                     : ('错误：' + (result.error || '').slice(0, 180));
       try { deps.notify({ title, body }); } catch (_) {}
     }
+    return result;
+  } catch (e) {
+    const result = runControl?.canceled ? canceledResult() : { ok: false, error: e.message || String(e) };
+    if (!shadowFinishAttempted && typeof deps.taskRunFinish === 'function') {
+      shadowFinishAttempted = true;
+      try { deps.taskRunFinish(shadowRunId, result); } catch (_) {}
+    }
+    try {
+      const current = refetch(taskId);
+      if (current) { current.lastStatus = result.canceled ? 'canceled' : 'error'; current.lastError = result.error; persistTask(current); }
+      appendRun({ runId: shadowRunId, status: result.canceled ? 'canceled' : 'error',
+        endedAt: new Date().toISOString(), ms: executionStartedAt ? Date.now() - executionStartedAt : 0, error: result.error });
+      historyFinished = true;
+    } catch (writeError) { console.warn('[scheduler] 保存失败终态: %s', writeError.message); }
     return result;
   } finally {
     if (skillCuratorContext && !skillCuratorFinalized && deps
@@ -1175,8 +1254,13 @@ async function fireTask(taskId, opts = {}) {
     if (shadowRunId && deps && typeof deps.taskRunRelease === 'function') {
       try { deps.taskRunRelease(shadowRunId); } catch (_) {}
     }
+    if (!historyFinished) {
+      try { appendRun({ runId: shadowRunId, status: runControl?.canceled ? 'canceled' : 'interrupted',
+        endedAt: new Date().toISOString(), error: runControl?.canceled ? '任务已取消' : '任务在结束前异常中断' }); } catch (_) {}
+    }
     if (runControl) runControl.finish();
     inflight.delete(taskId);
+    if (started) queueMicrotask(() => drainOverlap(taskId));
     try { reschedule(); } catch (e) { console.warn('[scheduler] 任务完成后重排失败: %s', e.message); }
   }
 }
@@ -1185,9 +1269,57 @@ async function fireTask(taskId, opts = {}) {
 function execAction(task, runContext = {}) {
   if (runWasCanceled(runContext)) return Promise.resolve(canceledResult());
   const a = task.action || {};
-  if (a.type === 'image') return execImage(task, runContext);
+  if (task.builtin === 'memory-consolidate' && a.type === 'chat') return execMemoryMaintenance(task, runContext);
+  if (a.type === 'image' || a.type === 'video') return execImage(task, runContext);
   if (a.type === 'command') return execCommand(task, runContext);
   return execChat(task, runContext);
+}
+
+// Memory learning uses structured, tool-free calls and host-verified proposals.
+// Never fall back to an unrestricted scheduled chat if the service is unavailable.
+async function execMemoryMaintenance(task, runContext = {}) {
+  if (typeof deps?.runMemoryMaintenance !== 'function') {
+    return { ok: false, error: '记忆提炼服务不可用，请重启 Relay', summary: '' };
+  }
+  const controller = new AbortController();
+  let timedOut = false, rejectCanceled;
+  const canceled = new Promise((_, reject) => { rejectCanceled = reject; });
+  // Cancellation can arrive before the race is installed (including an already
+  // canceled run). Observe that rejection even when we return early.
+  canceled.catch(() => {});
+  const abort = () => {
+    controller.abort();
+    rejectCanceled(Object.assign(new Error(timedOut ? '记忆整理超时，已停止' : '任务已取消'), { name: 'AbortError' }));
+  };
+  const removeCancel = onRunCancel(runContext, abort);
+  const resourceSignal = runContext.resourceSignal;
+  resourceSignal?.addEventListener('abort', abort, { once: true });
+  const watchdog = setTimeout(() => { timedOut = true; abort(); }, 600000);
+  watchdog.unref?.();
+  try {
+    if (runWasCanceled(runContext) || resourceSignal?.aborted) { abort(); return canceledResult(); }
+    reportTaskRunPhase(runContext, 'running', '提炼历史会话并整理记忆');
+    const result = await Promise.race([
+      Promise.resolve().then(() => {
+        if (controller.signal.aborted) throw Object.assign(new Error('任务已取消'), { name: 'AbortError' });
+        return deps.runMemoryMaintenance({ model: task.action?.model, signal: controller.signal });
+      }), canceled,
+    ]);
+    if (controller.signal.aborted || runWasCanceled(runContext)) return canceledResult();
+    if (result?.ok === false) return { ...result, error: result.error || '记忆整理未完成' };
+    const summary = result?.summary || '记忆整理完成';
+    if (runContext.runId && typeof deps.taskRunEvent === 'function') {
+      deps.taskRunEvent(runContext.runId, { type: 'assistant', message: { content: [{ type: 'text', text: summary }] } });
+    }
+    let conversationId = null;
+    if (task.delivery?.saveToHistory !== false) conversationId = saveResultToHistory(task, summary, null);
+    return { ...result, ok: true, summary, conversationId, conversationKind: conversationId ? 'chat' : null };
+  } catch (error) {
+    if (!timedOut && (controller.signal.aborted || runWasCanceled(runContext))) return canceledResult();
+    return { ok: false, error: error.message || '记忆整理失败', summary: '' };
+  } finally {
+    clearTimeout(watchdog); removeCancel(); resourceSignal?.removeEventListener('abort', abort);
+  }
 }
 
 function reportTaskRunPhase(runContext, phase, label) {
@@ -1629,12 +1761,15 @@ function runClaudeJobSafe(args) {
 // 定时出图：复用注入的 generateImage（main 的 generateImageCore）。
 //   成功 → 落一条 kind='create' 的历史会话（结构对齐 AI 创作视图），summary 给图片张数。
 async function execImage(task, runContext = {}) {
-  reportTaskRunPhase(runContext, 'tool', '正在生成图片');
-  if (runWasCanceled(runContext)) return canceledResult();
-  if (!deps || typeof deps.generateImage !== 'function') {
-    return { ok: false, error: 'generateImage 未注入' };
-  }
   const a = task.action || {};
+  const mediaKind = a.type === 'video' ? 'video' : 'image';
+  const mediaLabel = mediaKind === 'video' ? '视频' : '图片';
+  reportTaskRunPhase(runContext, 'tool', `正在生成${mediaLabel}`);
+  if (runWasCanceled(runContext)) return canceledResult();
+  const unified = !!(deps && typeof deps.generateMedia === 'function');
+  if (!unified && (mediaKind === 'video' || !deps || typeof deps.generateImage !== 'function')) {
+    return { ok: false, error: mediaKind === 'video' ? '视频生成服务未就绪' : 'generateImage 未注入' };
+  }
   const controller = new AbortController();
   const inheritedSignal = runContext && runContext.resourceSignal;
   const abort = () => { try { controller.abort(); } catch (_) {} };
@@ -1644,32 +1779,63 @@ async function execImage(task, runContext = {}) {
   }
   const removeCancel = onRunCancel(runContext, abort);
   let res;
+  let mediaSnapshot;
   try {
-    res = await deps.generateImage({
-      prompt: a.prompt || '',
-      model: a.imageModel || undefined,   // 不传则用 core 的默认模型
-      size: a.size || undefined,
-      n: Number.isFinite(a.n) ? a.n : 1,
-      signal: controller.signal,
-    });
+    if (unified) {
+      mediaSnapshot = { id: task.id, name: task.name, action: { type: mediaKind, prompt: a.prompt || '',
+        mediaModel: a.mediaModel || null, imageModel: a.imageModel || null, size: a.size || '',
+        parameters: { ...(a.parameters || {}) } },
+        delivery: { saveToHistory: (task.delivery || {}).saveToHistory !== false },
+        historyConversationId: task.lastConvId || task.workspaceConversationId || crypto.randomUUID() };
+      if (runContext.runId) appendRun({ runId: runContext.runId, mediaSnapshot });
+      const legacy = !a.mediaModel && !String(a.imageModel || '').includes('::media::') && mediaKind === 'image';
+      const parameters = { ...(legacy ? { ...(a.size ? { size: a.size } : {}), n: Number.isFinite(a.n) ? a.n : 1 } : {}), ...(a.parameters || {}) };
+      res = await deps.generateMedia({
+        ...parameters, prompt: a.prompt || '', model: a.mediaModel || a.imageModel || undefined,
+        mediaKind, references: a.references || [], runId: runContext.runId || undefined,
+        conversationId: mediaSnapshot.historyConversationId,
+        source: { type: 'schedule', runId: runContext.runId || null },
+        signal: controller.signal,
+      });
+    } else {
+      res = await deps.generateImage({
+        prompt: a.prompt || '', model: a.imageModel || undefined,
+        size: a.size || undefined, n: Number.isFinite(a.n) ? a.n : 1,
+        signal: controller.signal,
+      });
+    }
   } catch (e) {
     if (runWasCanceled(runContext)) return canceledResult();
-    return { ok: false, error: '出图失败: ' + e.message };
+    return { ok: false, error: `${mediaLabel}生成失败: ${e.message}` };
   } finally {
     removeCancel();
     if (inheritedSignal) inheritedSignal.removeEventListener('abort', abort);
   }
-  if (runWasCanceled(runContext)) return canceledResult();
-  if (!res || !res.ok) return { ok: false, error: (res && res.error) || '出图失败' };
-  const paths = res.paths || [];
+  const mediaDetails = res && res.taskId ? { mediaTaskId: res.taskId, mediaKind,
+    mediaState: res.state || null, recoverable: !!res.recoverable } : {};
   let conversationId = null;
-  if ((task.delivery || {}).saveToHistory !== false) {
-    try { conversationId = saveImageToHistory(task, paths); } catch (_) {}
+  if (unified && res?.taskId && (task.delivery || {}).saveToHistory !== false) {
+    try { conversationId = saveImageToHistory(task, res.paths || [], { ...res, runId: runContext.runId,
+      historyConversationId: mediaSnapshot?.historyConversationId }); } catch (_) {}
+  }
+  const historyDetails = { conversationId, conversationKind: conversationId ? 'create' : null };
+  if (runWasCanceled(runContext)) return { ...canceledResult(), ...mediaDetails, ...historyDetails };
+  const incomplete = res && ['needs_attention', 'submission_unknown', 'stopped', 'download_failed'].includes(res.state);
+  if (!res || !res.ok || incomplete) {
+    const detail = typeof res?.error === 'string' ? res.error : res?.error?.message;
+    const followUp = res && res.taskId ? `（媒体任务 ${res.taskId}${incomplete ? '；请查询原任务，未自动重新提交' : ''}）` : '';
+    return { ok: false, canceled: !!res?.canceled, error: (detail || `${mediaLabel}生成未完成`) + followUp, ...mediaDetails, ...historyDetails };
+  }
+  const paths = res.paths || [];
+  if (!conversationId && (task.delivery || {}).saveToHistory !== false) {
+    try { conversationId = saveImageToHistory(task, paths, { ...res, runId: runContext.runId, historyConversationId: mediaSnapshot?.historyConversationId }); } catch (_) {}
   }
   return {
     ok: true,
-    summary: `已生成 ${paths.length} 张图片`,
+    summary: `已生成 ${paths.length} ${mediaKind === 'video' ? '个视频' : '张图片'}`,
     paths,
+    artifacts: Array.isArray(res.artifacts) ? res.artifacts : [],
+    ...mediaDetails,
     conversationId,
     conversationKind: conversationId ? 'create' : null,
   };
@@ -1711,12 +1877,36 @@ function appendOrCreateConv(task, makeTurn, buildBase, mergeOnReuse) {
 }
 
 // 把出图结果落进历史会话（kind='create'，结构对齐 AI 创作视图的 turn）。复用同一任务的会话。
-function saveImageToHistory(task, paths) {
+function saveImageToHistory(task, paths, result = {}) {
   const a = task.action || {};
-  const makeTurn = () => ({ prompt: a.prompt || '(定时出图)', model: a.imageModel || '', size: a.size || '', resultPaths: paths || [] });
+  const mediaKind = a.type === 'video' ? 'video' : 'image';
+  const makeTurn = () => ({ prompt: a.prompt || '(定时创作)', model: a.mediaModel || a.imageModel || '',
+    size: (a.parameters || {}).size || a.size || '', resultPaths: paths || [], mediaKind,
+    parameters: { ...(a.parameters || {}) }, artifacts: Array.isArray(result.artifacts) ? result.artifacts : [],
+    mediaTaskId: result.taskId || null, ...(result.runId ? { runId: result.runId } : {}),
+    ...(result.error ? { error: typeof result.error === 'string' ? result.error : result.error.message } : {}),
+    ...(result.state ? { mediaState: result.state } : {}) });
+  if (result.runId && result.historyConversationId) {
+    const id = result.historyConversationId;
+    let conv = typeof deps.loadConversation === 'function' ? deps.loadConversation(id) : null;
+    if (conv && conv.kind !== 'create') throw new Error('媒体历史会话类型不匹配');
+    const now = new Date().toISOString();
+    if (!conv) conv = { id, title: task.name || (mediaKind === 'video' ? '定时视频' : '定时出图'),
+      kind: 'create', createdAt: now, fromScheduled: task.id, titleGenerated: true, turns: [] };
+    conv.turns = Array.isArray(conv.turns) ? conv.turns : [];
+    const index = conv.turns.findIndex(turn => turn.runId === result.runId);
+    const turn = makeTurn();
+    if (index >= 0 && JSON.stringify(conv.turns[index]) === JSON.stringify(turn)) return id;
+    if (index >= 0) conv.turns[index] = turn; else conv.turns.push(turn);
+    conv.updatedAt = now;
+    deps.saveConversation(conv);
+    const fresh = refetch(task.id);
+    if (fresh && (!fresh.lastConvId || fresh.lastConvId === id)) { fresh.lastConvId = id; persistTask(fresh); }
+    return id;
+  }
   return appendOrCreateConv(task, makeTurn, (id, now) => ({
     id,
-    title: task.name || '定时出图',
+    title: task.name || (mediaKind === 'video' ? '定时视频' : '定时出图'),
     kind: 'create',
     createdAt: now,
     updatedAt: now,
@@ -1724,6 +1914,59 @@ function saveImageToHistory(task, paths) {
     titleGenerated: true,
     turns: [makeTurn(now)],
   }));
+}
+
+// The service may finish after local cancellation or a restart. Reconcile the
+// original receipt explicitly; never re-enter fireTask or repeat deliveries.
+function reconcileMediaTask(mediaTask) {
+  if (!started || mediaTask?.source?.type !== 'schedule') return { handled: false, changed: false };
+  const runId = mediaTask.source.runId || mediaTask.runId;
+  if (!runId) return { handled: false, changed: false };
+  if (activeRuns.has(runId)) return { handled: true, active: true, changed: false, runId };
+  const state = mediaTask.state;
+  const attention = ['needs_attention', 'submission_unknown', 'stopped', 'download_failed'].includes(state);
+  if (state !== 'completed' && state !== 'failed' && !attention) return { handled: true, changed: false, runId };
+  let store = readStore({ strict: true });
+  let run = store.runs.find(item => item.runId === runId);
+  if (!run?.mediaSnapshot || (run.mediaTaskId && run.mediaTaskId !== (mediaTask.id || mediaTask.taskId))) return { handled: false, changed: false, runId };
+  const taskId = mediaTask.id || mediaTask.taskId;
+  const artifacts = Array.isArray(mediaTask.artifacts) ? mediaTask.artifacts : [];
+  const paths = artifacts.map(item => item.path || item.filePath).filter(Boolean);
+  const ok = state === 'completed' && paths.length > 0;
+  const message = typeof mediaTask.error === 'string' ? mediaTask.error : mediaTask.error?.message;
+  const error = ok ? null : (message || (state === 'completed' ? '媒体任务没有可用产物' : state === 'stopped' ? '已停止本地等待' : '媒体任务未完成'))
+    + `（媒体任务 ${taskId}${attention ? '；请查询原任务，未自动重新提交' : ''}）`;
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify([taskId, state, artifacts, error])).digest('hex');
+  const snapshot = run.mediaSnapshot;
+  const mediaKind = snapshot.action.type === 'video' ? 'video' : 'image';
+  const summary = ok ? `已生成 ${paths.length} ${mediaKind === 'video' ? '个视频' : '张图片'}` : '';
+  const makeResult = (conversationId) => ({ ok, error, summary, paths, artifacts, mediaTaskId: taskId, mediaKind, mediaState: state,
+    recoverable: attention, conversationId, conversationKind: conversationId ? 'create' : null });
+  if (run.mediaRecovery?.fingerprint === fingerprint || (run.status === 'ok' && run.mediaTaskId === taskId && ok)) {
+    return { handled: true, changed: false, runId, result: makeResult(run.conversationId || null) };
+  }
+  let conversationId = run.conversationId || null;
+  if (snapshot.delivery?.saveToHistory !== false) {
+    conversationId = saveImageToHistory(snapshot, paths, { taskId, runId, artifacts, error, state, historyConversationId: snapshot.historyConversationId });
+  }
+  // History writes may update lastConvId, so reload before changing the receipt.
+  store = readStore({ strict: true });
+  run = store.runs.find(item => item.runId === runId);
+  if (!run) return { handled: false, changed: false, runId };
+  const previous = run.mediaRecovery || { previousStatus: run.status, previousError: run.error || null };
+  Object.assign(run, { status: ok ? 'ok' : state === 'stopped' ? 'canceled' : 'error', error, summary,
+    mediaTaskId: taskId, mediaState: state, mediaKind, recoverable: attention,
+    conversationId, conversationKind: conversationId ? 'create' : null,
+    endedAt: mediaTask.updatedAt || new Date().toISOString(),
+    mediaRecovery: { ...previous, fingerprint, at: new Date().toISOString() } });
+  const task = store.tasks.find(item => item.id === run.taskId);
+  const newest = store.runs.filter(item => item.taskId === run.taskId)
+    .sort((left, right) => Date.parse(right.at || right.startedAt || 0) - Date.parse(left.at || left.startedAt || 0))[0];
+  if (task && newest?.runId === runId) { task.lastStatus = run.status; task.lastError = error; }
+  writeStore(store);
+  notifyRenderer();
+  const result = makeResult(conversationId);
+  return { handled: true, changed: true, runId, result };
 }
 
 // 把 chat 结果落进历史会话（kind=chat、来源标记 scheduled）。复用同一任务的会话（每次追加一轮）。
@@ -1777,9 +2020,7 @@ function persistTask(task) {
 }
 function appendRun(run) {
   const store = readStore({ strict: true });
-  store.runs = store.runs || [];
-  store.runs.unshift(run);
-  if (store.runs.length > RUNS_CAP) store.runs.length = RUNS_CAP;
+  upsertRun(store, run);
   writeStore(store);
 }
 function notifyRenderer() {
@@ -1846,7 +2087,7 @@ function markMissedTaskSkipped(store, task, now, scheduledFor) {
     conversationKind: null,
     delivery: null,
   });
-  if (store.runs.length > RUNS_CAP) store.runs.length = RUNS_CAP;
+  trimRuns(store);
 }
 
 function recoverInterruptedWebhookDeliveries(store, now) {
@@ -1925,6 +2166,7 @@ function collectMissedRuns(store, now) {
 function init(injected) {
   deps = injected;
   started = true;
+  lastObservedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   let store;
   try { store = readStore({ strict: true }); }
   catch (e) {
@@ -1932,11 +2174,14 @@ function init(injected) {
     throw new Error(`定时任务库读取失败：${e.message}`);
   }
   const now = Date.now();
+  let ledgerRuns = [];
+  try { ledgerRuns = deps.taskRunHistory?.() || []; } catch (e) { console.warn('[scheduler] 读取运行账本失败: %s', e.message); }
+  const recoveredRuns = recoverInterruptedRuns(store, ledgerRuns, now);
   const recoveredWebhooks = recoverInterruptedWebhookDeliveries(store, now);
   const missedState = collectMissedRuns(store, now);
   const missed = missedState.missed;
 
-  let dirty = recoveredWebhooks.changed || missedState.dirty;
+  let dirty = recoveredRuns.changed || recoveredWebhooks.changed || missedState.dirty;
   for (const task of store.tasks) {
     if (!task.enabled) continue;
     if (task.nextRunAt && Date.parse(task.nextRunAt) > now
@@ -1954,7 +2199,7 @@ function init(injected) {
   queueMissedCatchups(missed, 4000);
 
   reschedule();
-  startStoreWatcher();   // 监听 schedules.json 外部变更（MCP server 直接写库时）
+  startStoreWatcher();   // 兼容导入及旧版 schedules.json 外部变更
 }
 
 // 消费 MCP cron_run 写下的 runNowAt 标记：清掉标记并立即跑一次该任务（手动运行，不影响计划）。
@@ -2022,8 +2267,9 @@ function onResume() {
     return;
   }
   const now = Date.now();
+  const zoneChanged = refreshLocalTimeZone(store);
   const { missed, dirty } = collectMissedRuns(store, now);
-  if (dirty) writeStore(store);
+  if (dirty || zoneChanged) writeStore(store);
   // 先推进 nextRunAt，连续 power resume 事件便不会重复收集同一个计划点。
   reschedule();
   queueMissedCatchups(missed, 0);
@@ -2032,20 +2278,63 @@ function onResume() {
 // ─────────────────────────────────────────
 // CRUD（供 IPC 调用）
 // ─────────────────────────────────────────
+function assertReady() {
+  if (!started || !deps) throw Object.assign(new Error('定时服务尚未启动'), { code: 'SCHEDULER_UNAVAILABLE' });
+}
 function list() {
-  const store = readStore();
+  assertReady();
+  const store = readStore({ strict: true });
   return store.tasks.map((t) => ({ ...t, running: inflight.has(t.id) }));
 }
+// Media discovery is read-only and returns configuration, never a runtime binding.
+// Keep this projection at the MCP boundary as well, even if a caller injects a
+// runtime object instead of ProviderStore's already-public catalog.
+function mediaModelView(model) {
+  const publicValue = (value, depth = 0) => {
+    if (depth > 8) return undefined;
+    if (value === null || ['string', 'boolean'].includes(typeof value)) return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    if (Array.isArray(value)) return value.map(item => publicValue(item, depth + 1)).filter(item => item !== undefined);
+    if (!value || typeof value !== 'object') return undefined;
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key]) => !/key|authorization|token|secret|credential|header|endpoint|baseurl|^auth$|^__proto__$|^prototype$|^constructor$/i.test(key))
+      .map(([key, item]) => [key, publicValue(item, depth + 1)]).filter(([, item]) => item !== undefined));
+  };
+  if (!model || typeof model.routeId !== 'string' || !['image', 'video'].includes(model.modality)) return null;
+  const result = {};
+  for (const key of ['routeId', 'bindingId', 'providerId', 'providerName', 'modelId', 'label', 'modality', 'protocol']) {
+    if (typeof model[key] === 'string') result[key] = model[key];
+  }
+  return { ...result, enabled: model.enabled !== false, available: model.available === true,
+    capabilities: publicValue(model.capabilities) || {} };
+}
+async function listMediaModels(options = {}) {
+  assertReady();
+  if (options.modality !== undefined && !['image', 'video'].includes(options.modality)) {
+    throw Object.assign(new Error('modality 必须是 image 或 video'), { code: 'INVALID_ARGUMENT' });
+  }
+  if (typeof deps.listMediaModels !== 'function') {
+    throw Object.assign(new Error('媒体模型列表尚未就绪'), { code: 'MEDIA_CATALOG_UNAVAILABLE' });
+  }
+  const models = await deps.listMediaModels(options.modality ? { modality: options.modality } : {});
+  if (!Array.isArray(models)) throw Object.assign(new Error('媒体模型列表返回格式无效'), { code: 'MEDIA_CATALOG_UNAVAILABLE' });
+  return models.map(mediaModelView).filter(model => model && (!options.modality || model.modality === options.modality)
+    && (options.includeUnavailable === true || (model.enabled && model.available)));
+}
 function get(id) {
+  assertReady();
   const task = refetch(id);
   return task ? { ...task, running: inflight.has(id) } : null;
 }
 function create(input) {
+  if (!started) return { ok: false, code: 'SCHEDULER_UNAVAILABLE', error: '定时服务尚未启动' };
   let store;
   try { store = readStore({ strict: true }); }
   catch (e) { return { ok: false, code: 'STORE_READ_FAILED', error: '读取定时任务失败，请稍后重试' }; }
   const now = new Date().toISOString();
-  const task = normalizeTask(input);
+  let task;
+  try { task = normalizeTask(input); }
+  catch (error) { return { ok: false, code: 'INVALID_TASK_CONFIGURATION', error: error.message }; }
   const configError = taskConfigurationError(task, { requireFutureSchedule: true });
   if (configError) return { ok: false, code: 'INVALID_TASK_CONFIGURATION', error: configError };
   task.id = crypto.randomUUID();
@@ -2064,13 +2353,16 @@ function create(input) {
   return { ok: true, id: task.id, task };
 }
 function update(id, patch) {
+  if (!started) return { ok: false, code: 'SCHEDULER_UNAVAILABLE', error: '定时服务尚未启动' };
   let store;
   try { store = readStore({ strict: true }); }
   catch (e) { return { ok: false, code: 'STORE_READ_FAILED', error: '读取定时任务失败，请稍后重试' }; }
   const t = store.tasks.find((x) => x.id === id);
   if (!t) return { ok: false, error: '任务不存在' };
   const previousSchedule = normalizeSchedule(t.schedule);
-  const merged = normalizeTask({ ...t, ...patch, schedule: { ...t.schedule, ...(patch.schedule || {}) }, action: { ...t.action, ...(patch.action || {}) }, delivery: { ...t.delivery, ...(patch.delivery || {}) } });
+  let merged;
+  try { merged = normalizeTask({ ...t, ...patch, schedule: { ...t.schedule, ...(patch.schedule || {}) }, action: { ...t.action, ...(patch.action || {}) }, delivery: { ...t.delivery, ...(patch.delivery || {}) } }); }
+  catch (error) { return { ok: false, code: 'INVALID_TASK_CONFIGURATION', error: error.message }; }
   const scheduleChanged = JSON.stringify(previousSchedule) !== JSON.stringify(merged.schedule);
   const enabledChanged = t.enabled !== merged.enabled;
   const configError = taskConfigurationError(merged, {
@@ -2103,14 +2395,21 @@ function update(id, patch) {
   }
   const i = store.tasks.findIndex((x) => x.id === id);
   store.tasks[i] = merged;
+  if (patch.enabled === false || merged.overlapPolicy !== 'queueLatest' || scheduleChanged) {
+    cancelQueuedOverlaps(store, id, '任务设置已变更，取消等待中的补跑');
+    pendingMissedCatchups.delete(id);
+  }
   writeStore(store);
   reschedule();
   return { ok: true, task: merged };
 }
 function remove(id) {
+  if (!started) return { ok: false, code: 'SCHEDULER_UNAVAILABLE', error: '定时服务尚未启动' };
   let store;
   try { store = readStore({ strict: true }); }
   catch (e) { return { ok: false, code: 'STORE_READ_FAILED', error: '读取定时任务失败，请稍后重试' }; }
+  cancelQueuedOverlaps(store, id, '任务已删除，取消补跑');
+  pendingMissedCatchups.delete(id);
   store.tasks = store.tasks.filter((t) => t.id !== id);
   writeStore(store);
   reschedule();
@@ -2127,7 +2426,7 @@ async function runNow(id) {
     const resolveOnce = (result) => {
       if (acknowledged) return;
       acknowledged = true;
-      resolve(result);
+      resolve({ ...result, taskId: id, status: result.status || (result.ok ? 'accepted' : 'failed') });
     };
     fireTask(id, { keepEnabled: true, trigger: 'manual', onStarted: resolveOnce })
       .then(resolveOnce)
@@ -2138,7 +2437,8 @@ async function runNow(id) {
   });
 }
 function runs(id) {
-  const store = readStore();
+  assertReady();
+  const store = readStore({ strict: true });
   const all = store.runs || [];
   return id ? all.filter((r) => r.taskId === id) : all;
 }
@@ -2165,6 +2465,7 @@ function normalizeTask(input) {
     enabled: t.enabled !== false,
     // 默认 true 保持旧版“下次启动补跑最近一次”的用户预期；任务可显式关闭。
     catchUp: t.catchUp !== false,
+    overlapPolicy: t.overlapPolicy === 'queueLatest' ? 'queueLatest' : 'skip',
     builtin: t.builtin || null,   // 内置任务标记（如 'memory-consolidate'），UI 据此定位，普通任务为 null
     schedule: normalizeSchedule(t.schedule),
     action: normalizeActionObj(t.action),
@@ -2185,14 +2486,14 @@ function normalizeSchedule(s) {
     at: s.at || null,
     everyMs: Number.isFinite(s.everyMs) ? s.everyMs : null,
     cron: s.cron || '0 9 * * *',
-    tz: s.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'local',
+    tz: s.tz == null || s.tz === '' ? 'local' : s.tz,
     jitterSec: Number.isFinite(s.jitterSec) ? s.jitterSec : 0,
     exact: !!s.exact,
   };
 }
 function normalizeActionObj(a) {
   a = a && typeof a === 'object' ? a : {};
-  const type = ['chat', 'image', 'command'].includes(a.type) ? a.type : 'chat';
+  const type = ['chat', 'image', 'video', 'command'].includes(a.type) ? a.type : 'chat';
   return {
     type,
     prompt: a.prompt || '',
@@ -2205,10 +2506,30 @@ function normalizeActionObj(a) {
     model: ['haiku', 'sonnet', 'opus'].includes(a.model) ? a.model : 'haiku',
     workingDir: a.workingDir || null,
     imageModel: a.imageModel || null,
+    ...(['image', 'video'].includes(type) ? normalizeMediaActionFields(a) : {}),
     size: a.size || null,
     n: Number.isFinite(a.n) ? a.n : 1,
     command: a.command || null,
   };
+}
+
+function normalizeMediaActionFields(action = {}) {
+  if (action.parameters != null && (typeof action.parameters !== 'object' || Array.isArray(action.parameters))) throw new Error('媒体 parameters 必须是对象');
+  const parameters = {};
+  for (const [key, value] of Object.entries(action.parameters || {})) {
+    if (['__proto__', 'prototype', 'constructor', 'model', 'mediaKind', 'prompt', 'references', 'runId', 'signal'].includes(key)
+      || /key|authorization|token|secret|credential|header/i.test(key)) throw new Error('媒体 parameters 只能包含生成参数');
+    if (!['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))) throw new Error('媒体参数值必须是文本、数字或布尔值');
+    parameters[key] = value;
+  }
+  if (action.references != null && !Array.isArray(action.references)) throw new Error('媒体 references 必须是数组');
+  const references = (action.references || []).map(item => {
+    if (typeof item === 'string' && item.trim()) return item.trim();
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.url !== 'string' || !item.url.trim()
+      || Object.keys(item).some(key => !['url', 'role', 'mime'].includes(key))) throw new Error('参考素材需要 url，可选 role 和 mime');
+    return { url: item.url.trim(), ...(typeof item.role === 'string' ? { role: item.role } : {}), ...(typeof item.mime === 'string' ? { mime: item.mime } : {}) };
+  });
+  return { mediaModel: typeof action.mediaModel === 'string' ? action.mediaModel.trim() || null : null, parameters, references };
 }
 
 function normalizeSessionRoute(value) {
@@ -2247,7 +2568,7 @@ function scheduleConfigurationError(schedule, options = {}) {
   }
   try {
     const cron = parseCron(s.cron);
-    if (!nextCronAfter(cron, new Date(now))) return 'cron 在未来八年内没有可触发的时间';
+    if (!nextCronAfter(cron, new Date(now), s.tz)) return 'cron 在未来八年内没有可触发的时间';
   } catch (error) {
     return `cron 格式无效：${error.message}`;
   }
@@ -2263,6 +2584,7 @@ function taskConfigurationError(task, options = {}) {
   const webhookProblem = webhookConfigError(task && task.delivery && task.delivery.webhook);
   if (webhookProblem) return webhookProblem;
   const action = task && task.action || {};
+  if (action.type === 'video' && !String(action.mediaModel || action.imageModel || '').trim()) return '视频任务必须选择媒体模型';
   if (action.type === 'chat' && action.mode === 'agent' && !String(action.agentName || '').trim()) {
     return 'Agent 模式必须指定 agentName';
   }
@@ -2271,11 +2593,14 @@ function taskConfigurationError(task, options = {}) {
 
 module.exports = {
   init, shutdown, onResume,
-  list, get, create, update, remove, toggle, runNow, cancelRun, runs, preview,
-  nextTaskHint,
+  list, listMediaModels, get, create, update, remove, toggle, runNow, cancelRun, runs, preview,
+  nextTaskHint, reconcileMediaTask,
   // 暴露给测试 / 复用
+  _fireTask: fireTask,
   _parseCron: parseCron, _computeNextRun: computeNextRun, _terminateCommandTree: terminateCommandTree,
   _normalizeTask: normalizeTask,
+  _normalizeMediaActionFields: normalizeMediaActionFields,
+  _mediaModelView: mediaModelView,
   _scheduleConfigurationError: scheduleConfigurationError,
   _isPublicNetworkAddress: isPublicNetworkAddress,
   _resolveWebhookTarget: resolveWebhookTarget,

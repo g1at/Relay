@@ -2,27 +2,45 @@
 
 const fs = require('fs');
 const path = require('path');
-const { memoryEligibility } = require("./memory-schema");
+const { memoryHealth, memoryHealthSummary } = require('./memory-health');
 
 function registerMemoryIpc({
   ipcMain, shell, relayMemoryStore, MEMORY_DIR, MEMORY_INDEX,
   refreshSkillUsageInBackground, readMemoryUsage, memoryReadStats, flushMemoryUsage, rebuildMemoryIndex,
+  getProjects, getLearningStatus, invalidateMemory,
 }) {
 
   function memoryIpcError(error, extra = {}) {
     return { ok: false, message: error.message, error: error.message, code: error.code || null, ...extra };
   }
 
-  function memoryListResult(options = {}) {
+  function projectCatalog() {
+    if (typeof getProjects !== 'function') return { projectCheck: { available: false, reason: null, skipped: true } };
+    try {
+      const projects = getProjects();
+      if (!Array.isArray(projects) || projects.some((project) => !project || typeof project.id !== 'string' || !project.id.trim())) {
+        throw new TypeError('Project catalog unavailable');
+      }
+      return { knownProjectIds: new Set(projects.map((project) => project.id)), projectCheck: { available: true, reason: null } };
+    } catch (_) {
+      return { projectCheck: { available: false, reason: '项目列表暂不可用，尚未检查项目归属；请稍后重试。' } };
+    }
+  }
+
+  function memoryListResult(options = {}, { refreshUsage = true, readOnly = false } = {}) {
     try {
       options = options && typeof options === 'object' ? options : {};
-      refreshSkillUsageInBackground().catch(() => {});
+      if (refreshUsage) refreshSkillUsageInBackground().catch(() => {});
       const archived = options.archived === true;
       const context = options.context || { projectId: options.projectId };
+      const checkedAt = new Date().toISOString();
+      const { knownProjectIds, projectCheck } = projectCatalog();
       const sidecar = readMemoryUsage();
-      const entries = archived ? relayMemoryStore.archived() : relayMemoryStore.list();
+      const readOptions = readOnly ? { readOnly: true } : {};
+      const entries = archived ? relayMemoryStore.archived(readOptions) : relayMemoryStore.list({}, readOptions);
       const items = entries.map((entry) => {
         const { file, meta } = entry;
+        const health = memoryHealth(entry, { context, knownProjectIds, archived, now: checkedAt });
         const usage = memoryReadStats(file) || {};
         return {
           file,
@@ -34,10 +52,13 @@ function registerMemoryIpc({
           status: archived ? 'archived' : meta.status,
           confidence: meta.confidence,
           sourceRef: meta.sourceRef,
+          sources: meta.sources || [],
+          replaces: meta.replaces || [],
           expiresAt: meta.expiresAt,
           supersedes: meta.supersedes,
           supersedesRevision: meta.supersedesRevision,
-          eligible: !archived && memoryEligibility(meta, context).eligible,
+          eligible: health.state === 'active',
+          health,
           schemaErrors: meta.schemaErrors,
           revision: entry.revision || null,
           mtime: entry.mtime || Date.parse(entry.createdAt) || 0,
@@ -47,14 +68,20 @@ function registerMemoryIpc({
           readCount: Math.max(0, Number(usage.readCount) || 0),
           lastReadAt: usage.lastReadAt || null,
           archived,
-          ...(archived ? { versionId: entry.versionId, archivedAt: entry.createdAt } : {}),
+          ...(archived ? { archiveId: entry.archiveId, archivedAt: entry.createdAt } : {}),
         };
       }).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.mtime - a.mtime || a.file.localeCompare(b.file));
-      return { ok: true, items, dir: MEMORY_DIR, hasIndex: fs.existsSync(MEMORY_INDEX), archived };
+      return { ok: true, items, summary: memoryHealthSummary(items), checkedAt, projectCheck,
+        dir: MEMORY_DIR, hasIndex: fs.existsSync(MEMORY_INDEX), archived };
     } catch (error) { return memoryIpcError(error, { items: [] }); }
   }
 
   ipcMain.handle('memory:list', (_event, options) => memoryListResult(options));
+  ipcMain.handle('memory:check', (_event, options) => memoryListResult(options, { refreshUsage: false, readOnly: true }));
+  ipcMain.handle('memory:learningStatus', () => {
+    try { return { ok: true, ...(typeof getLearningStatus === 'function' ? getLearningStatus() : {}) }; }
+    catch (error) { return memoryIpcError(error); }
+  });
 
   ipcMain.handle('memory:archived', () => {
     try { return { ok: true, items: relayMemoryStore.archived() }; }
@@ -78,7 +105,8 @@ function registerMemoryIpc({
     try {
       const result = relayMemoryStore.setStatus(file, status, { actor: 'user', expectedRevision });
       rebuildMemoryIndex();
-      return { ok: true, file: result.file, status: result.meta.status, revision: result.revision, versionId: result.versionId };
+      return { ok: true, file: result.file, status: result.meta.status, revision: result.revision,
+        undoId: result.undoId, undoExpiresAt: result.undoExpiresAt };
     } catch (error) { return memoryIpcError(error); }
   });
 
@@ -90,7 +118,9 @@ function registerMemoryIpc({
         return { ok: true, file: 'MEMORY.md', content: indexLines.length ? indexLines.join('\n') + '\n' : '', revision: null, generated: true };
       }
       const entry = relayMemoryStore.read(file, { actor: 'user' });
-      return { ok: true, ...entry, content: entry.content.replace(/^\uFEFF/, '') };
+      const { knownProjectIds, projectCheck } = projectCatalog();
+      return { ok: true, ...entry, content: entry.content.replace(/^\uFEFF/, ''),
+        health: memoryHealth(entry, { knownProjectIds }), projectCheck };
     } catch (error) { return memoryIpcError(error); }
   });
 
@@ -98,7 +128,7 @@ function registerMemoryIpc({
     try {
       const result = relayMemoryStore.write(file, content, { actor: 'user', expectedRevision });
       rebuildMemoryIndex();
-      return { ok: true, file: result.file, revision: result.revision, versionId: result.versionId };
+      return { ok: true, file: result.file, revision: result.revision };
     } catch (error) { return memoryIpcError(error); }
   });
 
@@ -112,16 +142,37 @@ function registerMemoryIpc({
     } catch (error) { return memoryIpcError(error); }
   });
 
-  ipcMain.handle('memory:history', (_event, file) => {
-    try { return { ok: true, items: relayMemoryStore.history(file, { actor: 'user' }) }; }
-    catch (error) { return memoryIpcError(error, { items: [] }); }
+  ipcMain.handle('memory:purge', (_event, request) => {
+    const { file, expectedArchiveId } = request || {};
+    let result;
+    try { result = relayMemoryStore.purgeArchived(file, { actor: 'user', expectedArchiveId }); }
+    catch (error) { return memoryIpcError(error); }
+    let warning;
+    try {
+      invalidateMemory?.(result.file);
+      const usage = readMemoryUsage();
+      for (const key of Object.keys(usage)) {
+        if (key === file || process.platform === 'win32' && key.toLowerCase() === file.toLowerCase()) delete usage[key];
+      }
+      flushMemoryUsage({ strict: true });
+      rebuildMemoryIndex({}, { strict: true });
+    } catch (_) { warning = '记忆已永久删除，统计或索引刷新失败，请重新打开记忆页。'; }
+    return { ok: true, ...result, ...(warning ? { warning } : {}) };
   });
 
-  ipcMain.handle('memory:restore', (_event, { file, versionId, expectedRevision } = {}) => {
+  ipcMain.handle('memory:undo', (_event, { file, undoId, expectedRevision } = {}) => {
     try {
-      const result = relayMemoryStore.restore(file, versionId, { actor: 'user', expectedRevision });
+      const result = relayMemoryStore.undo(file, undoId, { actor: 'user', expectedRevision });
       rebuildMemoryIndex();
-      return { ok: true, file: result.file, revision: result.revision, versionId: result.versionId };
+      return { ok: true, file: result.file, revision: result.revision };
+    } catch (error) { return memoryIpcError(error); }
+  });
+
+  ipcMain.handle('memory:restoreArchived', (_event, { file, archiveId } = {}) => {
+    try {
+      const result = relayMemoryStore.restoreArchived(file, archiveId, { actor: 'user', expectedRevision: null });
+      rebuildMemoryIndex();
+      return { ok: true, file: result.file, revision: result.revision };
     } catch (error) { return memoryIpcError(error); }
   });
 

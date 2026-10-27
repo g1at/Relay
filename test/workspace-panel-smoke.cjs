@@ -10,16 +10,16 @@ const output = path.join(root, '.codex-tmp/workspace-panel-smoke');
 fs.mkdirSync(output, { recursive: true });
 app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');
-let win, step = 'start';
+let win, step = 'start', diagnostics = null;
 const checks = {}, errors = [], terminalRequests = [];
-const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ step, checks, errors }, null, 2));
+const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify({ step, checks, errors, diagnostics }, null, 2));
 const deadline = setTimeout(() => { errors.push('timeout at ' + step); save(); app.exit(1); }, 90000);
 const evaluate = code => win.webContents.executeJavaScript(code);
 const act = code => evaluate(`(() => { ${code}\n })()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function settle() { await delay(360); await evaluate('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))'); }
 async function waitFor(code) { await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+7000;const tick=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(tick,25);};tick();})`); }
-async function check(name, code) { step = name; checks[name] = !!await evaluate(code); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
+async function check(name, code) { step = name; checks[name] = !!await evaluate(code); if (!checks[name]) diagnostics = await evaluate("({resizes:workspaceReview.resizes,fonts:document.fonts.status,terminalSizes:workspaceReview.terminals?.map(t=>({cols:t.cols,rows:t.rows})),surface:[...document.querySelectorAll('.workspace-terminal-surface')].map(n=>({width:n.clientWidth,height:n.clientHeight}))})"); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
 async function capture(name) { await settle(); fs.writeFileSync(path.join(output, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => {
@@ -39,7 +39,7 @@ app.whenReady().then(async () => {
       open:async value=>{state.opens.push(value);return{ok:true};},
       terminalStart:async({context,cols,rows})=>{if(state.failStart)return{ok:false,error:'合成终端启动失败'};const id='terminal-'+(state.starts.length+1);state.starts.push({context,id,cols,rows});state.events({id,type:'data',data:'\\x1b[32mRelay workspace terminal\\x1b[0m\\r\\nPS C:\\\\Synthetic> '});if(state.holdStart){state.holdStart=false;await new Promise(resolve=>state.releaseStart=resolve);}return{ok:true,id,root:context.workingDir||'C:\\\\Synthetic\\\\RelayProjects\\\\'+context.conversationId};},
       terminalInput:async value=>{state.inputs.push(value);state.events({id:value.id,type:'data',data:value.data});return{ok:true};},
-      terminalResize:async value=>{state.resizes.push(value);if(state.failResize){state.failResize=false;return{ok:false,error:'合成尺寸暂时失败'};}return{ok:true};},
+      terminalResize:async value=>{state.resizes.push({...value,surface:[...document.querySelectorAll('.workspace-terminal-surface')].map(n=>({width:n.clientWidth,height:n.clientHeight})),fonts:document.fonts.status});if(state.failResize){state.failResize=false;return{ok:false,error:'合成尺寸暂时失败'};}return{ok:true};},
       terminalClose:async value=>{state.closes.push(value);state.events({id:value.id,type:'exit',exitCode:0});return{ok:true};},
       onTerminalEvent:fn=>{state.events=fn;return()=>{};}
     };
@@ -84,10 +84,15 @@ app.whenReady().then(async () => {
   await waitFor('!!workspaceReview.holdRead');
   await act("startNewConv();workspaceReview.holdRead({ok:true,content:'STALE PREVIEW',path:'pending.md'});"); await settle();
   await check('SwitchingConversationDropsStaleFileResponse', '!$("workspacePreviewBody").textContent.includes("STALE PREVIEW")&&$("workspacePreview").hidden&&relayConversationWorkspace().conversationId!==workspaceReview.draftContext.conversationId');
-  await act("workspaceReview.terminals=[];Object.defineProperty(window,'Terminal',{configurable:true,get:()=>undefined,set(OriginalTerminal){Object.defineProperty(window,'Terminal',{configurable:true,writable:true,value:class extends OriginalTerminal{constructor(...args){super(...args);workspaceReview.terminals.push(this);}}});}});workspaceReview.draftContext=relayConversationWorkspace();workspaceReview.failResize=true;relayWorkspacePanel.open('terminal',{startTerminal:true});");
+  await act("workspaceReview.terminals=[];Object.defineProperty(window,'Terminal',{configurable:true,get:()=>undefined,set(OriginalTerminal){Object.defineProperty(window,'Terminal',{configurable:true,writable:true,value:class extends OriginalTerminal{constructor(...args){super(...args);workspaceReview.terminals.push(this);}}});}});workspaceReview.draftContext=relayConversationWorkspace();relayWorkspacePanel.open('terminal',{startTerminal:true});");
   await waitFor("document.querySelectorAll('.workspace-terminal-surface .xterm').length===1&&workspaceReview.resizes.length>0"); await settle();
-  await waitFor('workspaceReview.resizes.length>=2');
-  await check('RejectedTerminalResizeRetriesSameDimensions', 'workspaceReview.resizes[0].cols===workspaceReview.resizes[1].cols&&workspaceReview.resizes[0].rows===workspaceReview.resizes[1].rows');
+  // Opening the panel animates its width; retries must follow those real changes.
+  // Exercise a rejected resize separately after that geometry has settled.
+  await evaluate(`new Promise((resolve,reject)=>{let previous='',stable=0;const end=Date.now()+7000;function frame(){const n=document.querySelector('.workspace-terminal-surface'),r=n.getBoundingClientRect(),size=r.width+':'+r.height;stable=size===previous?stable+1:0;previous=size;const ancestors=new Set();for(let x=n;x;x=x.parentElement)ancestors.add(x);if(stable>=4&&!document.getAnimations().some(a=>a.playState==='running'&&ancestors.has(a.effect?.target)))return resolve();if(Date.now()>end)return reject(Error('terminal layout did not settle'));requestAnimationFrame(frame);}frame();})`);
+  await act('workspaceReview.resizeRetryStart=workspaceReview.resizes.length;workspaceReview.failResize=true;workspaceReview.terminals[0].options.fontSize=13;window.dispatchEvent(new Event("resize"));');
+  await waitFor('workspaceReview.resizes.length>=workspaceReview.resizeRetryStart+2');
+  await check('RejectedTerminalResizeRetriesSameDimensions', '(()=>{const a=workspaceReview.resizes[workspaceReview.resizeRetryStart],b=workspaceReview.resizes[workspaceReview.resizeRetryStart+1];return a.id===b.id&&a.cols===b.cols&&a.rows===b.rows})()');
+  await act('workspaceReview.terminals[0].options.fontSize=12;window.dispatchEvent(new Event("resize"));'); await settle();
   await check('TerminalDraftDoesNotCreateHistoryOrChangeChatTitle', '!currentConv&&relayConversationWorkspace().conversationId===workspaceReview.draftContext.conversationId&&!uiFixture.calls.includes("history.save")&&$("chatTitle").textContent==="新对话"');
   await check('RealXtermMountedAndBackendResized', 'workspaceReview.starts.length===1&&workspaceReview.resizes.at(-1).cols>=10&&workspaceReview.resizes.at(-1).rows>=5');
   await check('TerminalLibrariesLoadOnceOnFirstOpen', `typeof Terminal==="function"&&typeof FitAddon.FitAddon==="function"&&${terminalRequests.length}===2`);
@@ -265,6 +270,9 @@ app.whenReady().then(async () => {
   // hides and reopens an empty panel. No chat is created to host these tools.
   await act(`
     startNewConv();
+    // A new conversation starts with its panel hidden; explicitly reveal the
+    // existing tools before exercising user closes and the empty launcher.
+    relayWorkspacePanel.open(null,{refresh:false});
     workspaceReview.launcherContext=relayConversationWorkspace();
     workspaceReview.launcherSaves=uiFixture.calls.filter(call=>call==='history.save').length;
     workspaceReview.launcherRuns=uiFixture.calls.filter(call=>call==='runClaude').length;

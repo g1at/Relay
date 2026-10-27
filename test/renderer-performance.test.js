@@ -54,9 +54,10 @@ test('switching conversation releases old transcript views without deleting live
   const state = { items: [{ text: 'background work retained' }] };
   const turn = { user: 'original request', assistant: 'retained answer', activityEl: {} };
   const run = { turn, activityState: state, activityEl: {}, outputBubble: {}, errorEl: {}, supplementTimeline: { segments: new Map([['start', {}]]) } };
-  let clears = 0, timerCleared = false;
+  let clears = 0, timerCleared = false, highlightsCleared = 0;
   const host = { replaceChildren() { clears++; } };
   const context = vm.createContext({
+    clearHistorySearchHighlight() { highlightsCleared++; },
     window: {}, messagesEl: host, runs: new Map([['active', run]]),
     streamRenderTimer: 12, streamRenderBubble: {}, currentAssistantBubble: {},
     clearTimeout(id) { timerCleared = id === 12; },
@@ -71,7 +72,7 @@ test('switching conversation releases old transcript views without deleting live
   vm.runInContext(between(source, 'function clearConversationMessages()', '// 渲染流式中的气泡:'), context);
   context.clearConversationMessages();
   assert.equal(groups.has(host), false, 'permanent transcript host no longer retains detached groups');
-  assert.equal(clears, 1); assert.equal(timerCleared, true);
+  assert.equal(clears, 1); assert.equal(timerCleared, true); assert.equal(highlightsCleared, 1);
   assert.equal(context.runs.get('active'), run);
   assert.equal(run.activityState, state);
   assert.equal(run.turn, turn); assert.equal(turn.assistant, 'retained answer');

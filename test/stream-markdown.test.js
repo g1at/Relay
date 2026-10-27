@@ -201,3 +201,24 @@ test('a rejected fragment and rejected fallback expose only escaped original tex
   assert.equal(f.body.innerHTML, '<pre>&lt;img src=x onerror=alert(1)&gt;</pre>');
   assert.doesNotMatch(f.body.innerHTML, /<img/);
 });
+
+test('replacement state capture excludes frozen code and runs before changed nodes detach', () => {
+  const f = fixture(), source = '```js\nconst value = 1;\n```\n\ntail';
+  f.renderer.render(f.body, source);
+  const original = [...f.body.childNodes], calls = [];
+  f.renderer.render(f.body, source + ' grows', { beforeReplace(nodes) {
+    assert.ok(nodes.every(node => node.parentNode === f.body)); calls.push(nodes);
+  } });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].every(node => /tail/.test(node.markup)));
+  assert.ok(original.filter(node => !/tail/.test(node.markup)).every(node => node.parentNode === f.body));
+  assert.equal(f.body.innerHTML, f.html(source + ' grows'));
+});
+test('full pipeline fallback captures prior state while every old node is still attached', () => {
+  const f = fixture(); f.renderer.render(f.body, 'old'); const before = [...f.body.childNodes];
+  f.marked.use({ hooks: { postprocess(html) { return html; } } });
+  let captured;
+  f.renderer.render(f.body, 'new', { beforeReplace(nodes) { captured = nodes; assert.ok(nodes.every(node => node.parentNode === f.body)); } });
+  assert.deepEqual(captured, before); assert.ok(before.every(node => !node.parentNode));
+  assert.equal(f.body.innerHTML, f.html('new'));
+});

@@ -12,12 +12,18 @@ app.commandLine.appendSwitch('disable-background-networking');
 app.on('window-all-closed', () => {});
 const artifactDir = path.join(__dirname, '..', '.codex-tmp', 'browser-automation-smoke');
 const startedAt = new Date().toISOString(), checks = [];
+let step = 'initialize';
 fs.mkdirSync(artifactDir, { recursive: true });
 const save = value => fs.writeFileSync(path.join(artifactDir, 'result.json'), JSON.stringify(value, null, 2));
 save({ ok: false, state: 'running', startedAt });
-const check = (name, value) => { assert.ok(value, name); checks.push(name); console.log('[pass]', name); };
+const check = (name, value) => { assert.ok(value, name); checks.push(name); step = name; save({ ok: false, state: 'running', startedAt, step, checks }); console.log('[pass]', name); };
+function within(promise, label, timeoutMs = 10000) {
+  step = label; save({ ok: false, state: 'running', startedAt, step, checks });
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(label + ' timed out')), timeoutMs); })]).finally(() => clearTimeout(timer));
+}
 let owner, view, adapter, server;
-const timeout = setTimeout(() => { console.error('Browser automation smoke timed out'); save({ ok: false, state: 'timeout', startedAt, checks }); app.exit(1); }, 60000);
+const timeout = setTimeout(() => { console.error('Browser automation smoke timed out'); save({ ok: false, state: 'timeout', startedAt, step, checks }); app.exit(1); }, 60000);
 
 async function run() {
   const uploads = [];
@@ -67,15 +73,15 @@ async function run() {
   const isolatedSession = session.fromPartition('relay-browser-automation-fixture-' + process.pid);
   isolatedSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith(base + '/') }));
   owner = new BrowserWindow({ width: 1100, height: 850, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
-  await owner.loadURL('data:text/html,<title>Automation fixture owner</title>');
+  await within(owner.loadURL('data:text/html,<title>Automation fixture owner</title>'), 'owner document load');
   view = new WebContentsView({ webPreferences: { session: isolatedSession, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   owner.contentView.addChildView(view); view.setBounds({ x: 0, y: 0, width: 1080, height: 790 });
-  owner.show(); await view.webContents.loadURL(base + '/');
-  await view.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  owner.show(); await within(view.webContents.loadURL(base + '/'), 'automation page load');
+  await within(view.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))'), 'first compositor frame');
   await view.webContents.executeJavaScript('console.warn("pre-adapter-log-must-not-replay")');
   await new Promise(resolve => setTimeout(resolve, 10));
   adapter = createBrowserAutomationAdapter({ webContents: view.webContents });
-  let observation = await adapter.observe();
+  let observation = await within(adapter.observe(), 'initial semantic observation');
   const find = name => { const element = observation.elements.find(item => item.name === name); assert.ok(element, 'Missing observed element: ' + name); return element.ref; };
   check('CDP observes semantic elements in the real embedded Chromium view', observation.title === 'Browser automation fixture' && !!find('Name'));
   check('password values are absent from observation', !JSON.stringify(observation).includes('fixture-secret-123'));

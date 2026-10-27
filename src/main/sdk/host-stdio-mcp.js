@@ -368,6 +368,14 @@ function bridgeMcpServers(servers, options = {}) {
   }));
 }
 
+function getMcpDiscoveryTools(servers) {
+  return Object.entries(servers || {}).flatMap(([name, config]) => {
+    const instance = hostInstance(config);
+    if (!isHostServer(instance) || !instance.toolCatalog?.discoveryName) return [];
+    const prefix = `mcp__${name.replace(/[^a-zA-Z0-9_-]/g, '_')}__`;
+    return [{ server: name, name: prefix + instance.toolCatalog.discoveryName }];
+  });
+}
 function createRuntimeMcpMapper(initialServers, map) {
   let applied = initialServers || {};
   const owned = new Set(Object.values(applied).map(hostResource).filter(Boolean));
@@ -412,6 +420,7 @@ function createRuntimeMcpMapper(initialServers, map) {
   // A connected SDK transport is only the lightweight front end until this
   // Query actually needs the upstream. Never overwrite policy/transport errors
   // or a same-named server from another configuration source.
+  mapper.discoveryTools = () => closed ? [] : getMcpDiscoveryTools(applied);
   mapper.setStatusReader = reader => { statusReader = reader; bindReader(applied); };
   mapper.decorateStatus = statuses => Array.isArray(statuses) ? statuses.map(item => {
     const config = applied[item?.name], instance = hostInstance(config);
@@ -456,4 +465,4 @@ function createRuntimeMcpMapper(initialServers, map) {
   return mapper;
 }
 
-module.exports = { get HostStdioMcpServer() { return getHostServerClass(); }, isHostStdioMcpServer: isHostServer, bridgeMcpServers, createRuntimeMcpMapper };
+module.exports = { get HostStdioMcpServer() { return getHostServerClass(); }, isHostStdioMcpServer: isHostServer, bridgeMcpServers, createRuntimeMcpMapper, getMcpDiscoveryTools };

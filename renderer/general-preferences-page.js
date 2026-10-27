@@ -8,13 +8,13 @@
     return parallelPresets.find(limit => limit >= value) || 9;
   }
   const fields = [
-    ['workspaceRoot', '无项目任务文件夹', '新建的非项目对话按会话分类保存；已有文件保持原位。', 'folder'],
-    ['scratchRoot', '会话临时文件夹', '临时脚本和中间文件，随会话删除。更改位置后自动迁移，运行中的会话结束后迁移。', 'folder'],
-    ['fileOpenTarget', '默认文件打开位置', '选择打开本地文件和文件夹的应用。', 'file'],
-    ['agentEnvironment', '智能体环境', '选择新任务的运行环境；正在执行的任务保持当前环境。', 'environment'],
-    ['terminalShell', '集成终端 Shell', '新建终端时使用的 Shell，已有终端保持不变。', 'terminal'],
-    ['followUpMode', '跟进处理方式', '任务运行时加入队列，或调整当前方向。Ctrl+Enter 对单条消息使用另一种方式。', 'followup'],
-    ['maxParallelTasks', '并行对话数', '超出数量的任务自动排队。保存后立即生效，正在运行的任务会继续完成。', 'parallel'],
+    ['workspaceRoot', '无项目任务文件夹', '按会话保存新文件，已有文件不迁移。', 'folder'],
+    ['scratchRoot', '会话临时文件夹', '更改位置后迁移，运行中会话结束再迁移。', 'folder'],
+    ['fileOpenTarget', '默认文件打开位置', '', 'file'],
+    ['agentEnvironment', '智能体环境', '仅影响新任务。', 'environment'],
+    ['terminalShell', '集成终端 Shell', '仅影响新终端。', 'terminal'],
+    ['followUpMode', '跟进处理方式', 'Ctrl+Enter 临时切换处理方式。', 'followup'],
+    ['maxParallelTasks', '并行对话数', '超出后排队，运行中任务不受影响。', 'parallel'],
   ];
   const paths = {
     folder: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/>',
@@ -55,7 +55,8 @@
     for (const [key, label, description, icon] of fields) {
       const row = node('div', 'set-row rgp-row'); row.dataset.generalRow = key;
       const symbol = node('div', 'set-icon'); symbol.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[icon]}</svg>`;
-      const text = node('div', 'rgp-label'); text.append(node('label', '', label), node('p', '', description));
+      const text = node('div', 'rgp-label'); text.append(node('label', '', label));
+      if (description) text.title = description;
       if (key === 'scratchRoot') {
         scratchMigrationStatus = node('p', 'rgp-migration-status'); scratchMigrationStatus.dataset.scratchMigrationStatus = '';
         scratchMigrationStatus.setAttribute('role', 'status'); scratchMigrationStatus.setAttribute('aria-live', 'polite');

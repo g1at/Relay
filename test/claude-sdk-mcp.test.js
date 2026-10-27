@@ -637,6 +637,67 @@ test('one-shot and live runtime preparation map file hook locations before a WSL
     if (session) await session.kill();
   }
 });
+
+test('resumed Query gets current factory-host discovery guidance while preserving file hooks and prompt snapshot', async t => {
+  const { bridgeMcpServers, getMcpDiscoveryTools } = require('../src/main/sdk/host-stdio-mcp');
+  let launches = 0;
+  const host = bridgeMcpServers({ 'feishu-mcp-pro': { command: 'factory-fixture-never-executed' } }, {
+    deferConnect: true, createTransport() { launches++; throw Error('Guidance must not execute MCP.'); },
+  });
+  const h = harness(), cwd = path.resolve('Synthetic Resumed Project');
+  const session = h.sdk.createLiveSession({ sessionId: 'synthetic-preserved-history', cwd,
+    scratchDir: path.join(cwd, 'scratch'), outputDir: path.join(cwd, 'outputs'),
+    appendSystemPrompt: 'Historical system prompt stays snapshotted.', mcpServersFactory: () => host,
+    onMessage() {}, onExit() {} });
+  t.after(async () => { await session.kill(); await host['feishu-mcp-pro'].instance.close(); });
+  await session.whenReady();
+  assert.equal(h.calls.options.resume, 'synthetic-preserved-history');
+  assert.equal(h.calls.options.systemPrompt.snapshot, true);
+  assert.match(h.calls.options.systemPrompt.append, /Historical system prompt stays snapshotted/);
+  const entries = getMcpDiscoveryTools(host), contexts = [];
+  for (const group of h.calls.options.hooks.UserPromptSubmit) for (const hook of group.hooks) {
+    const result = await hook({ hook_event_name: 'UserPromptSubmit', source: 'sdk', prompt: 'Continue old history.' });
+    if (result.hookSpecificOutput?.additionalContext) contexts.push(result.hookSpecificOutput.additionalContext);
+  }
+  assert.ok(contexts.some(text => text.includes(JSON.stringify(path.join(cwd, 'outputs')))), 'existing file hook remains active');
+  assert.ok(contexts.some(text => text.includes(entries[0].name)), 'current entry is supplied outside the persistent prompt snapshot');
+  assert.ok(contexts.some(text => text.includes('No such tool available')), 'unknown historical names receive a bounded recovery instruction');
+  assert.equal(launches, 0);
+  assert.equal(host['feishu-mcp-pro'].instance.childTransport, null);
+  assert.equal(host['feishu-mcp-pro'].instance.connectionState(), 'deferred');
+});
+
+test('live discovery hook handles an empty initial registry and reads later additions, renames and removals', async t => {
+  const { createAgentEnvironment } = require('../src/main/sdk/agent-environment');
+  const { getMcpDiscoveryTools } = require('../src/main/sdk/host-stdio-mcp');
+  const h = harness();
+  h.sdk.configureRuntimeEnvironment(createAgentEnvironment({ getEnvironment: () => 'native', loopbackMcp: false }));
+  const session = h.sdk.createLiveSession({ mcpServers: {}, onMessage() {}, onExit() {} });
+  t.after(() => session.kill());
+  await session.whenReady();
+  const contexts = async () => {
+    const texts = [];
+    for (const group of h.calls.options.hooks.UserPromptSubmit || []) for (const hook of group.hooks) {
+      const output = await hook({ hook_event_name: 'UserPromptSubmit', source: 'sdk', prompt: 'Use the current MCP.' });
+      if (output.hookSpecificOutput?.additionalContext) texts.push(output.hookSpecificOutput.additionalContext);
+    }
+    return texts.join('\n');
+  };
+  assert.equal(await contexts(), '');
+  await session.setMcpServers({ docs: { command: 'late-fixture-never-executed' } });
+  const first = h.calls.sync.at(-1), original = getMcpDiscoveryTools(first)[0].name;
+  assert.ok((await contexts()).includes(original));
+  assert.equal(first.docs.instance.childTransport, null);
+  await session.setMcpServers({ renamed: { command: 'renamed-fixture-never-executed' } });
+  const next = h.calls.sync.at(-1), current = getMcpDiscoveryTools(next)[0].name;
+  const text = await contexts();
+  assert.ok(text.includes(current));
+  assert.equal(text.includes(original), false);
+  assert.equal(next.renamed.instance.childTransport, null);
+  await session.setMcpServers({});
+  assert.equal(await contexts(), '');
+});
+
 test('explicit managed runtime paths replace case variants inherited from the host only when configured', () => {
   const sdk = require('../src/main/sdk/claude-sdk');
   const names = ['CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_DEBUG_LOGS_DIR', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'RELAY_SCRATCH_DIR', 'RELAY_OUTPUT_DIR'];

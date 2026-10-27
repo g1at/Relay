@@ -62,12 +62,12 @@
       if(!menu||!anchor)return;
       const variant=menu.dataset.variant,full=variant==='composer-add';
       const rect=(full?inputCard:anchor).getBoundingClientRect(),gap=full?8:10;
-      const width=full?rect.width:Math.min(variant==='project-actions'?220:variant==='project-picker'?280:320,innerWidth-24);
+      const width=full?rect.width:Math.min(variant==='project-actions'?220:variant==='project-picker'?240:320,innerWidth-24);
       const availableAbove=Math.max(0,rect.top-gap-42),availableBelow=Math.max(0,innerHeight-rect.bottom-gap-12);
       menu.dataset.compact=String(full&&menu.dataset.page==='projects'&&availableAbove<240);
-      const above=full||availableAbove>=Math.min(variant==='project-picker'?288:230,availableBelow);
+      const above=full||availableAbove>=Math.min(variant==='project-picker'?268:230,availableBelow);
       menu.style.width=width+'px';
-      menu.style.maxHeight=Math.max(0,Math.min(full?440:variant==='project-picker'?288:innerHeight-54,above?availableAbove:availableBelow))+'px';
+      menu.style.maxHeight=Math.max(0,Math.min(full?440:variant==='project-picker'?268:innerHeight-54,above?availableAbove:availableBelow))+'px';
       if(menu.dataset.variant==='project-actions')measureProjectName(menu.querySelector('.composer-menu-heading'));
       menu.querySelectorAll('.project-picker-list .composer-menu-label>span').forEach(measureProjectName);
       const height=menu.offsetHeight;

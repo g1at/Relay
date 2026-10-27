@@ -16,6 +16,16 @@ const IMAGE_HINT = '\n\n---\n[图片处理须知] 区分两种情况:'
   + '(2) 用户在对话里上传的图片:已随消息附上的图片请直接查看;仅提供路径时用 Read 工具读取后再回答;'
   + '若所用模型不支持图片输入而读取失败,如实告知用户即可,不要无故拒绝查看。';
 const FEISHU_HINT = '\n\n---\n[系统提示] 上面包含飞书(Feishu/Lark)文档链接。请务必使用 feishu-mcp-pro '
+  + '提供的 MCP 工具来读取和操作。先检查本轮当前工具列表：所需业务工具已列出时，按其原始参数调用；'
+  + '若只看到名称以 relay_search_tools 开头的飞书发现入口，先通过该入口用 query 或 names 搜索并激活所需工具，'
+  + '再调用返回的原始工具名。工具按需加载，看不到业务工具不代表服务离线。\n'
+  + '只使用当前列表中的发现入口，不要从历史复制或猜测带随机后缀的工具名。若返回 No such tool available，'
+  + '重新检查当前工具列表并通过当前入口重新发现，最多重试发现一次；入口缺失或仍失败时，报告实际错误，'
+  + '提示用户在 MCP 设置中重连服务或重建会话，不要反复猜名调用，也不要自动重放可能已经生效的写入。'
+  + '不要改用 WebFetch、WebSearch 或命令行抓取需要登录的飞书网页，也不要查找凭据或另行启动 MCP 服务来绕过工具发现。';
+// Native transcripts can still contain the previous host envelope. Match its
+// complete suffix so recovery preserves the original input without old hints.
+const LEGACY_FEISHU_HINT = '\n\n---\n[系统提示] 上面包含飞书(Feishu/Lark)文档链接。请务必使用 feishu-mcp-pro '
   + '提供的 MCP 工具来读取和操作(如 wiki_get_node / doc_fetch / doc_read / doc_create / doc_write / '
   + 'doc_update / bitable_ops / sheet_ops 等)。若这些工具此刻尚未就绪,请稍等片刻后重试调用,'
   + '不要改用 WebFetch、WebSearch 或命令行(curl/Invoke-WebRequest)去抓取网页 —— 飞书文档需要登录鉴权,'
@@ -71,7 +81,8 @@ function extractNativeUserInput({ conversation, run, rawMessage, historyPrefix }
       return fail('RECOVERY_HOST_BOUNDARY', '无法确认原生消息中宿主提示的边界。');
     }
     user = user.slice(0, at);
-    if (user.endsWith(FEISHU_HINT)) user = user.slice(0, -FEISHU_HINT.length);
+    const feishuHint = [FEISHU_HINT, LEGACY_FEISHU_HINT].find(hint => user.endsWith(hint));
+    if (feishuHint) user = user.slice(0, -feishuHint.length);
   }
   if (user.includes(HISTORY_HEADER) || user.includes('[Relay 工作目录迁移]')
       || /\n\n---\n\[(?:原生交互|交互须知|图片处理须知|系统提示|长期记忆)\]/.test(user)

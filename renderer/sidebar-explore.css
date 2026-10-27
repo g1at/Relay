@@ -22,11 +22,13 @@
   font-size: 13px;
   -webkit-app-region: no-drag;
 }
+.sidebar-explore-surface.se-explore { width: 168px; }
 .sidebar-explore-surface *, .sidebar-explore-surface *::before, .sidebar-explore-surface *::after { box-sizing: border-box; }
 .sidebar-explore-surface button, .sidebar-explore-surface input { font: inherit; }
 .sidebar-explore-surface button { cursor: pointer; }
 .sidebar-explore-surface button:disabled { cursor: default; opacity: .35; }
-.sidebar-explore-surface button:focus-visible, .sidebar-explore-surface input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sidebar-explore-surface button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sidebar-explore-surface input:focus-visible { outline: 1px solid var(--text-muted); outline-offset: 1px; }
 .sidebar-explore-surface .se-menu-item {
   display: flex; align-items: center; gap: 10px;
   width: 100%; min-height: 35px; padding: 7px 10px;

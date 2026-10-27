@@ -7,6 +7,8 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const assert = require('node:assert/strict');
 const { pathToFileURL } = require('node:url');
 const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
+const { createBrowserMenuProbe } = require('./browser-menu-test-helper.cjs');
+const nativeMenu = createBrowserMenuProbe(require('electron'));
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp/browser-automation-ui-smoke');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-browser-automation-ui-'));
 fs.mkdirSync(out, { recursive: true });
@@ -47,7 +49,7 @@ app.whenReady().then(async () => {
   fs.writeFileSync(entry, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + seed + '</script>'));
   win = new BrowserWindow({ width: 1180, height: 800, show: false, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   win.webContents.on('console-message', (_event, level, message) => { if (level >= 3 && !message.includes('Content Security Policy')) report.failures.push(message); });
-  registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry });
+  registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry, getElectron: nativeMenu.getElectron });
   await win.loadFile(entry); win.show();
   await until('!!window.relayWorkspacePanel&&providerRoutingLoaded&&!restoringActiveRuns', 'renderer ready');
   await evaluate(`window.browserFixtureTask='task-a';window.browserFixtureDraft=true;window.relayConversationWorkspace=()=>({conversationId:window.browserFixtureTask,title:'浏览器验收',isDraft:window.browserFixtureDraft});window.dispatchEvent(new Event('relay:workdir-changed'));relayWorkspacePanel.openUrl(${JSON.stringify(url)});`);
@@ -135,7 +137,8 @@ app.whenReady().then(async () => {
     })()`);
   }, 'original task page restored before release');
   await click('workspaceBrowserMore');
-  await click('workspaceBrowserAutomationRelease');
+  await until(() => nativeMenu.isOpen(), 'native release menu');
+  nativeMenu.select('解除与此任务的关联');
   try {
     await until('document.getElementById("workspaceBrowserAutomationControl").textContent==="交给此任务"', 'release');
   } catch (error) {
@@ -156,10 +159,11 @@ app.whenReady().then(async () => {
   const geometry = await evaluate('document.getElementById("workspaceBrowserViewport").getBoundingClientRect().toJSON()');
   const bounds = native.getBounds(), scale = win.webContents.getZoomFactor();
   check('native page geometry follows the new toolbar', Math.abs(bounds.y - geometry.y * scale) <= 1 && Math.abs(bounds.height - geometry.height * scale) <= 1);
-  check('task controls share the address bar without a separate row', await evaluate(`(() => {
+  check('task controls stay inside the browser toolbar above the page', await evaluate(`(() => {
     const nav = document.getElementById('workspaceBrowserNav'), group = document.getElementById('workspaceBrowserAutomation');
     const viewport = document.getElementById('workspaceBrowserViewport');
-    return group.parentElement === nav && nav.getBoundingClientRect().height <= 40
+    const bounds = nav.getBoundingClientRect(), controls = group.getBoundingClientRect();
+    return group.parentElement === nav && controls.top >= bounds.top && controls.bottom <= bounds.bottom
       && Math.abs(viewport.getBoundingClientRect().top - nav.getBoundingClientRect().bottom) <= 1;
   })()`));
   check('icon buttons retain accessible labels and tooltips', await evaluate(`['workspaceBrowserAutomationControl','workspaceBrowserAnnotate'].every(id => {
@@ -175,14 +179,14 @@ app.whenReady().then(async () => {
       const address = document.getElementById('workspaceBrowserAddress').getBoundingClientRect();
       const buttons = ['workspaceBrowserAutomationControl','workspaceBrowserAnnotate','workspaceBrowserMore'].map(id => {
         const button = document.getElementById(id), bounds = button.getBoundingClientRect();
-        return { id, x:bounds.x, right:bounds.right, width:bounds.width, height:bounds.height,
+        return { id, x:bounds.x, right:bounds.right, top:bounds.top, bottom:bounds.bottom, width:bounds.width, height:bounds.height,
           hittable:button.contains(document.elementFromPoint(bounds.x + bounds.width/2,bounds.y + bounds.height/2)) };
       });
       return {width:rect.width, height:rect.height, addressWidth:address.width, overflow:nav.scrollWidth-nav.clientWidth,
-        fits:buttons.every(button => button.x >= rect.x && button.right <= rect.right && button.width >= 28 && button.height >= 28 && button.hittable),buttons};
+        fits:buttons.every(button => button.x >= rect.x && button.right <= rect.right && button.top >= rect.top && button.bottom <= rect.bottom && button.width >= 28 && button.height >= 28 && button.hittable),buttons};
     })()`);
     report.toolbarLayouts.push({ label, ...layout });
-    check(label + ' panel keeps the address and task buttons visible without overflow', layout.fits && layout.overflow <= 1 && layout.addressWidth >= 50 && layout.height <= 40);
+    check(label + ' panel keeps the address and task buttons visible without overflow', layout.fits && layout.overflow <= 1 && layout.addressWidth >= 50);
     if (label !== 'maximized') {
       fs.writeFileSync(path.join(out, 'toolbar-' + label + '.png'), (await win.webContents.capturePage()).toPNG());
       const header = await evaluate(`(() => {
@@ -211,9 +215,12 @@ app.whenReady().then(async () => {
     && document.getElementById('workspaceBrowserMore').dataset.noticeKind === 'persistence-error'
     && document.getElementById('workspaceBrowserAutomationControl').title.includes('网页恢复记录未保存')`));
   await click('workspaceBrowserMore');
-  check('more menu exposes the failure detail without restoring a toolbar row', await evaluate("document.querySelector('.workspace-browser-task-status').textContent.includes('测试磁盘暂不可写')"));
+  await until(() => nativeMenu.isOpen(), 'native notice menu');
+  check('more menu exposes the failure detail without restoring a toolbar row', nativeMenu.labels().some(label => label.includes('测试磁盘暂不可写')));
+  // capturePage records the toolbar, not the separate OS popup.
   fs.writeFileSync(path.join(out, 'toolbar-notice-menu.png'), (await win.webContents.capturePage()).toPNG());
-  await click('workspaceBrowserMore');
+  nativeMenu.close();
+  await until('document.getElementById("workspaceBrowserMore").getAttribute("aria-expanded")==="false"', 'native notice menu closed');
   win.webContents.send('browser:event', { type:'task-state-saved', id:opened.tab.id });
   await until('document.getElementById("workspaceBrowserMore").dataset.noticeKind===""', 'persistence notice cleared');
   await click('workspaceBrowserAutomationControl');

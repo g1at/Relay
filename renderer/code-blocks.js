@@ -109,10 +109,13 @@ function enhance(container, { collapse = true, preview, clipboard, onError, prev
   });
 }
 
-function snapshot(container) {
-  return [...container.querySelectorAll('pre')].map(pre => ({ text: pre.querySelector('code')?.textContent || '',
-    collapsed: pre.classList.contains('collapsed'), toggled: pre.dataset.codeToggled === 'true',
-    scrollLeft: pre.querySelector('code')?.scrollLeft || 0, scrollTop: pre.querySelector('code')?.scrollTop || 0 }));
+function snapshot(container, { include = () => true } = {}) {
+  return [...container.querySelectorAll('pre')].map(pre => {
+    if (!include(pre)) return null; // Keep code indices without reading untouched layout.
+    const code = pre.querySelector('code');
+    return { text: code?.textContent || '', collapsed: pre.classList.contains('collapsed'),
+      toggled: pre.dataset.codeToggled === 'true', scrollLeft: code?.scrollLeft || 0, scrollTop: code?.scrollTop || 0 };
+  });
 }
   return Object.freeze({ enhance, snapshot, isRunnableHtml });
 });

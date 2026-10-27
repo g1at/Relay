@@ -29,12 +29,14 @@ function element() {
   };
 }
 function harness() {
-  const requests = [], frames = [], handlers = {}, calls = { prespawn: [], saved: [], sent: [], dropped: [], skills: [], drafts: [], toast: [], projectMenuClosed: 0 };
+  const requests = [], frames = [], handlers = {}, calls = { prespawn: [], saved: [], sent: [], dropped: [], skills: [], drafts: [], creationDrafts: [], toast: [], projectMenuClosed: 0 };
   const nodes = Object.fromEntries(['libraryPage', 'scheduleModal', 'settingsModal', 'app', 'messages', 'cvMessages'].map(id => [id, element()]));
   const history = { load(id) { const request = { id, ...deferred() }; requests.push(request); return request.promise; }, save: async conv => { calls.saved.push(conv); return { updatedAt: 'saved' }; } };
   const context = {
     console, Map, Set, WeakMap, Date, setTimeout, clearTimeout,
     pageNavigationVersion: 0, pendingConversationViewReloads: new Set(), pageScrollPositions: new WeakMap(),
+    pendingConversationSends: new Map(), pendingConversationSaves: new Map(),
+    historySearchHighlightTimer: null, historySearchHighlightTarget: null,
     activeView: 'chat', lastConversationView: 'chat', chatWasFollowingOutput: true, stickToBottom: true,
     currentConv: null, currentCreateConv: null, currentSessionId: null, currentMode: 'plain', currentAgent: null,
     currentAgentLabel: null, currentOrchestrateAgents: null, currentWorkingDir: null, currentModel: 'haiku', currentEffort: null,
@@ -60,12 +62,14 @@ function harness() {
     updateModelSwitchUI() {}, updateComposerForMode() {}, clearConversationMessages() { nodes.messages.innerHTML = ''; }, clearConversationIndex() {},
     refreshConversationIndex() {}, removeThinking() {}, scrollToBottom() {}, scheduleConversationIndexUpdate() {},
     refreshHistoryList: async () => {}, refreshClaudeRuntimeInfo: async () => {}, cvRenderRef() {}, cvIsRunning: () => false,
+    cvCaptureComposer() {}, cvRestoreComposer: conv => calls.creationDrafts.push(conv.id),
     cvSyncGenerateBtn() {}, buildImageGrid: () => element(), loadImageModels: async () => {},
     newCreateConv() { context.currentCreateConv = { id: null, turns: [] }; },
     showToast: value => calls.toast.push(value), send: async value => { calls.sent.push(value); return { ok: true }; },
   };
   vm.createContext(context);
-  for (const name of ['appViewElements', 'syncPageNavigation', 'showAppView', 'showChatView', 'returnToConversationView', 'showCreateView', 'loadConversation', 'loadCreateConv']) vm.runInContext(declaration(name), context);
+  for (const name of ['appViewElements', 'syncPageNavigation', 'showAppView', 'showChatView', 'returnToConversationView', 'showCreateView',
+    'resolveHistoryJumpIndex', 'clearHistorySearchHighlight', 'jumpToHistoryMatch', 'loadConversation', 'loadCreateConv']) vm.runInContext(declaration(name), context);
   for (const name of ['relay:open-conversation']) {
     const start = source.indexOf(`window.addEventListener('${name}'`);
     const end = source.indexOf('\n});', start) + 4;
@@ -92,6 +96,33 @@ test('the latest chat request wins when history reads finish out of order', asyn
   h.resolve('old', conversation('old', { model: 'haiku' })); assert.equal(await old, false);
   assert.equal(h.context.currentConv.id, 'new'); assert.equal(h.context.currentModel, 'opus');
   assert.deepEqual(h.calls.drafts, ['new'], 'only the winning history request activates its draft');
+});
+
+test('recovery reload cannot replace a new send that starts while history is loading', async () => {
+  for (const owner of ['pendingConversationSends', 'pendingConversationSaves', 'runs', 'finished-send']) {
+    const h = harness();
+    const current = conversation('same', { turns: [{ runId: 'old', status: 'running' }] });
+    h.context.currentConv = current;
+    h.nodes.messages.innerHTML = 'new draft and live output';
+    const pending = h.context.loadConversation('same', null, { forceReload: true, recoveryRun: { jobId: 'old' } });
+    if (owner === 'finished-send') current.turns.push({ runId: 'new', status: 'complete', assistant: 'new answer' });
+    else h.context[owner].set('same', { jobId: 'new' });
+    h.resolve('same', conversation('same', { turns: [{ runId: 'old', status: 'paused' }] }));
+    assert.equal(await pending, false, owner);
+    assert.equal(h.context.currentConv, current);
+    assert.equal(h.nodes.messages.innerHTML, 'new draft and live output');
+    assert.deepEqual(h.calls.drafts, []);
+  }
+});
+
+test('an unopposed recovery refresh mounts and reports the saved conversation', async () => {
+  const h = harness(); h.context.currentConv = conversation('same');
+  const saved = conversation('same', { title: 'recovered paused task', paused: { runId: 'old' } });
+  const pending = h.context.loadConversation('same', null, { forceReload: true, recoveryRun: { jobId: 'old' } });
+  h.resolve('same', saved);
+  assert.equal(await pending, true);
+  assert.equal(h.context.currentConv, saved);
+  assert.deepEqual(h.calls.drafts, ['same']);
 });
 
 test('collaboration history restores its model without reading or waiting for removed PM branding', { timeout: 2000 }, async () => {
@@ -133,10 +164,12 @@ test('same-chat navigation preserves its DOM while explicit recovery rereads and
 test('late creation history and late model setup cannot replace the newer page or create conversation', async () => {
   const h = harness(); const late = h.context.loadCreateConv('old'); h.context.showAppView('library'); h.resolve('old', conversation('old', { kind: 'create' }));
   assert.equal(await late, false); assert.equal(h.context.currentCreateConv, null);
+  assert.deepEqual(h.calls.creationDrafts, [], 'stale creation history must not restore its composer');
   const config = deferred(); h.context.imageConfigLoaded = false; h.context.loadImageModels = () => config.promise;
   const fresh = h.context.showCreateView(true);
   const recent = h.context.loadCreateConv('new'); h.resolve('new', conversation('new', { kind: 'create' })); await tick();
   config.resolve(); assert.equal(await fresh, false); assert.equal(await recent, true); assert.equal(h.context.currentCreateConv.id, 'new');
+  assert.deepEqual(h.calls.creationDrafts, ['new'], 'only the latest creation navigation restores its draft');
 });
 
 test('same creation fast path preserves DOM but forced recovery and dirty return reload it', async () => {

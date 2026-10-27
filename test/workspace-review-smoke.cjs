@@ -77,7 +77,7 @@ app.whenReady().then(async () => {
   registry = registerWorkspaceTools({ ipcMain, getWindow: () => win, rendererURL: pathToFileURL(fixture).href,
     resolveWorkspace: async context => ({ root: context.projectId === 'plain' ? plain : repository, conversationId: context.conversationId, managed: true }),
   });
-  await win.loadFile(fixture); win.showInactive();
+  await win.loadFile(fixture); win.show(); win.focus(); win.webContents.focus();
   await until('!!window.relayWorkspacePanel&&providerRoutingLoaded&&!restoringActiveRuns');
   await click('#btnWorkspacePanel');
   await check('launcherOffersReviewWithoutCreatingATab', '!!document.querySelector("[data-workspace-create=review]")&&relayWorkspacePanel.getState().tabs.length===0&&document.querySelectorAll("#workspaceLauncherActions [data-workspace-create]").length===4&&!document.querySelector("[data-workspace-create=tasks]")');
@@ -106,6 +106,7 @@ app.whenReady().then(async () => {
   await until('document.querySelector("[data-review-diff]")?.textContent.includes("刷新后的项目说明")');
   await check('refreshReloadsTheSelectedDiffFromDisk', true);
   await click('#workspaceMaximize'); await capture('review-expanded');
+  report.expandedGeometry = await evaluate('({innerWidth,innerHeight,visible:document.visibilityState,focus:document.hasFocus(),app:document.querySelector(".app").getBoundingClientRect().toJSON(),panel:document.getElementById("workspacePanel").getBoundingClientRect().toJSON(),review:document.getElementById("workspaceReview").getBoundingClientRect().toJSON(),grid:getComputedStyle(document.querySelector(".app")).gridTemplateColumns,appClasses:document.querySelector(".app").className,appStyle:document.querySelector(".app").style.cssText})');
   await check('reviewResizesToFullWorkspace', 'relayWorkspacePanel.getState().maximized&&document.querySelector("#workspaceReview").getBoundingClientRect().width>=innerWidth-2&&document.documentElement.scrollWidth<=innerWidth+1');
   await act('applyThemeToDOM("dark");'); await capture('review-dark');
   await click('#workspaceMaximize'); win.setSize(820, 650); await pause(350);

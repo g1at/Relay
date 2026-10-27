@@ -97,6 +97,7 @@ const inputEl    = $('input');
 const sendBtn    = $('btnSend');
 let isRunning = false;
 const historyEl  = $('historyList');
+let historyRefreshPromise = null;
 let historyRefreshRevision = 0; // 初始加载会在文件后半段执行之前请求历史。
 const chatTitle  = $('chatTitle');
 const inputCard    = $('inputCard');
@@ -204,6 +205,9 @@ function emitConversationChanged(conversationId = null, { loading = false } = {}
 //   }
 const runs = new Map();            // convId → run
 const jobToConv = new Map();       // jobId → convId(事件只带 jobId,用它反查 conv)
+// Replaying a dead process is history repair, not a running executor. Keep it
+// addressable by job ID without borrowing a conversation's live execution slot.
+const recoveryRuns = new Map();    // jobId → history-only run
 const supplementDrafts = new Map(); // conversation id -> retryable supplemental input with stable message ID
 // Drafts stay in this renderer and never update conversation history timestamps.
 // The owner object also follows slow attachment imports across view switches.
@@ -218,6 +222,11 @@ const unsavedWorkspaceConversations = new WeakSet(); // local objects whose firs
 // 进行中的创作生成：convId → { runId, turnIndex, restored }。放在通用运行态旁边，
 // 让启动时的任务账本恢复也能在创作视图脚本执行到之前安全登记。
 const cvJobs = new Map();
+const cvMediaTasks = new Map(); // stable media task id -> latest service snapshot
+const cvMediaControls = new Map(); // stable media task id -> pending control operation
+const cvPendingGenerations = new Set(); // generation IPC + history writer have not settled
+const cvPendingCreationConversations = new Set(); // preparation remains locked across history reloads
+const cvMediaActiveStates = new Set(['queued', 'preparing', 'submitting', 'accepted', 'polling', 'running', 'downloading']);
 function newClientRunId() {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
@@ -230,14 +239,16 @@ function newClientRunId() {
 }
 function runForJob(jobId) {
   const convId = jobToConv.get(jobId);
-  return convId ? runs.get(convId) : null;
+  const live = convId && runs.get(convId);
+  return live?.jobId === jobId ? live : recoveryRuns.get(jobId);
 }
 // 某个会话是否正在跑
-function isConvRunning(convId) { return !!(convId && (runs.has(convId) || cvJobs.has(convId))); }
+function isConvRunning(convId) { return !!(convId && (runs.has(convId) || cvIsRunning(convId))); }
 // 事件所属会话是否正是当前所看的会话(决定要不要动 DOM)
 function isMountedChatJob(jobId) {
   const convId = jobToConv.get(jobId);
-  return !!(activeView === 'chat' && convId && currentConv && currentConv.id === convId);
+  return !!(activeView === 'chat' && convId && runs.get(convId)?.jobId === jobId
+    && currentConv && currentConv.id === convId);
 }
 
 // ── 对话快捷索引（竖向钢琴键） ──
@@ -497,7 +508,7 @@ function retirePreviousTaskProcesses(taskRun, { retry = false } = {}) {
     }
   }
 }
-function activityStateForTurn(turn) {
+function activityStateForTurn(turn, { settled = false } = {}) {
   if (!window.RelayActivity || !turn) return null;
   let state = turn.activity && Array.isArray(turn.activity.items) ? window.RelayActivity.hydrate(turn.activity)
     : turn.thinking ? window.RelayActivity.fromLegacy(turn.thinking) : null;
@@ -561,6 +572,17 @@ function activityStateForTurn(turn) {
     if (!state.taskStartedAt && Number.isFinite(startedAt)) state.startedAt = startedAt;
     if (!state.taskFinishedAt && Number.isFinite(finishedAt) && finishedAt >= state.startedAt
         && (turn.status === 'complete' || output?.status === 'complete' || !!turn.assistant)) state.endedAt = finishedAt;
+    // A saved running placeholder cannot prove a process is alive. While its
+    // journal is being repaired, render a static boundary instead of a timer.
+    if (settled && (state.phase === 'running' || state.phase === 'idle')) {
+      const knownTimes = [state.taskFinishedAt, state.endedAt, state.taskRun?.segmentFinishedAt,
+        ...state.items.flatMap(item => [item.endedAt, item.startedAt]), state.taskRun?.segmentStartedAt,
+        state.taskStartedAt, startedAt].filter(value => Number.isFinite(value) && value > 0 && value <= Date.now());
+      const end = knownTimes.length ? Math.max(...knownTimes) : null;
+      state.phase = 'error'; state.error = '已暂停'; state.endedAt = end; state.taskFinishedAt = end;
+      if (state.taskRun && end) state.taskRun = window.RelayTaskContinuity.finish(state.taskRun, { finishedAt: end });
+      for (const item of state.items) if (['preparing', 'running'].includes(item.status)) item.status = 'unconfirmed';
+    }
   }
   return state;
 }
@@ -654,7 +676,7 @@ function flushVisibleRunPresentation() {
 function savedAssistantDisplay(turn) {
   // 早期协作的 assistant 是派活、子结果和 PM 所有发言的聚合日志，并非最终答案。
   if (turn && !turn.output && Array.isArray(turn.chat) && turn.chat.length) return { text: '', diagnostics: [] };
-  const text = String(turn && (turn.assistant || (turn.output && turn.output.status === 'complete' && turn.output.final)) || '');
+  const text = String(window.RelayHistorySearchText.savedAssistant(turn) || '');
   if (['（任务已完成，但刷新前的最终回复没有保存在可恢复的本地事件中。请在任务中心查看详情或重新执行。）', '（任务已结束，但未取得可恢复的最终回复。请在任务中心查看详情或重新执行。）'].includes(text)) {
     return { text: '（任务已结束，但未取得可恢复的最终回复。可以重新发送请求。）', diagnostics: [] };
   }
@@ -756,6 +778,7 @@ function renderSupplementTimeline(run, history = false) {
       if (!view.bubble || !view.bubble.isConnected) view.bubble = appendMessage('assistant', segment.text, null, { streaming: true });
       const bubble = view.bubble, body = bubble.querySelector('.body');
       bubble.dataset.turn = String(run.turnIndex ?? 0);
+      bubble.dataset.messageKey = 'assistant:' + segment.key;
       window.RelayTurnDeliveryReferences?.stampOwner(bubble, run.convId || currentConv?.id, run.turn, run.turnIndex);
       bubble.dataset.raw = segment.text;
       const displayText = segment.displayText ?? segment.text;
@@ -1241,6 +1264,66 @@ const pendingHistoryDeletions = new Set();
 const HISTORY_DELETE_RUNNING_NOTICE = '对话正在运行，请等待完成或手动暂停后再删除。';
 const historyActiveTaskOwners = new Map(); // nonterminal runId -> conversationId
 const historyActiveTasksByConversation = new Map();
+const historyCompletionReady = { chat: null, create: null };
+const historyCompletionExternalReloads = new Set();
+const historyCompletions = window.RelayHistoryCompletion?.create({
+  api: window.api.history,
+  getVisibleConversationId: () => {
+    const id = activeView === 'chat' ? currentConv?.id : activeView === 'create' ? currentCreateConv?.id : null;
+    if (!id || historyCompletionReady[activeView] !== id || pendingConversationViewReloads.has(`${activeView}:${id}`)) return null;
+    // The host's terminal event can arrive before the renderer has finished its
+    // final answer/image projection. A mounted loading placeholder is not read.
+    if (runs.has(id) || cvIsRunning(id) || pendingConversationSends.has(id)) return null;
+    return id;
+  },
+  isForeground: () => document.visibilityState !== 'hidden' && document.hasFocus(),
+  onChange: ids => {
+    for (const id of ids) {
+      syncHistoryDeletionAvailability(id);
+      if (!historyCompletions.get(id) || runs.has(id) || cvIsRunning(id)) continue;
+      for (const kind of ['chat', 'create']) {
+        if (historyCompletionReady[kind] !== id) continue;
+        // Mini/scheduled work can finish while an older answer stays mounted.
+        // Re-read that answer before acknowledging the newly completed run.
+        historyCompletionReady[kind] = null;
+        pendingConversationViewReloads.add(`${kind}:${id}`);
+        historyCompletionExternalReloads.add(`${kind}:${id}`);
+      }
+    }
+    refreshVisibleHistoryCompletion();
+  },
+});
+function refreshVisibleHistoryCompletion() {
+  if (document.visibilityState === 'hidden' || !document.hasFocus()) return;
+  const id = activeView === 'chat' ? currentConv?.id : activeView === 'create' ? currentCreateConv?.id : null;
+  const key = `${activeView}:${id}`;
+  if (id && historyCompletionExternalReloads.delete(key)) {
+    const load = activeView === 'create' ? loadCreateConv : loadConversation;
+    void load(id, null, { forceReload: true }).catch(() => {});
+  }
+}
+window.relayHistoryCompletionView = {
+  beginLoad(kind, id) {
+    historyCompletionReady[kind] = null;
+    historyCompletionExternalReloads.delete(`${kind}:${id}`);
+    return historyCompletions?.get(id)?.runId || null;
+  },
+  finishLoad(kind, id, observedRunId) {
+    if ((historyCompletions?.get(id)?.runId || null) !== observedRunId) {
+      // A completion that arrived during an earlier load needs a fresh body.
+      pendingConversationViewReloads.add(`${kind}:${id}`);
+      return;
+    }
+    this.ready(kind, id);
+  },
+  ready(kind, id) {
+    historyCompletionReady[kind] = id;
+    historyCompletions?.syncVisible();
+  },
+  canReuse(kind, id) { return historyCompletionReady[kind] === id; },
+  reset(kind) { historyCompletionReady[kind] = null; },
+  syncVisible() { refreshVisibleHistoryCompletion(); historyCompletions?.syncVisible(); },
+};
 const HISTORY_ACTIVE_TASK_STATES = new Set(['queued', 'starting', 'running', 'waiting_user', 'stopping']);
 let historyTaskEventRevision = 0;
 function isHistoryDeletionBlocked(id) { return isConvRunning(id) || pendingConversationSends.has(id) || historyActiveTasksByConversation.has(id) || conversationControls.has(id); }
@@ -1290,13 +1373,16 @@ function syncHistoryRowStatus(li, running = isConvRunning(li.dataset.id)) {
   li.classList.toggle('deleting', deleting);
   if (deleting) li.setAttribute('aria-busy', 'true'); else li.removeAttribute('aria-busy');
   const tail = li.querySelector('.hi-tail');
-  const want = deleting ? 'deleting' : deleteBlocked ? 'spin' : 'del';
-  if (tail.dataset.state !== want) {
+  const completion = historyCompletions?.get(li.dataset.id);
+  const unreadLabel = completion?.status === 'failed' ? '任务执行失败，尚未查看' : '任务已完成，尚未查看';
+  const want = deleting ? 'deleting' : deleteBlocked ? 'spin' : completion ? 'unread' : 'del';
+  if (tail.dataset.state !== want || tail.dataset.completionStatus !== (completion?.status || '')) {
     tail.dataset.state = want;
+    tail.dataset.completionStatus = completion?.status || '';
     tail.innerHTML = deleting
       ? '<span class="hi-delete-status" role="status">正在删除…</span><button type="button" class="hi-del" title="正在删除" aria-label="删除会话" disabled>×</button>'
       : deleteBlocked ? `<span class="hi-spinner" title="正在回复中"></span><button type="button" class="hi-del" title="${HISTORY_DELETE_RUNNING_NOTICE}" aria-label="删除会话：${HISTORY_DELETE_RUNNING_NOTICE}" disabled>×</button>`
-      : '<button type="button" class="hi-del" title="删除" aria-label="删除会话">×</button>';
+      : `${completion ? `<span class="hi-unread-dot" role="img" aria-label="${unreadLabel}" title="${unreadLabel}"></span>` : ''}<button type="button" class="hi-del" title="删除" aria-label="删除会话">×</button>`;
   }
   for (const button of li.querySelectorAll('button')) button.disabled = deleting || (deleteBlocked && button.classList.contains('hi-del'));
 }
@@ -1375,6 +1461,8 @@ function ensureHistoryDelegation() {
         const result = await window.api.history.delete(id);
         if (!result?.ok) { showToast(result?.code === 'CONVERSATION_RUNNING' ? HISTORY_DELETE_RUNNING_NOTICE : result?.error || '删除失败，临时文件可能仍被占用，请稍后重试'); return; }
         composerDrafts.delete(id); supplementDrafts.delete(id);
+        cvComposerDrafts.delete(id); cvComposerWrites.delete(id);
+        if (cvComposerOwner?.id === id) cvComposerOwner = null;
         if (currentConv && currentConv.id === id) startNewConv();
         if (currentCreateConv && currentCreateConv.id === id) newCreateConv();
         if (result.cleanupWarning) showToast(result.cleanupWarning);
@@ -1439,32 +1527,154 @@ function updateHistoryRow(li, it) {
 }
 
 async function refreshHistoryList() {
-  const revision = ++historyRefreshRevision;
-  const composer = getProjectComposer();
-  const [items, projects] = await Promise.all([window.api.history.list(), composer ? composer.refresh() : Promise.resolve([])]);
-  if (revision !== historyRefreshRevision) return;
-  ensureHistoryDelegation();
-  window.RelaySidebarHistory.reconcile(historyEl, items, {
-    buildRow: buildHistoryRow, updateRow: updateHistoryRow, projects,
-    isRunning: isConvRunning,
-    projectHeader: composer ? composer.header : undefined,
+  historyRefreshRevision++;
+  if (historyRefreshPromise) return historyRefreshPromise;
+  // Coalesce bursts before copying the index over IPC. One stale read may be
+  // skipped; continuous background events must still let the sidebar advance.
+  historyRefreshPromise = Promise.resolve().then(async () => {
+    let appliedRevision = -1, skippedReads = 0;
+    try {
+      while (appliedRevision !== historyRefreshRevision) {
+        const revision = historyRefreshRevision;
+        const composer = getProjectComposer();
+        let items, projects;
+        try {
+          [items, projects] = await Promise.all([window.api.history.list(), composer ? composer.refresh() : Promise.resolve([])]);
+        } catch (error) {
+          if (revision !== historyRefreshRevision) continue;
+          throw error;
+        }
+        if (revision !== historyRefreshRevision && skippedReads++ === 0) continue;
+        skippedReads = 0;
+        ensureHistoryDelegation();
+        window.RelaySidebarHistory.reconcile(historyEl, items, {
+          buildRow: buildHistoryRow, updateRow: updateHistoryRow, projects,
+          isRunning: isConvRunning,
+          projectHeader: composer ? composer.header : undefined,
+        });
+        appliedRevision = revision;
+      }
+    } finally {
+      // Release synchronously with worker completion, before queued microtasks
+      // can append an invalidation to an already finished worker.
+      historyRefreshPromise = null;
+    }
   });
+  return historyRefreshPromise;
 }
 
-// jumpTo(可选):{ turnIndex, side } —— 从搜索结果跳转时,打开会话后滚动到命中的那条消息并高亮。
-async function loadConversation(id, jumpTo = null, { forceReload = false } = {}) {
+function resolveHistoryJumpIndex(turns, jumpTo) {
+  if (!jumpTo) return null;
+  if (jumpTo.turnId) {
+    const indices = turns.map((turn, index) => [turn.id, turn.userMessageId, turn.runId].includes(jumpTo.turnId) ? index : -1).filter(index => index >= 0);
+    return indices.length === 1 ? indices[0] : null;
+  }
+  const index = Number(jumpTo.turnIndex);
+  return jumpTo.turnIndex != null && Number.isInteger(index) && index >= 0 && index < turns.length ? index : null;
+}
+
+let historySearchHighlightTimer = null;
+let historySearchHighlightTarget = null;
+function clearHistorySearchHighlight() {
+  clearTimeout(historySearchHighlightTimer);
+  historySearchHighlightTarget?.classList.remove('search-hit');
+  historySearchHighlightTarget = null;
+  window.CSS?.highlights?.delete('relay-history-search');
+}
+// Build ranges across Markdown inline elements without changing the transcript,
+// its copy text, or the user's selection. Block boundaries normalize to spaces.
+function historyMatchRanges(body, query) {
+  if (!body || !window.RelayHistorySearchText.normalize(query)) return [];
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  const parts = [], spans = []; let length = 0, previousBlock = null;
+  const excluded = 'button,script,style,[aria-hidden="true"],.code-header,.code-actions,.message-meta';
+  const blocks = 'p,pre,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,div';
+  const space = () => { parts.push(' '); length++; };
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.tagName === 'BR' && !node.closest(excluded)) space();
+      continue;
+    }
+    if (!node.data || node.parentElement.closest(excluded)) continue;
+    const block = node.parentElement.closest(blocks);
+    if (previousBlock && block !== previousBlock && length) space();
+    previousBlock = block;
+    spans.push({ node, start: length, end: length + node.data.length });
+    parts.push(node.data); length += node.data.length;
+  }
+  const found = window.RelayHistorySearchText.matchRange(parts.join(''), query);
+  if (!found) return [];
+  const first = spans.find(span => span.start <= found.start && span.end > found.start);
+  const last = spans.find(span => span.start < found.end && span.end >= found.end);
+  if (!first || !last) return [];
+  const range = document.createRange();
+  range.setStart(first.node, found.start - first.start); range.setEnd(last.node, found.end - last.start);
+  return [range];
+}
+function jumpToHistoryMatch(container, turns, jumpTo, isCurrent, { quiet = false } = {}) {
+  if (!jumpTo) return false;
+  clearHistorySearchHighlight();
+  const index = resolveHistoryJumpIndex(turns, jumpTo);
+  if (index == null) { if (jumpTo.turnId && !quiet) showToast('原消息已不存在，已打开对话'); return false; }
+  const messages = [...container.querySelectorAll(`.message[data-turn="${index}"]`)];
+  const side = jumpTo.side === 'assistant' ? 'assistant' : 'user';
+  let candidates = jumpTo.messageKey ? messages.filter(node => node.dataset.messageKey === jumpTo.messageKey)
+    : messages.filter(node => node.classList.contains(side));
+  // Old results lacked a message key; retain their role-based navigation.
+  if (!candidates.length && !jumpTo.messageKey) candidates = messages;
+  let target = null, ranges = [];
+  for (const candidate of candidates) {
+    const found = jumpTo.query ? historyMatchRanges(candidate.querySelector('.body, .bubble'), jumpTo.query) : [];
+    if (!jumpTo.query || found.length) { target = candidate; ranges = found; break; }
+  }
+  if (!target) { if (!quiet) showToast('命中内容已更新，已打开对话，请重新搜索'); return false; }
+  if (container === messagesEl) stopFollowingMessages();
+  requestAnimationFrame(() => {
+    if (!isCurrent() || !target.isConnected) return;
+    if (container === messagesEl) stopFollowingMessages();
+    historySearchHighlightTarget = target;
+    target.classList.add('search-hit');
+    if (ranges.length && window.CSS?.highlights && window.Highlight) {
+      window.CSS.highlights.set('relay-history-search', new Highlight(...ranges));
+    }
+    const anchor = ranges[0]?.startContainer.parentElement || target;
+    anchor.closest('pre.collapsed')?.querySelector('.code-toggle')?.click();
+    // Layout the target block first; then center the actual matching line.
+    anchor.scrollIntoView({ block: 'center', behavior: 'instant' });
+    if (ranges.length) {
+      const rect = ranges[0].getBoundingClientRect(), viewport = container.getBoundingClientRect();
+      if (rect.height) container.scrollBy({ top: rect.top + rect.height / 2 - viewport.top - viewport.height / 2, behavior: 'instant' });
+    }
+    historySearchHighlightTimer = setTimeout(clearHistorySearchHighlight, 8000);
+  });
+  return true;
+}
+
+// jumpTo(可选):{ turnIndex, turnId?, side }，记忆来源优先按稳定 ID 定位。
+async function loadConversation(id, jumpTo = null, { forceReload = false, recoveryRun = null } = {}) {
+  let recoveryOwner = currentConv;
+  let recoveryTail = recoveryOwner?.turns?.at(-1);
+  const recoveryMayMount = () => !recoveryRun || (currentConv === recoveryOwner
+    && currentConv?.turns?.at(-1) === recoveryTail && currentConv?.id === id && activeView === 'chat'
+    && !runs.has(id) && !pendingConversationSends.has(id) && !pendingConversationSaves.has(id));
+  if (!recoveryMayMount()) return false;
   window.relayComposerPrewarm?.cancel();
   const navigationIntent = ++pageNavigationVersion;
-  const isCurrentNavigation = () => navigationIntent === pageNavigationVersion;
+  const isCurrentNavigation = () => navigationIntent === pageNavigationVersion && recoveryMayMount();
   // 主页面之间往返时复用已挂载的对话，不重读历史、不重建流、不触发预启动。
-  if (currentConv && currentConv.id === id && !jumpTo && !forceReload && !pendingConversationViewReloads.has(`chat:${id}`)) {
+  if (currentConv && currentConv.id === id && !forceReload && !pendingConversationViewReloads.has(`chat:${id}`)
+      && window.relayHistoryCompletionView?.canReuse('chat', id) !== false) {
     if (!showChatView(navigationIntent)) return false;
-    emitConversationChanged(id);
-    syncRunningUI();
-    return true;
+    if (!jumpTo || jumpToHistoryMatch(messagesEl, currentConv.turns || [], jumpTo,
+      () => isCurrentNavigation() && currentConv?.id === id && activeView === 'chat', { quiet: true })) {
+      emitConversationChanged(id); syncRunningUI();
+      window.relayHistoryCompletionView?.syncVisible();
+      return true;
+    }
   }
   // Hide the previous decision immediately while another history entry loads.
   emitConversationChanged(null, { loading: true });
+  const completionAtLoad = window.relayHistoryCompletionView?.beginLoad('chat', id);
   let conv, model, activeProviderRoute, prespawnSessionRoute;
   try {
     conv = await window.api.history.load(id);
@@ -1488,6 +1698,7 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
   if (!showChatView(navigationIntent)) return false;
   activateComposerDraft(id);
   currentConv = conv;
+  if (recoveryRun) { recoveryOwner = conv; recoveryTail = conv.turns?.at(-1); }
   pendingConversationViewReloads.delete(`chat:${id}`);
   currentSessionId = conv.sessionId || null;
   currentMode = conv.mode || 'plain';  // 历史会话恢复时也要恢复 mode
@@ -1538,7 +1749,7 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
     if (hasSupplementTimeline(isLiveTurn ? run.turn : turn)) {
       if (!isLiveTurn) {
         renderSupplementTimeline({ turn, turnIndex: i, convId: conv.id, jobId: turn.runId, outputState: window.RelayAssistantOutput.createState(turn.output),
-          activityState: activityStateForTurn(turn) }, true);
+          activityState: activityStateForTurn(turn, { settled: true }) }, true);
         appendSavedTurnError(turn, i);
         if (turn.outputNotice) appendMessage('system', turn.outputNotice);
       }
@@ -1549,7 +1760,7 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
     // 所有会话按同一结构化过程流重建，旧协作日志在渲染期兼容。
     if (!isLiveTurn) {
       const segment = taskSegmentForTurn(turn, turns);
-      const activityState = activityStateForTurn(turn)
+      const activityState = activityStateForTurn(turn, { settled: true })
         || (segment === 'previous' ? newActivityState({ phase: 'complete', startedAt: null }) : null);
       if (activityState && (activityState.items.length || activityState.taskRun || segment === 'previous')) {
         const activityEl = appendActivityState(activityState, true, { segment,
@@ -1588,25 +1799,9 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
 
   refreshConversationIndex();
 
-  // ── 搜索跳转:滚动到命中的那条消息并短暂高亮 ──
-  if (jumpTo && jumpTo.turnIndex != null) {
-    // side: assistant → 命中助手回复;user/prompt → 命中用户消息。按 data-turn + 角色选元素。
-    const wantAssistant = jumpTo.side === 'assistant';
-    const sel = `.message.${wantAssistant ? 'assistant' : 'user'}[data-turn="${jumpTo.turnIndex}"]`;
-    let target = messagesEl.querySelector(sel);
-    // 兜底:若该侧没渲染出来(如纯附件无文字),退而用同 turn 的任意消息
-    if (!target) target = messagesEl.querySelector(`.message[data-turn="${jumpTo.turnIndex}"]`);
-    if (target) {
-      stopFollowingMessages();
-      // 渲染/布局可能未稳,等一帧再滚,定位更准
-      requestAnimationFrame(() => {
-        if (!isCurrentNavigation() || currentConv !== conv || activeView !== 'chat') return;
-        target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        target.classList.add('search-hit');
-        setTimeout(() => target.classList.remove('search-hit'), 2000);
-      });
-    }
-  } else {
+  const jumped = jumpToHistoryMatch(messagesEl, turns, jumpTo,
+    () => isCurrentNavigation() && currentConv === conv && activeView === 'chat');
+  if (!jumped) {
     stickToBottom = true;
     requestAnimationFrame(() => {
       if (isCurrentNavigation() && currentConv === conv && activeView === 'chat') scrollToBottom(true);
@@ -1615,11 +1810,13 @@ async function loadConversation(id, jumpTo = null, { forceReload = false } = {})
 
   syncRunningUI();             // 发送按钮反映这个会话是否在跑
   await refreshHistoryList();  // 刷新 active 高亮
+  if (isCurrentNavigation() && currentConv === conv) window.relayHistoryCompletionView?.finishLoad('chat', id, completionAtLoad);
   return isCurrentNavigation() && currentConv === conv;
 }
 
 function startNewConv(mode = 'plain', agentName = null, agentLabel = null, orchestrateAgents = null, projectId = currentProjectId) {
   // 注意:不动 runs —— 让正在跑的其它会话继续在后台收数据,完成后各自写回自己的 conv。
+  window.relayHistoryCompletionView?.reset('chat');
   showChatView();   // 若当前在「AI 创作」视图,切回聊天视图
   activateComposerDraft();
   currentMode = mode;
@@ -1756,6 +1953,9 @@ async function finishRunUnsafe(jobId, doneEvt) {
   if (taskRun) { run.turn.taskRun = taskRun; if (run.activityState) run.activityState.taskRun = taskRun; }
   run.turn.outputNotice = output.notice || (run.replayIncomplete
     ? '部分执行过程已超出本地保留范围。' : '');
+  if (run.appInterruption && run.turn.status === 'paused') {
+    run.turn.outputNotice = ['任务因 Relay 关闭而暂停，已保留执行过程。', run.turn.outputNotice].filter(Boolean).join('\n');
+  }
   if (doneEvt && Array.isArray(doneEvt.relay_unapplied_inputs) && doneEvt.relay_unapplied_inputs.length) {
     run.turn.outputNotice = [run.turn.outputNotice, '有补充要求尚未处理，请查看补充消息的状态。'].filter(Boolean).join('\n');
   }
@@ -1880,12 +2080,14 @@ async function finishRunUnsafe(jobId, doneEvt) {
     else pendingConversationViewReloads.add(`chat:${convId}`);
   }
 
+  if (isStillViewing() && activeView === 'chat') window.relayHistoryCompletionView?.ready('chat', convId);
+
   // 仅当首轮【成功】时才用快模型生成标题(否则会把"Not logged in"之类报错当成标题)
-  if (!failed && !explicitlyAborted && isFirstLogicalTask(conv)) maybeGenerateTitle(conv);
+  if (!run.restoredFromLedger && !failed && !explicitlyAborted && isFirstLogicalTask(conv)) maybeGenerateTitle(conv);
 
   // Curator 二期:纠正/重试/工具失败恢复等强信号立即提炼，每 N 轮兜底(fire-and-forget,不阻塞 UI)。
   //   排除:失败轮 / 创作会话 / 定时任务产出的会话。节奏与开关由 main 侧配置。
-  if (!failed && !explicitlyAborted && conv && conv.kind !== 'create' && !conv.fromScheduled) maybeAutoReviewSkills(conv);
+  if (!run.restoredFromLedger && !failed && !explicitlyAborted && conv && conv.kind !== 'create' && !conv.fromScheduled) maybeAutoReviewSkills(conv);
 }
 
 // 终态清理必须比历史落盘更可靠：磁盘满、IPC 断开或历史文件损坏都只能让
@@ -1914,6 +2116,7 @@ async function finishRun(jobId, doneEvt) {
       // the run. This one exceptional projection must not reload stale history.
       syncRunOutputActivity(run, true);
       appendMessage('error', `任务已经结束，但本轮记录未能完整保存：${(error && error.message) || '未知错误'}`);
+      if (activeView === 'chat') window.relayHistoryCompletionView?.ready('chat', convId);
     }
     try { await refreshHistoryList(); } catch (_) {}
     refreshClaudeRuntimeInfo(convId).catch(() => {});
@@ -2262,7 +2465,7 @@ function taskIsTerminal(task) {
 
 function taskIsCreation(task) {
   const source = taskSource(task);
-  return String(task && task.kind || '').toLowerCase() === 'image'
+  return ['image', 'video'].includes(String(task && task.kind || '').toLowerCase())
     || source.type === 'creation' || source.conversationKind === 'create';
 }
 
@@ -2285,11 +2488,146 @@ function taskTurnHasPersistedOutcome(turn) {
     .some(status => terminalStatuses.includes(String(status || '').trim().toLowerCase()));
 }
 
-function taskHasEmptyInterruptedProgress(task, turn) {
-  return task?.state === 'interrupted' && task.result?.error?.code === 'APP_RESTART'
-    && taskTurnHasPersistedOutcome(turn) && !savedAssistantDisplay(turn).text
-    && !turn?.activity?.items?.length && !turn?.output?.messages?.length && !turn?.thinking
-    && !turn?.chat?.length;
+function taskIsAppInterrupted(task) {
+  return task?.state === 'interrupted' && ['APP_RESTART', 'APP_EXIT'].includes(task.result?.error?.code);
+}
+
+function taskCanRepairInterruption(task, turn) {
+  if (!taskIsAppInterrupted(task) || !turn || savedAssistantDisplay(turn).text) return false;
+  const statuses = [turn.status, turn.output?.status].map(value => String(value || '').toLowerCase());
+  if (statuses.some(value => ['complete', 'completed', 'succeeded', 'success', 'paused'].includes(value))
+      || ['canceled', 'cancelled', 'aborted'].includes(statuses[0])
+      || statuses[0] !== 'interrupted' && ['canceled', 'cancelled', 'aborted'].includes(statuses[1])) return false;
+  // An app-level interruption does not authorize replacing an independently
+  // saved provider failure or a user's deliberate cancellation.
+  const result = turn.output?.lastResult;
+  if (result && (result.is_error || result.subtype && result.subtype !== 'success')
+      && !/^aborted_/.test(String(result.terminal_reason || ''))) return false;
+  const error = typeof turn.error === 'string' ? turn.error.trim() : turn.error?.message || '';
+  const sourceError = task.result?.error?.message || '';
+  return !error || error === sourceError || /^(?:Relay 在任务完成前关闭，本次任务已中断。|Relay restarted before the task reached a terminal state|Relay (?:is shutting down|exited before the task reached a terminal state))$/.test(error)
+    || ['APP_RESTART', 'APP_EXIT'].includes(turn.error?.code);
+}
+
+function recoveryTime(value) {
+  const time = typeof value === 'string' ? Date.parse(value) : value;
+  return Number.isSafeInteger(time) && time > 0 && time <= Date.now() ? time : null;
+}
+
+function recoveredRunFinishedAt(run, task, event = null) {
+  const saved = run.recoveryExpectedTurn || run.turn;
+  const start = recoveryTime(saved.taskRun?.segmentStartedAt) || recoveryTime(saved.taskStartedAt)
+    || recoveryTime(saved.ts) || recoveryTime(task.startedAt) || recoveryTime(task.createdAt);
+  // lastActiveAt predates the app recovery itself. Journal envelope timestamps
+  // belong to the old process, unlike ledger.updatedAt after startup.
+  const trusted = [task.recovery?.lastActiveAt, run.recoveryLastEventAt, event?.relay_task_finished_at,
+    task.result?.error?.code === 'APP_EXIT' ? task.endedAt : null]
+    .map(recoveryTime).filter(Boolean);
+  const oldRestartError = task.result?.error?.code === 'APP_RESTART' && taskTurnHasPersistedOutcome(saved);
+  const fallback = [oldRestartError ? null : saved.taskRun?.segmentFinishedAt, oldRestartError ? null : saved.taskFinishedAt,
+    oldRestartError ? null : saved.activity?.taskFinishedAt, oldRestartError ? null : saved.activity?.endedAt,
+    ...(saved.activity?.items || []).flatMap(item => [item.startedAt, item.endedAt])]
+    .map(recoveryTime).filter(Boolean);
+  const times = trusted.length ? trusted : fallback;
+  return Math.max(start || 1, times.length ? Math.max(...times) : start || 1);
+}
+
+function recoveredTerminalSucceeded(event) {
+  const result = event?.finalResult;
+  return !!result && result.type === 'result' && result.subtype === 'success' && !result.is_error
+    && !window.RelayAssistantOutput.owner(result) && !event.error && !event.aborted
+    && !(typeof event.exitCode === 'number' && event.exitCode !== 0)
+    && !Number(result.queued_turn_count || 0) && !Number(result.relay_pending_inputs || 0)
+    && !Number(result.relay_pending_background_tasks || 0)
+    && !/^aborted_/.test(String(result.terminal_reason || ''));
+}
+
+async function finishRecoveredChatRun(task, run) {
+  if (run.finishPromise) return run.finishPromise;
+  run.finishing = true;
+  run.finishPromise = (async () => {
+    try {
+      const current = await window.api.history.load(run.convId);
+      const located = taskTurnLocation(current, task);
+      // Do not reconstruct a turn again after deletion, or overwrite another
+      // writer that completed/edited this exact turn during journal I/O.
+      if (!located || JSON.stringify(located.turn) !== JSON.stringify(run.recoveryExpectedTurn)) return;
+      const terminal = run.recoveredTerminalEvent;
+      const succeeded = recoveredTerminalSucceeded(terminal) || task.state === 'succeeded';
+      const result = terminal?.finalResult || outputStateForRun(run).lastResult;
+      const genuineFailure = !succeeded && !terminal?.interrupted && !terminal?.aborted
+        && !/^aborted_/.test(String(result?.terminal_reason || ''))
+        && (!!(result && (result.is_error || result.subtype && result.subtype !== 'success'))
+          || !!terminal?.error && terminal.error !== task.result?.error?.message
+            && !['APP_RESTART', 'APP_EXIT'].includes(terminal.error?.code));
+      const paused = !succeeded && !genuineFailure && taskIsAppInterrupted(task);
+      const canceled = !succeeded && !paused && task.state === 'canceled';
+      const error = succeeded || paused || canceled ? null : (genuineFailure
+        ? window.RelayConversationErrors.forTurn({ error: terminal?.error, output: { lastResult: result } }) || '任务执行失败' : taskErrorText(task));
+      const finishedAt = recoveredRunFinishedAt(run, task, terminal);
+      const done = { ...terminal, exitCode: succeeded ? 0 : -1,
+        error, relay_task_finished_at: finishedAt };
+      const output = outputStateForRun(run);
+      const assistant = window.RelayAssistantOutput.finish(output, done, {
+        aborted: paused || canceled, error, supplements: run.turn.supplements || [],
+      });
+      // Old renderers could freeze a failed segment at the next startup. Rebuild
+      // its unfinished timing from the original segment and the durable cutoff.
+      const timing = window.RelayTaskContinuity.normalize(run.turn.taskRun || run.activityState?.taskRun);
+      let taskRun = null;
+      if (timing) {
+        const { segmentFinishedAt, elapsedMs, ...unfinished } = timing;
+        taskRun = window.RelayTaskContinuity.finish(unfinished, { finishedAt });
+        done.relay_task_duration_ms = taskRun.elapsedMs;
+      }
+      syncRunOutputActivity(run, false);
+      if (run.activityState) {
+        run.activityState.taskRun = taskRun;
+        run.activityState.taskFinishedAt = finishedAt;
+        run.activityState.taskDurationMs = taskRun?.elapsedMs ?? null;
+        window.RelayActivity.finish(run.activityState, paused ? '已暂停' : canceled ? '已由用户中止' : error, done);
+      }
+      const notice = [paused ? '任务因 Relay 关闭而暂停，已保留执行过程。' : output.notice,
+        run.replayIncomplete ? '部分执行过程已超出本地保留范围。' : ''].filter(Boolean).join('\n');
+      const turn = {
+        assistant, output: window.RelayAssistantOutput.serialize(output), error,
+        status: paused ? 'paused' : canceled ? 'canceled' : error ? 'error' : 'complete',
+        outputNotice: notice || null, assistantTs: assistant ? new Date(finishedAt).toISOString() : null,
+        thinking: run.turn.thinkingList.join('\n\n--- 下一段思考 ---\n\n') || null,
+        supplements: run.turn.supplements.map(input => ({ ...input })),
+        ...(taskRun ? { taskRun } : {}),
+        ...(run.activityState ? { activity: window.RelayActivity.serialize(run.activityState) } : {}),
+        ...(run.turn.chat?.length ? { chat: run.turn.chat } : {}),
+      };
+      const payload = { turn, recoveryExpectedTurn: run.recoveryExpectedTurn, recoveryPreserveUpdatedAt: true };
+      if (paused) payload.paused = { runId: run.jobId, at: new Date(finishedAt).toISOString() };
+      if ((paused || succeeded) && run.sessionId) {
+        payload.session = { sessionId: run.sessionId, sessionProviderId: run.sessionProviderId,
+          sessionProviderRevision: run.sessionProviderRevision, sessionRouteTier: run.sessionRouteTier,
+          sessionAgentEnvironment: run.sessionAgentEnvironment };
+        payload.recoveryExpectedSession = run.recoveryExpectedSession;
+      }
+      const saved = await window.api.history.completeTurn(run.convId, run.jobId, run.turn.ts, payload);
+      if (!saved || saved.ok === false || saved.error) throw new Error(saved?.error || '中断任务的恢复记录未保存');
+      if (saved.stale) return;
+      // A new user send may have started while IPC persisted the old outcome.
+      // Its live run and in-memory draft/placeholder always retain ownership.
+      const canRefresh = () => currentConv?.id === run.convId && !runs.has(run.convId)
+        && !pendingConversationSends.has(run.convId) && !pendingConversationSaves.has(run.convId);
+      pendingConversationViewReloads.add(`chat:${run.convId}`);
+      if (canRefresh()) {
+        if (activeView === 'chat') await loadConversation(run.convId, null, { forceReload: true, recoveryRun: run });
+        else if (saved.conversation) currentConv = saved.conversation;
+      }
+    } catch (error) {
+      run.finishError = error;
+      if (!['TURN_NOT_FOUND', 'TURN_IDENTITY_MISMATCH'].includes(error?.code)) console.warn('恢复中断任务记录失败', error);
+    } finally {
+      if (recoveryRuns.get(run.jobId) === run) recoveryRuns.delete(run.jobId);
+      try { await refreshHistoryList(); } catch (_) {}
+    }
+  })();
+  return run.finishPromise;
 }
 
 function taskTurnLocation(conv, task) {
@@ -2340,9 +2678,20 @@ function registerCreationTask(task, { restored = true } = {}) {
   cvJobs.set(convId, {
     ...(previous && typeof previous === 'object' ? previous : {}),
     runId: task.runId,
+    ledgerState: task.state, phase: task.phase,
+    taskId: task.metadata?.mediaTaskId || (previous?.runId === task.runId ? previous.taskId : null) || task.runId,
     turnIndex: Number.isSafeInteger(source.turnIndex) ? source.turnIndex : null,
     restored: !!(restored || (previous && previous.restored)),
   });
+  const mediaTaskId = task.metadata?.mediaTaskId || (previous?.runId === task.runId ? previous.taskId : null) || task.runId;
+  void cvReadMediaTask(mediaTaskId);
+  if (activeView === 'create' && currentCreateConv?.id === convId) {
+    for (const host of cvMessagesEl.querySelectorAll('[data-media-task-id]')) {
+      if (host.dataset.mediaTaskId !== mediaTaskId) continue;
+      const label = host.querySelector('.cv-loading > div:last-child');
+      if (label) label.textContent = cvMediaProgressLabel(cvMediaTasks.get(mediaTaskId), cvJobs.get(convId));
+    }
+  }
   cvSyncGenerateBtn();
 }
 
@@ -2369,11 +2718,12 @@ async function reconcileCreationTask(task) {
         delete turn.error;
         changed = true;
       } else if (!Array.isArray(turn.resultPaths) || !turn.resultPaths.length) {
+        const mediaLabel = (turn.mediaKind || task.metadata?.mediaKind || task.kind) === 'video' ? '视频' : '图片';
         const error = state === 'canceled'
           ? '任务已取消'
           : (state === 'succeeded'
-            ? '任务已完成，但没有可用的图片结果'
-            : taskErrorText(task, '图片生成未完成'));
+            ? `任务已完成，但没有可用的${mediaLabel}结果`
+            : taskErrorText(task, `${mediaLabel}生成未完成`));
         if (turn.error !== error) {
           turn.error = error;
           changed = true;
@@ -2386,8 +2736,10 @@ async function reconcileCreationTask(task) {
     console.warn('恢复创作任务结果失败', error);
   }
 
+  const latestJob = cvJobs.get(convId);
+  const canRefresh = !cvPendingCreationConversations.has(convId) && (!latestJob || latestJob.runId === task.runId);
   if (ownsTrackedSlot && currentCreateConv && currentCreateConv.id === convId) {
-    if (activeView === 'create') await loadCreateConv(convId, null, { forceReload: true });
+    if (activeView === 'create' && canRefresh) await loadCreateConv(convId, null, { forceReload: true });
     else {
       pendingConversationViewReloads.add(`create:${convId}`);
       cvSyncGenerateBtn();
@@ -2403,6 +2755,7 @@ async function reconcileRestoredChatTask(task) {
   if (!task || !task.runId || !taskIsTerminal(task)) return;
   const run = runForJob(task.runId);
   if (!run || !run.restoredFromLedger || run.finishing) return;
+  if (run.recoveryOnly) return finishRecoveredChatRun(task, run);
   const state = String(task.state || '').toLowerCase();
   if (state === 'succeeded') {
     await finishRun(task.runId, { ...run.recoveredTerminalEvent, exitCode: 0 });
@@ -2412,6 +2765,15 @@ async function reconcileRestoredChatTask(task) {
     run.abortRequested = true;
     run.recoveryRerender = true;
     await finishRun(task.runId, { ...run.recoveredTerminalEvent, exitCode: -1 });
+    return;
+  }
+  if (taskIsAppInterrupted(task)) {
+    run.pauseRequested = true; run.abortRequested = true;
+    run.appInterruption = task.result.error.code;
+    run.recoveryRerender = true;
+    await finishRun(task.runId, { ...run.recoveredTerminalEvent,
+      exitCode: recoveredTerminalSucceeded(run.recoveredTerminalEvent) ? 0 : -1,
+      relay_task_finished_at: recoveredRunFinishedAt(run, task, run.recoveredTerminalEvent) });
     return;
   }
   const error = taskErrorText(task, state === 'interrupted' ? '任务意外中断' : '任务执行失败');
@@ -2479,7 +2841,7 @@ async function restoreActiveRunsFromLedger() {
         }
         continue;
       }
-      if (!taskCanRestoreChat(task, snapshot.epoch) || runs.has(convId)) continue;
+      if (!taskCanRestoreChat(task, snapshot.epoch) || (!taskIsTerminal(task) && runs.has(convId)) || recoveryRuns.has(runId)) continue;
       let conv = await window.api.history.load(convId);
       if (!conv || !Array.isArray(conv.turns)) continue;
       let located = taskTurnLocation(conv, task);
@@ -2498,37 +2860,35 @@ async function restoreActiveRunsFromLedger() {
           continue;
         }
       }
-      const repairInterrupted = located && taskHasEmptyInterruptedProgress(task, located.turn);
+      const repairInterrupted = located && taskCanRepairInterruption(task, located.turn);
       // 终态历史只修复能精确对应且仍缺回复的占位轮，避免重放旧任务覆盖正常历史。
       if (!located || (taskIsTerminal(task) && !repairInterrupted
           && (taskTurnHasPersistedOutcome(located.turn)
             || savedAssistantDisplay(located.turn).text
             || (!located.turn.output && Array.isArray(located.turn.chat) && located.turn.chat.length)))) continue;
       const savedTurn = located.turn || {};
+      const recoveryExpectedTurn = JSON.parse(JSON.stringify(savedTurn));
+      const recoveryExpectedSession = Object.fromEntries(['sessionId', 'sessionProviderId', 'sessionProviderRevision',
+        'sessionRouteTier', 'sessionAgentEnvironment', 'sessionModel', 'projectId', 'workingDir',
+        'carryContextOnNextTurn', 'model'].filter(key => conv[key] !== undefined)
+        .map(key => [key, JSON.parse(JSON.stringify(conv[key]))]));
       const epoch = task.execution?.appInstanceId || snapshot.epoch;
-      const progressReply = typeof window.api.tasks.progress === 'function'
-        ? await window.api.tasks.progress(runId) : null;
+      let progressReply = null, progressUnavailable = false;
+      if (typeof window.api.tasks.progress === 'function') {
+        try { progressReply = await window.api.tasks.progress(runId); }
+        catch (_) { progressUnavailable = true; }
+      }
       const candidate = progressReply?.ok && progressReply.progress;
       const progress = candidate?.runId === runId && candidate.epoch === epoch
         && Number.isSafeInteger(candidate.seq) && candidate.seq > 0 ? candidate : null;
-      let firstPage = null;
-      // A previous version may already have saved a blank APP_RESTART error.
-      // Repair only with real process evidence, never resave empty errors on
-      // every startup or turn a known failure into an invented final answer.
-      if (repairInterrupted && !progress?.activity?.items?.length && !progress?.output?.messages?.length) {
-        firstPage = await window.api.tasks.replayStream({ epoch, runId, sinceSeq: 0, limit: 5000 });
-        if (!firstPage?.ok || !firstPage.events?.some(envelope => {
-          const event = envelope.payload?.event;
-          return envelope.runId === runId && ['assistant', 'user', 'stream_event'].includes(event?.type);
-        })) continue;
-      }
       const mode = source.mode || conv.mode || 'plain';
-      const activityState = activityStateForTurn(progress ? { ...savedTurn, activity: progress.activity, output: progress.output } : savedTurn) || newActivityState();
+      const activityState = activityStateForTurn(progress ? { ...savedTurn, activity: progress.activity, output: progress.output } : savedTurn)
+        || newActivityState({ startedAt: recoveryTime(savedTurn.ts) || recoveryTime(task.createdAt) });
       if (activityState && !taskIsTerminal(task)) { activityState.phase = 'running'; activityState.endedAt = null; }
       const turn = {
         user: savedTurn.user || '', assistant: '', thinkingList: savedTurn.thinking ? [savedTurn.thinking] : [],
         runId, inputKind: savedTurn.inputKind, taskRun: window.RelayTaskContinuity?.normalize(savedTurn.taskRun),
-        output: progress?.output || (repairInterrupted ? null : savedTurn.output) || null,
+        output: progress?.output || savedTurn.output || null,
         files: Array.isArray(savedTurn.files) ? savedTurn.files : [],
         deliverables: savedTurn.deliverables || null,
         skill: savedTurn.skill || null,
@@ -2540,7 +2900,7 @@ async function restoreActiveRunsFromLedger() {
       const restored = {
         jobId: runId, convId,
         turnIndex: located.index,
-        sessionId: conv.sessionId || null,
+        sessionId: progress?.activity?.session?.id || conv.sessionId || null,
         sessionModel: conv.sessionModel || conv.model || null,
         sessionEffort: conv.effort || null,
         sessionProviderId: conv.sessionProviderId || null,
@@ -2553,13 +2913,24 @@ async function restoreActiveRunsFromLedger() {
         textDeltaMessageIds: new Set(),
         currentMessageHadTextDelta: false,
         restoredFromLedger: true,
+        recoveryOnly: taskIsTerminal(task), recoveryExpectedTurn, recoveryExpectedSession,
+        recoveryTask: task, replayStartedAt: Date.now(), recoveryLastEventAt: null,
+        replayIncomplete: progressUnavailable,
         progressEpoch: epoch, progressSeq: progress?.deliverySeq || progress?.seq || 0,
         recoveredTerminalEvent: progress?.terminalEvent || null,
       };
-      runs.set(convId, restored);
-      jobToConv.set(runId, convId);
+      // Recheck ownership after progress IPC: a new user turn may now own the
+      // conversation. Terminal repair may coexist, but cannot replace it.
+      if (restored.recoveryOnly) {
+        if (recoveryRuns.has(runId)) continue;
+        recoveryRuns.set(runId, restored);
+      } else {
+        if (runs.has(convId)) continue;
+        runs.set(convId, restored);
+        jobToConv.set(runId, convId);
+      }
       restoredJobIds.add(runId);
-      replayPlans.push({ runId, epoch, sinceSeq: progress?.seq || 0, firstPage });
+      replayPlans.push({ runId, epoch, sinceSeq: progress?.seq || 0, task });
     }
 
     // Each run owns an epoch and a saved cursor. A new app epoch must not hide
@@ -2567,10 +2938,9 @@ async function restoreActiveRunsFromLedger() {
     for (const plan of replayPlans) {
       let sinceSeq = plan.sinceSeq;
       for (;;) {
-        const response = plan.firstPage || await window.api.tasks.replayStream({
-          epoch: plan.epoch, runId: plan.runId, sinceSeq, limit: 5000,
-        });
-        plan.firstPage = null;
+        let response;
+        try { response = await window.api.tasks.replayStream({ epoch: plan.epoch, runId: plan.runId, sinceSeq, limit: 5000 }); }
+        catch (_) { response = { ok: false }; }
         if (!response || response.ok === false) {
           const run = runForJob(plan.runId);
           if (run) run.replayIncomplete = true;
@@ -2587,7 +2957,11 @@ async function restoreActiveRunsFromLedger() {
               || (event.jobId && event.jobId !== plan.runId) || !runForJob(plan.runId)) continue;
           const fingerprint = claudeEventFingerprint(event);
           if (fingerprint) replayed.add(fingerprint);
+          const run = runForJob(plan.runId);
+          const emittedAt = recoveryTime(envelope.emittedAt);
+          if (run?.recoveryOnly && emittedAt) run.recoveryLastEventAt = Math.max(run.recoveryLastEventAt || 0, emittedAt);
           handleClaudeEvent({ ...event, jobId: plan.runId,
+            ...(run?.recoveryOnly ? { relay_recovery_at: emittedAt || recoveredRunFinishedAt(run, plan.task) } : {}),
             relay_stream_epoch: plan.epoch, relay_stream_seq: event.relay_stream_seq || envelope.seq });
         }
         if (!events.length) {
@@ -2603,8 +2977,11 @@ async function restoreActiveRunsFromLedger() {
         sinceSeq = nextSeq;
         if (!response.hasMore) break;
       }
+      // This terminal was already authoritative in the FIRST snapshot. Never
+      // leave its completion dependent on a second IPC succeeding.
+      if (taskIsTerminal(plan.task)) await reconcileRestoredChatTask(plan.task);
     }
-    if (currentConv && runs.has(currentConv.id)) {
+    if (currentConv && restoredJobIds.has(runs.get(currentConv.id)?.jobId)) {
       if (activeView === 'chat') await loadConversation(currentConv.id, null, { forceReload: true });
       else pendingConversationViewReloads.add(`chat:${currentConv.id}`);
     }
@@ -2797,6 +3174,11 @@ function handleClaudeEvent(evt) {
         ...activityEvent, presentation_order: outputStateForRun(run).eventOrder + index / 1000,
       });
     }
+    if (run.recoveryOnly && Number.isFinite(evt.relay_recovery_at)) {
+      for (const item of run.activityState.items) for (const key of ['startedAt', 'endedAt']) {
+        if (item[key] >= run.replayStartedAt) item[key] = evt.relay_recovery_at;
+      }
+    }
     if (run.activityState.taskRun && !run.activityState.taskRun.segmentFinishedAt) {
       run.taskRun = window.RelayTaskContinuity.normalize(run.activityState.taskRun);
       run.turn.taskRun = run.taskRun;
@@ -2814,6 +3196,7 @@ function handleClaudeEvent(evt) {
   if (evt.type === 'conversation_reset') {
     if (childOutput || !evt.new_conversation_id) return;
     run.sessionId = evt.new_conversation_id;
+    if (run.recoveryOnly) { run.error = null; run.stderrBuf = ''; return; }
     contextUsageByConv.delete(run.convId);
     contextUsageReadRevisions.set(run.convId, (contextUsageReadRevisions.get(run.convId) || 0) + 1);
     run.error = null; run.stderrBuf = '';
@@ -2870,6 +3253,13 @@ function handleClaudeEvent(evt) {
 
   // 后端进程结束(正常/异常/spawn 失败)→ 落盘 + 清理该 run
   if (evt.type === 'job-done') {
+    if (run.recoveryOnly) {
+      if (!recoveredTerminalSucceeded(run.recoveredTerminalEvent) || recoveredTerminalSucceeded(evt)) run.recoveredTerminalEvent = evt;
+      return;
+    }
+    if (evt.relay_app_interruption === 'APP_EXIT') {
+      run.appInterruption = 'APP_EXIT'; run.pauseRequested = true; run.abortRequested = true;
+    }
     void finishRun(jobId, evt);
     return;
   }
@@ -2927,6 +3317,7 @@ function appendMessage(role, text, files, meta = null) {
 
   const el = document.createElement('div');
   el.className = `message ${role}`;
+  if (role === 'user' || role === 'assistant') el.dataset.messageKey = role;
 
   if (role === 'assistant') {
     el.innerHTML = `<div class="bubble"><div class="body"></div></div>`;
@@ -2971,6 +3362,7 @@ let streamRenderBubble = null;   // 本轮渲染锚定的气泡,切换会话后�
 
 // 切换会话时同时解除旧消息树的所有持有者，后台任务只保留可重建的数据。
 function clearConversationMessages() {
+  clearHistorySearchHighlight();
   detachStreamRenderTarget();
   window.relayTurnDeliverables?.clear();
   window.RelayActivity?.clearTaskSummaries(messagesEl);
@@ -3535,6 +3927,7 @@ async function send(options = null) {
   if (currentConv === sentConv) {
     if (workspaceDraftId === convId) workspaceDraftId = null;
     emitConversationChanged(convId);
+    window.relayHistoryCompletionView?.ready('chat', convId);
     chatTitle.textContent = sentConv.title;
     refreshConversationIndex();
     setRunning(true);
@@ -3618,6 +4011,7 @@ async function send(options = null) {
       if (turn.activityEl && turn.activityState && window.RelayActivity) window.RelayActivity.updateElement(turn.activityEl, turn.activityState);
       showRunError(run, run.launchError);
       setRunning(false);
+      if (activeView === 'chat') window.relayHistoryCompletionView?.ready('chat', convId);
     }
     refreshHistoryList();
     return { ok: false, error: (result && result.error) || '启动失败', runId: clientRunId, conversationId: convId };
@@ -3948,6 +4342,7 @@ function appendSupplementMessage(input, turnIndex, before = null) {
   if (!el) {
     el = appendMessage('user', input.text, input.files, { ts: input.ts });
     el.dataset.supplementId = input.id;
+    el.dataset.messageKey = 'supplement:' + input.id;
     el.dataset.turn = String(turnIndex ?? 0);
     if (before && before.parentNode === messagesEl) messagesEl.insertBefore(el, before);
   }
@@ -3974,6 +4369,7 @@ function applyRunSupplement(run, input) {
       || input.status === 'queued' && previous.status !== 'queued')
     ? previous : { ...input, files: (input.files || []).map(file => ({ ...file })) };
   if (index >= 0) items[index] = accepted; else items.push(accepted);
+  if (run.recoveryOnly) return accepted;
   if (currentConv && currentConv.id === run.convId) {
     const target = currentConv.turns && currentConv.turns[run.turnIndex];
     if (target && (!target.runId || target.runId === run.jobId)) target.supplements = items;
@@ -5606,6 +6002,7 @@ function showAppView(view, navigationIntent = null) {
   if (!target) return false;
   const previous = views[activeView];
   const changed = view !== activeView;
+  if (activeView === 'create' && view !== 'create') cvCaptureComposer({ persist: true });
   const navigationVersion = navigationIntent == null ? ++pageNavigationVersion : navigationIntent;
   if (changed && previous) {
     previous.querySelectorAll('.messages, .workspace-page-body, .modal-body, .set-content, .set-nav, .sv-listbody, .sv-detail-column').forEach((el) => {
@@ -5625,6 +6022,7 @@ function showAppView(view, navigationIntent = null) {
   hideModelPopup();
   hideSkillQuickPopup();
   syncPageNavigation();
+  if (navigationIntent == null) window.relayHistoryCompletionView?.syncVisible();
   window.dispatchEvent(new CustomEvent('relay:view-changed', { detail: { view, previousView: previous && previous.dataset.appView } }));
   if (view === 'chat' && navigationIntent == null) emitConversationChanged(currentConv && currentConv.id);
   // A second click can supersede the first return frame without changing views.
@@ -5682,7 +6080,7 @@ async function showCreateView(fresh = false, navigationIntent = null) {
   if (fresh) {
     newCreateConv();
     cvRefImages = []; cvRenderRef();
-    cvMessagesEl.innerHTML = '<div class="welcome"><h2>🎨 AI 创作</h2><p>描述你想要的图片，点「生成」即可。<br/>同一会话里可继续描述，在上一张图基础上调整。</p></div>';
+    cvMessagesEl.innerHTML = '<div class="welcome"><h2>🎨 AI 创作</h2><p>选择模型，描述你想生成的图片或视频。</p></div>';
     refreshHistoryList();
   }
   return intent === pageNavigationVersion && activeView === 'create';
@@ -5693,24 +6091,34 @@ if (btnCreateNav) btnCreateNav.addEventListener('click', () => showCreateView(tr
 // 从历史载入一个创作会话:重建消息流(用户描述气泡 + 结果图网格)
 // jumpTo(可选):{ turnIndex } —— 从搜索结果跳转时滚动到命中的那轮提示词并高亮。
 async function loadCreateConv(id, jumpTo = null, { forceReload = false } = {}) {
+  cvCaptureComposer({ persist: true });
   const navigationIntent = ++pageNavigationVersion;
   const isCurrentNavigation = () => navigationIntent === pageNavigationVersion;
-  if (currentCreateConv && currentCreateConv.id === id && !jumpTo && !forceReload && !pendingConversationViewReloads.has(`create:${id}`)) {
-    return showCreateView(false, navigationIntent);
+  if (currentCreateConv && currentCreateConv.id === id && !forceReload && !pendingConversationViewReloads.has(`create:${id}`)
+      && window.relayHistoryCompletionView?.canReuse('create', id) !== false) {
+    if (!await showCreateView(false, navigationIntent)) return false;
+    if (!jumpTo || jumpToHistoryMatch(cvMessagesEl, currentCreateConv.turns || [], jumpTo,
+      () => isCurrentNavigation() && currentCreateConv?.id === id && activeView === 'create', { quiet: true })) {
+      window.relayHistoryCompletionView?.syncVisible();
+      return true;
+    }
   }
+  const completionAtLoad = window.relayHistoryCompletionView?.beginLoad('create', id);
   const conv = await window.api.history.load(id);
   if (!conv || !isCurrentNavigation()) return false;
   if (!await showCreateView(false, navigationIntent) || !isCurrentNavigation()) return false;
   currentCreateConv = conv;
   pendingConversationViewReloads.delete(`create:${id}`);
   if (!Array.isArray(currentCreateConv.turns)) currentCreateConv.turns = [];
-  cvRefImages = []; cvRenderRef();
+  cvRestoreComposer(conv);
+  clearHistorySearchHighlight();
   cvMessagesEl.innerHTML = '';
   const running = cvIsRunning(id);
   currentCreateConv.turns.forEach((t, idx) => {
     const um = document.createElement('div');
     um.className = 'message user';
     um.dataset.turn = idx;   // 供搜索跳转定位
+    um.dataset.messageKey = 'user';
     // 该轮若带手动上传的参考图,在提示词气泡上方展示缩略图(文件已删则显示占位)。
     if (Array.isArray(t.refPaths) && t.refPaths.length) um.appendChild(buildImageGrid(t.refPaths));
     const ub = document.createElement('div'); ub.className = 'bubble'; ub.textContent = t.prompt || '';
@@ -5719,58 +6127,44 @@ async function loadCreateConv(id, jumpTo = null, { forceReload = false } = {}) {
     am.className = 'message assistant cv-result-msg';
     const isLast = idx === currentCreateConv.turns.length - 1;
     if (t.resultPaths && t.resultPaths.length) {
+      if (t.error) { am.classList.add('error'); am.innerHTML = window.RelayActivity.renderError(t.error); am.dataset.raw = t.error; }
       am.appendChild(buildImageGrid(t.resultPaths, t.prompt));
     } else if (isLast && running) {
       // 该会话正在后台生成,最后一轮还没结果 → 显示 loading(切回来能看到进行中)
       am.classList.add('cv-loading-msg');
-      am.innerHTML = '<div class="cv-loading"><div class="cv-spinner"></div><div>正在生成，请稍候…</div></div>';
+      am.innerHTML = '<div class="cv-loading"><div class="cv-spinner"></div><div>' + cvMediaProgressLabel(cvTaskForJob(id), cvJobs.get(id)) + '</div></div>';
     } else if (t.error) {
       // 有持久化的失败原因 → 显示具体错误(如内容审核拒绝),而不是笼统的「本轮无结果」
-      am.innerHTML = `<div class="cv-error">❌ 生成失败：${escapeHtml(t.error)}</div>`;
+      am.classList.add('error');
+      am.innerHTML = window.RelayActivity.renderError(t.error);
+      am.dataset.raw = t.error;
     } else {
-      am.innerHTML = '<div class="cv-error">（本轮无结果）</div>';
+      am.innerHTML = '<div class="cv-empty">（本轮无结果）</div>';
     }
     cvMessagesEl.appendChild(am);
+    if (t.mediaTaskId || t.runId) cvMountTaskControls(am, t.mediaTaskId || t.runId);
   });
-  // 搜索跳转:滚动到命中那轮的提示词并高亮;否则默认停在底部
-  let cvJumped = false;
-  if (jumpTo && jumpTo.turnIndex != null) {
-    const target = cvMessagesEl.querySelector(`.message.user[data-turn="${jumpTo.turnIndex}"]`);
-    if (target) {
-      cvJumped = true;
-      requestAnimationFrame(() => {
-        if (!isCurrentNavigation() || currentCreateConv !== conv || activeView !== 'create') return;
-        target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        target.classList.add('search-hit');
-        setTimeout(() => target.classList.remove('search-hit'), 2000);
-      });
-    }
-  }
+  const cvJumped = jumpToHistoryMatch(cvMessagesEl, currentCreateConv.turns, jumpTo,
+    () => isCurrentNavigation() && currentCreateConv === conv && activeView === 'create');
   if (!cvJumped) cvMessagesEl.scrollTop = cvMessagesEl.scrollHeight;
   cvSyncGenerateBtn();
   refreshHistoryList();
+  if (isCurrentNavigation() && currentCreateConv === conv) window.relayHistoryCompletionView?.finishLoad('create', id, completionAtLoad);
   return isCurrentNavigation() && currentCreateConv === conv;
 }
 
 // ── 创作页的自定义下拉(与新对话模型切换器同款的 .ms-trigger + .model-popup) ──
 //   通用工厂:给一个触发按钮挂一个弹出菜单,菜单项 = { value, label, desc?, icon?, disabled? }。
 //   选中后更新触发按钮的图标/文字,并回调。复用聊天那套 .model-popup / .mp-row 样式。
-const ICON_IMAGE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5L7 20"/></svg>';
+const ICON_IMAGE = '<svg data-media-icon="image" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5L7 20"/></svg>';
+const ICON_VIDEO = '<svg data-media-icon="video" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m10 8 6 4-6 4z"/></svg>';
 // 各模型一句描述(按 name 匹配),让弹出项与新对话同款"图标+标题+副标题"两行结构。描述由后端 IMAGE_MODELS 提供,这里仅作兜底。
-// 比例图标:按宽高比画一个描边矩形(豆包风)
-function ratioIcon(w, h) {
-  const maxW = 18, maxH = 18;
-  let rw = maxW, rh = maxH;
-  if (w >= h) rh = Math.max(7, Math.round(maxW * h / w)); else rw = Math.max(7, Math.round(maxH * w / h));
-  const x = Math.round((22 - rw) / 2), y = Math.round((22 - rh) / 2);
-  return `<svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="${x}" y="${y}" width="${rw}" height="${rh}" rx="2.5"/></svg>`;
-}
 // 「比例」触发按钮用的固定图标:裁剪框(crop)样式,比裸矩形好看
 const ICON_RATIO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v4M6 6H2M6 6v10a2 2 0 0 0 2 2h10M18 22v-4M18 18h4M18 18V8a2 2 0 0 0-2-2H6"/></svg>';
 // 画质图标:火花/星亮(连清晰度、品质感)
 const ICON_QUALITY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z"/></svg>';
 
-function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, openLeft = true, fixedLabel = '', fixedIcon = '', labelPrefix = '', popupClass = '' }) {
+function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, openLeft = true, fixedLabel = '', fixedIcon = '', labelPrefix = '', popupClass = '', visibleItems = 0 }) {
   let pop = null;
   const ensure = () => { if (!pop) { pop = document.createElement('div'); pop.className = 'model-popup' + (popupClass ? ' ' + popupClass : ''); document.body.appendChild(pop); } return pop; };
   const render = () => {
@@ -5779,6 +6173,7 @@ function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, ope
     for (const it of getItems()) {
       const row = document.createElement('button');
       row.type = 'button';
+      row.title = it.label;
       row.className = 'mp-row' + (it.value === cur ? ' selected' : '') + (it.disabled ? ' disabled' : '');
       row.innerHTML = `
         ${it.icon ? `<span class="mp-ico">${it.icon}</span>` : ''}
@@ -5795,14 +6190,34 @@ function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, ope
       p.appendChild(row);
     }
   };
-  const show = () => {
-    render();
+  const position = () => {
     const p = ensure();
     const r = trigger.getBoundingClientRect();
     p.style.position = 'fixed';
-    p.style.left = `${openLeft ? r.left : Math.max(8, r.right - 240)}px`;
-    p.style.bottom = `${window.innerHeight - r.top + 8}px`;
+    if (visibleItems) {
+      const style = getComputedStyle(p), rows = Array.from(p.children).slice(0, visibleItems);
+      const inset = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce((sum, key) => sum + (parseFloat(style[key]) || 0), 0);
+      const desired = rows.reduce((sum, row) => sum + row.getBoundingClientRect().height, inset) + Math.max(0, rows.length - 1) * (parseFloat(style.rowGap) || 0);
+      const above = Math.max(0, r.top - 16), below = Math.max(0, window.innerHeight - r.bottom - 16);
+      const upward = above >= desired || above >= below;
+      p.style.maxHeight = `${Math.min(desired, upward ? above : below)}px`;
+      p.style.bottom = upward ? `${window.innerHeight - r.top + 8}px` : 'auto';
+      p.style.top = upward ? 'auto' : `${r.bottom + 8}px`;
+    } else p.style.bottom = `${window.innerHeight - r.top + 8}px`;
+    p.style.left = `${Math.max(8, Math.min(openLeft ? r.left : r.right - p.offsetWidth, window.innerWidth - p.offsetWidth - 8))}px`;
+  };
+  const show = () => {
+    render();
+    const p = ensure();
     p.classList.add('show');
+    position();
+    p.scrollTop = 0;
+    const selected = p.querySelector('.selected');
+    if (selected && visibleItems) {
+      const style = getComputedStyle(p);
+      const bottom = p.getBoundingClientRect().bottom - (parseFloat(style.borderBottomWidth) || 0) - (parseFloat(style.paddingBottom) || 0);
+      p.scrollTop = Math.max(0, selected.getBoundingClientRect().bottom - bottom);
+    }
     trigger.classList.add('open');
   };
   const hide = () => { if (pop) pop.classList.remove('show'); trigger.classList.remove('open'); };
@@ -5810,6 +6225,8 @@ function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, ope
   trigger.addEventListener('click', (e) => { e.stopPropagation(); isOpen() ? hide() : show(); });
   document.addEventListener('click', (e) => { if (isOpen() && !pop.contains(e.target) && !trigger.contains(e.target)) hide(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+  window.addEventListener('resize', () => { if (isOpen()) position(); });
+  document.addEventListener('scroll', (event) => { if (isOpen() && !pop.contains(event.target)) position(); }, true);
   // 暴露刷新触发按钮显示的方法
   return {
     refresh() {
@@ -5836,103 +6253,140 @@ function makeCvDropdown({ trigger, ico, label, getItems, getValue, onSelect, ope
 let cvModels = [];                       // 从后端拿的模型清单 [{name,label,ok,sizes,qualityKind,qualityTiers,...}]
 let cvModelValue = '';
 let cvSizeValue = '';
-let cvQualityValue = '';                  // 「画质」下拉当前值:分辨率档(豆包 2K/3K/4K、GPT 1K/4K)
-let cvResoTables = {};                     // resoKey→「档→[{ratio,value}]」表(后端 image:getConfig 给,如 {doubao:{...}, gpt:{...}})
-const cvCountValue = '1';   // 常规生成张数固定为 1(数量下拉已移除)
-const CV_GROUP_MAX = 6;      // 组图模式下请求的张数上限(交给模型 auto 决定实际张数,这里给上限)
-
-// 组图触发:不再用手动开关按钮,改成从提示词自动判断(仅豆包支持组图)。
-//   命中下列任一意图词就开启 sequential_image_generation:auto,让模型一次出一组关联图。
-//   覆盖:组图/连环画/分镜/故事板;带数量量词(≥2,排除"1/一"单数)的"N张/N幅/N步/N个画面";
-//   步骤/阶段/流程/分步;系列/一组/一套/多张/多幅/几张;英文 N images/steps、step-by-step、a series/set of、storyboard。
-//   设计取向:宁可漏判(用户把话说明确即可),也尽量别误判——量词一律要 ≥2,且对易歧义词(一张纸/步伐/步行)做了排除。
-//   N2 = 至少 2 的数量(阿拉伯 [2-9]/两位数,或中文 两/二三四…十),用来挡住"一张/1 image"这种单图。
-const CV_GROUP_N2 = '([2-9]\\d*|\\d{2,}|[两二三四五六七八九十]|十[一二三四五六七八九]?)';
-const CV_GROUP_PROMPT_RE = new RegExp(
-  '组图|连环画|分镜|系列图|故事板|' +
-  '[分按]\\s*' + CV_GROUP_N2 + '\\s*(步|张|幅|个|格|帧|画面|部分|阶段)|' +     // 分4步/分四步/按三个阶段
-  CV_GROUP_N2 + '\\s*(张|幅)(?!\\s*(的)?(纸|脸|床|嘴|网))|' +                  // ≥2 张/幅 → 多图(排除 一张纸/张嘴)
-  CV_GROUP_N2 + '\\s*(个|格|帧)\\s*(图|画面|插画|关联|海报|场景|镜头)|' +        // 3个画面/6格漫画
-  CV_GROUP_N2 + '\\s*步(?![伐道行])|' +                                       // 裸"三步/4步"(排除 步伐/步道/步行)
-  '(分|按)\\s*(步骤|阶段|流程)|步骤图|流程图解|分步骤|分步图|' +
-  '一组|一套|一系列|系列|多张图?|多幅|几张图|连续[^。,，]{0,6}?' + CV_GROUP_N2 + '\\s*张|' +
-  '\\b' + CV_GROUP_N2 + '\\s*(images?|pictures?|panels?|frames?|steps?|stages?|illustrations?)\\b|' +
-  '\\bstep[\\s-]?by[\\s-]?step\\b|\\ba\\s+series\\s+of\\b|\\ba\\s+set\\s+of\\b|\\bsequence\\s+of\\b|\\bstoryboard\\b|\\bcomic\\s+strip\\b',
-  'i'
-);
-function cvPromptWantsGroup(text) {
-  return typeof text === 'string' && CV_GROUP_PROMPT_RE.test(text);
+let cvQualityValue = '';
+let cvResoTables = {};
+let cvReadParameters = () => ({});
+const cvComposerDrafts = new Map();
+const cvNewComposerDrafts = new WeakMap();
+const cvComposerWrites = new Map();
+let cvComposerOwner = null;
+let cvRestoringComposer = false;
+const cvClone = value => JSON.parse(JSON.stringify(value));
+function cvSavedDraft(conv) { return conv?.id ? cvComposerDrafts.get(conv.id) : conv && cvNewComposerDrafts.get(conv); }
+function cvStoreDraft(conv, draft) {
+  if (!conv) return;
+  if (conv.id) cvComposerDrafts.set(conv.id, cvClone(draft));
+  else cvNewComposerDrafts.set(conv, cvClone(draft));
 }
-
-// 当前选中模型对象 / 它的可用尺寸(每个模型尺寸不同:豆包要大尺寸,GPT 用常规尺寸)
-function cvCurrentModel() { return cvModels.find((m) => m.name === cvModelValue) || cvModels.find((m) => m.ok) || cvModels[0]; }
-// 当前可选比例:随【画质档】变 —— 用模型 resoKey 对应的表(gpt/doubao)展开当前档的各比例像素。
-function cvCurrentSizes() {
-  const m = cvCurrentModel();
-  let sizes;
-  const table = m && m.resoKey ? cvResoTables[m.resoKey] : null;
-  if (table) {
-    // 当前档没有则回落到该表第一个档(键序稳定:豆包 2K 先、GPT 1K 先)
-    const rows = table[cvQualityValue] || table[Object.keys(table)[0]] || [];
-    sizes = rows.map((r) => ({ value: r.value, label: r.ratio, shortLabel: r.ratio, desc: '' }));
-  } else {
-    sizes = (m && m.sizes) || [];   // 兜底:没有 reso 表的模型用其固定 sizes
-  }
-  // 给每个尺寸按真实宽高比生成描边矩形图标。不带 desc:比例下拉只显示比例本身(如 16:9),收窄弹窗。
-  return sizes.map((s) => {
-    const [w, h] = String(s.value).split('x').map(Number);
-    return { value: s.value, label: s.label, shortLabel: s.shortLabel || s.label, icon: ratioIcon(w || 1, h || 1) };
+function cvPersistComposer(conv, mediaComposer) {
+  conv.mediaComposer = cvClone(mediaComposer);
+  if (!conv.id || !window.api.history.updateCreationComposer) return;
+  const id = conv.id, signature = JSON.stringify(mediaComposer), prior = cvComposerWrites.get(id);
+  if (prior?.signature === signature) return prior.promise;
+  const write = { signature, promise: null };
+  write.promise = (prior?.promise || Promise.resolve()).catch(() => {}).then(async () => {
+    if (!cvComposerWrites.has(id)) return; // The conversation was deleted while this write waited.
+    const result = await window.api.history.updateCreationComposer({ id, mediaComposer: cvClone(mediaComposer) });
+    if (result?.ok === false) throw new Error(result.error || '模型和参数未保存');
+  }).catch(error => {
+    if (!cvComposerWrites.has(id)) return;
+    if (cvComposerWrites.get(id) === write) write.signature = null;
+    showToast(error?.message || '模型和参数未保存，当前草稿已保留');
   });
+  cvComposerWrites.set(id, write);
+  return write.promise;
 }
-// 当前模型的画质档列表(给画质下拉用)
-function cvCurrentQualityTiers() { const m = cvCurrentModel(); return (m && m.qualityTiers) || []; }
-// 模型切换后:把画质重置为该模型默认档,再据此把比例校准到可用集合内。
-function cvResetQualityForModel() {
-  const m = cvCurrentModel();
-  const tiers = (m && m.qualityTiers) || [];
-  if (!tiers.find((t) => t.value === cvQualityValue)) {
-    cvQualityValue = (m && m.defaultQuality) || (tiers[0] ? tiers[0].value : '');
-  }
+function cvCaptureComposer({ persist = false } = {}) {
+  if (cvRestoringComposer || !cvComposerOwner) return null;
+  const prior = cvSavedDraft(cvComposerOwner) || {};
+  let parameters = prior.parameters || {}, rawParameters = prior.rawParameters;
+  const snapshot = cvReadParameters.snapshot?.();
+  if (snapshot) { parameters = snapshot.values; rawParameters = cvCurrentModel() ? snapshot.raw : prior.rawParameters; }
+  else { try { parameters = cvReadParameters(); } catch (_) {} }
+  const draft = { model: cvModelValue, parameters: cvClone(parameters), rawParameters: rawParameters && cvClone(rawParameters),
+    prompt: $('cvPrompt').value, refs: cvClone(cvRefImages), modelInfo: cvClone(cvCurrentModel() || prior.modelInfo || null) };
+  cvStoreDraft(cvComposerOwner, draft);
+  // Invalid partial controls cannot overwrite the last valid saved settings.
+  try {
+    const metadata = { model: cvModelValue, parameters: cvClone(cvReadParameters()) };
+    if (metadata.model && cvCurrentModel()) {
+      cvComposerOwner.mediaComposer = cvClone(metadata);
+      if (persist) void cvPersistComposer(cvComposerOwner, metadata);
+    }
+  } catch (_) {}
+  return draft;
 }
-// 把比例重置/校准:换模型或换画质档后,若当前比例值已不在可选集合里,落到第一个。
-//   豆包换档时尽量保留同一比例(按 label 找对应新档的像素值),保持用户选的画幅不变。
-function cvResetSizeForModel(prevSizeLabel = null) {
-  const sizes = cvCurrentSizes();
-  if (prevSizeLabel) {
-    const same = sizes.find((s) => s.label === prevSizeLabel);
-    if (same) { cvSizeValue = same.value; return; }
-  }
-  if (!sizes.find((s) => s.value === cvSizeValue)) cvSizeValue = sizes[0] ? sizes[0].value : '';
+function cvInitialComposer(conv) {
+  const saved = cvSavedDraft(conv);
+  if (saved) return cvClone(saved);
+  const turn = conv.turns?.at(-1), metadata = conv.mediaComposer;
+  const model = typeof metadata?.model === 'string' && metadata.model ? metadata.model
+    : turn?.model || cvModels.find(value => value.ok)?.name || '';
+  const info = cvModels.find(value => value.name === model);
+  let parameters;
+  if (metadata?.parameters && typeof metadata.parameters === 'object') parameters = metadata.parameters;
+  else if (turn?.parameters && typeof turn.parameters === 'object') parameters = turn.parameters;
+  else if (turn) {
+    const keys = new Set([...Object.keys(info?.capabilities?.parameters || {}), 'size', 'n', 'quality', 'duration', 'resolution', 'ratio', 'audio', 'seed', 'watermark']);
+    parameters = Object.fromEntries([...keys].filter(key => turn[key] !== undefined).map(key => [key, turn[key]]));
+  } else parameters = info?.capabilities?.defaults || {};
+  return { model, parameters: cvClone(parameters), prompt: '', refs: [], modelInfo: info ? cvClone(info) : null };
 }
-// 当前选中比例的 label(如 '16:9'),用于换画质档时保持画幅
-function cvCurrentSizeLabel() {
-  const s = cvCurrentSizes().find((x) => x.value === cvSizeValue);
-  return s ? s.label : null;
+function cvRestoreComposer(conv) {
+  const draft = cvInitialComposer(conv);
+  cvRestoringComposer = true;
+  try {
+    cvComposerOwner = conv; cvModelValue = draft.model;
+    cvRefImages = cvClone(draft.refs || []); $('cvPrompt').value = draft.prompt || '';
+    cvStoreDraft(conv, draft);
+    cvResetSizeForModel(draft.parameters, draft.rawParameters);
+    cvModelDD?.refresh(); cvRenderRef(); autoGrowCvPrompt();
+  } finally { cvRestoringComposer = false; }
+  cvSyncGenerateBtn();
 }
+function cvCurrentModel() { return cvModels.find(m => m.name === cvModelValue); }
+function cvCurrentSizes() { return []; }
+function cvCurrentQualityTiers() { return []; }
+function cvResetQualityForModel() {}
+function cvResetSizeForModel(initialValues, rawDraft) {
+  const model = cvCurrentModel();
+  const known = new Set(window.RelayMediaUI.parameterDescriptors(model?.capabilities).map(item => item.key));
+  const retained = Object.fromEntries(Object.entries(initialValues || {}).filter(([key]) => !known.has(key)));
+  const read = window.RelayMediaUI.mountParameters($('cvMediaParameters'), model, initialValues, rawDraft);
+  cvReadParameters = () => ({ ...cvClone(retained), ...read() });
+  cvReadParameters.snapshot = () => { const snapshot = read.snapshot?.() || { values: read(), raw: {} }; return { ...snapshot, values: { ...cvClone(retained), ...snapshot.values } }; };
+  $('cvQualitySwitch').hidden = true;
+  $('cvQualitySwitch').style.display = 'none';
+  $('cvSizeSwitch').hidden = true;
+  $('cvSizeSwitch').style.display = 'none';
+}
+function cvCurrentSizeLabel() { return null; }
 
 let cvModelDD, cvSizeDD, cvQualityDD;
 function initCvDropdowns() {
   if (cvModelDD) return;   // 只建一次
   cvModelDD = makeCvDropdown({
     trigger: $('cvModelTrigger'), ico: $('cvModelIco'), label: $('cvModelLabel'),
+    popupClass: 'cv-model-popup', visibleItems: 5,
     // 不设 fixedLabel:按钮直接显示当前选中的模型名(如「Seedream 5.0」)
-    getItems: () => cvModels.map((m) => {
+    getItems: () => { const items = cvModels.map((m) => {
       // 带参考图时,不支持参考图的模型置灰(豆包/GPT 均支持,故当前不会触发)
       const blockedByRef = cvRefImages.length > 0 && !cvModelSupportsRef(m);
       const disabled = !m.ok || blockedByRef;
       const desc = !m.ok
         ? '待接入'
         : (blockedByRef ? '不支持参考图' : (m.providerName || 'Relay 服务商'));
-      return { value: m.name, label: m.label, shortLabel: m.label, desc, icon: ICON_IMAGE, disabled };
-    }),
+      return { value: m.name, label: (m.modality === 'video' ? '视频 · ' : '') + m.label, shortLabel: m.label, desc, icon: m.modality === 'video' ? ICON_VIDEO : ICON_IMAGE, disabled };
+    });
+      if (cvModelValue && !items.some(item => item.value === cvModelValue)) {
+        const draft = cvSavedDraft(cvComposerOwner);
+        items.unshift({ value: cvModelValue, label: '模型已不可用', shortLabel: '模型已不可用', desc: '请选择可用模型', disabled: true,
+          icon: draft?.modelInfo?.modality === 'video' || currentCreateConv?.turns?.at(-1)?.mediaKind === 'video' ? ICON_VIDEO : ICON_IMAGE });
+      }
+      return items;
+    },
     getValue: () => cvModelValue,
     onSelect: (it) => {
+      cvCaptureComposer();
       cvModelValue = it.value;
+      cvRenderRef();
       cvResetQualityForModel();   // 先定画质档(默认),再据此校准比例
       cvResetSizeForModel();
       cvModelDD.refresh();
       if (cvQualityDD) cvQualityDD.refresh();
       if (cvSizeDD) cvSizeDD.refresh();
+      cvCaptureComposer({ persist: true });
+      cvSyncGenerateBtn();
     },
   });
   // 画质下拉:切分辨率档(豆包 2K/3K/4K、GPT 1K/4K)。按钮显示「画质 + 当前值」。
@@ -5970,16 +6424,17 @@ function initCvDropdowns() {
 
 // 载入可选模型(填充模型下拉,默认选第一个可用的,并初始化其画质档与尺寸)
 async function loadImageModels() {
+  cvCaptureComposer({ persist: true });
   initCvDropdowns();
   let cfg;
-  try { cfg = await window.api.image.getConfig(); } catch { cfg = null; }
+  try { cfg = await window.api.media.getConfig(); } catch { cfg = null; }
   cvModels = (cfg && cfg.models) || [];
   cvResoTables = (cfg && cfg.resoTables) || {};
-  const firstOk = cvModels.find((m) => m.ok) || cvModels[0];
-  if (firstOk && !cvModels.some((model) => model.name === cvModelValue)) cvModelValue = firstOk.name;
-  if (!firstOk) cvModelValue = '';
-  cvResetQualityForModel();   // 先定画质档(默认),豆包据此展开比例
-  cvResetSizeForModel();      // 按当前模型 + 画质档定下默认比例
+  if (cvComposerOwner) cvRestoreComposer(currentCreateConv || cvComposerOwner);
+  else {
+    if (!cvModelValue) cvModelValue = cvModels.find(model => model.ok)?.name || '';
+    cvResetSizeForModel();
+  }
   if (cvModelDD) cvModelDD.refresh();
   if (cvQualityDD) cvQualityDD.refresh();
   if (cvSizeDD) cvSizeDD.refresh();
@@ -5988,7 +6443,7 @@ async function loadImageModels() {
 
 // 生成按钮
 const btnGenerate = $('btnGenerate');
-if (btnGenerate) btnGenerate.addEventListener('click', generateImages);
+if (btnGenerate) btnGenerate.addEventListener('click', cvSubmitComposer);
 // Ctrl/Cmd+Enter 在 prompt 框里也触发生成
 if ($('cvPrompt')) $('cvPrompt').addEventListener('keydown', (e) => {
   // 与新对话一致:Enter 发送,Shift+Enter 换行(输入法组合中的回车不触发)
@@ -6003,25 +6458,30 @@ const cvMessagesEl = $('cvMessages');
 let currentCreateConv = null;
 
 function newCreateConv() {
+  cvCaptureComposer({ persist: true });
+  window.relayHistoryCompletionView?.reset('create');
   currentCreateConv = { id: null, kind: 'create', title: '', turns: [], titleGenerated: false };
+  cvRestoreComposer(currentCreateConv);
 }
 // 上一轮最后一张结果图的本地路径(用于上下文迭代)
 function cvLastResultPath(conv = currentCreateConv) {
   if (!conv || !Array.isArray(conv.turns) || !conv.turns.length) return null;
   for (let i = conv.turns.length - 1; i >= 0; i--) {
     const t = conv.turns[i];
-    if (t.resultPaths && t.resultPaths.length) return t.resultPaths[t.resultPaths.length - 1];
+    if (t.resultPaths?.length && t.mediaKind !== 'video') { const images = t.resultPaths.filter(p => !/\.(mp4|webm|mov)$/i.test(p)); if (images.length) return images[images.length - 1]; }
   }
   return null;
 }
 // 保存创作会话到历史(复用聊天的 history 机制)
 async function saveCreateConv(targetConv = currentCreateConv) {
   if (!targetConv) return null;
+  const unsavedDraft = !targetConv.id ? cvSavedDraft(targetConv) : null;
   const saved = await window.api.history.save(targetConv);
   // await 期间可能已切到另一条创作历史：只更新本次发送时捕获的对象，
   // 绝不用返回的 id/updatedAt 污染新的 currentCreateConv。
-  if (saved && saved.id) targetConv.id = saved.id;
+  if (saved && saved.id) { targetConv.id = saved.id; if (unsavedDraft) cvStoreDraft(targetConv, cvNewComposerDrafts.get(targetConv) || unsavedDraft); if (targetConv.mediaComposer) void cvPersistComposer(targetConv, targetConv.mediaComposer); }
   if (saved && saved.updatedAt) targetConv.updatedAt = saved.updatedAt;
+  if (targetConv === currentCreateConv) window.relayHistoryCompletionView?.ready('create', targetConv.id);
   await refreshHistoryList();
   return saved;
 }
@@ -6044,55 +6504,56 @@ function cvRenderRef() {
       del.className = 'ac-del'; del.textContent = '×'; del.title = '移除参考图';
       del.addEventListener('click', () => { cvRefImages.splice(idx, 1); cvRenderRef(); cvSyncModelForRef(); });
       chip.appendChild(del);
+      const roles = cvCurrentModel()?.capabilities?.references?.roles || [];
+      if (roles.length) {
+        const picker=document.createElement('select');picker.setAttribute('aria-label', `参考图 ${idx+1} 角色`);
+        const blank=document.createElement('option');blank.value='';blank.textContent='选择角色';picker.append(blank);
+        for(const role of roles){const option=document.createElement('option');option.value=role;option.textContent=({first_frame:'首帧',last_frame:'尾帧',reference_image:'参考图'})[role] || role;picker.append(option);}
+        picker.value=roles.includes(ref.role) ? ref.role : '';picker.onchange=()=>{ref.role=picker.value;cvCaptureComposer();};chip.append(picker);
+      }
       wrap.appendChild(chip);
     });
   }
   cvSyncModelForRef();
+  cvCaptureComposer();
 }
 
 // 带参考图时:若当前选中的模型不支持参考图,自动切到第一个支持的模型。
 // 现在豆包(图生图)和 GPT(图片编辑)都支持,故一般不会触发切换;保留以防未来加入不支持的模型。
-function cvSyncModelForRef() {
-  if (!cvRefImages.length) { if (cvModelDD) cvModelDD.refresh(); return; }
-  const cur = cvModels.find((m) => m.name === cvModelValue);
-  if (cur && !cvModelSupportsRef(cur)) {
-    const alt = cvModels.find((m) => m.ok && cvModelSupportsRef(m));
-    if (alt) { cvModelValue = alt.name; cvResetSizeForModel(); if (cvSizeDD) cvSizeDD.refresh(); }
-  }
-  if (cvModelDD) cvModelDD.refresh();
-}
+function cvSyncModelForRef() { if (cvModelDD) cvModelDD.refresh(); cvSyncGenerateBtn(); }
 function cvResolvedModel(model) {
-  if (model && model.adapterId) return model;
-  const name = typeof model === 'string' ? model : (model && model.name);
-  return cvModels.find((item) => item.name === name) || null;
+  const name = typeof model === 'string' ? model : model?.name;
+  return cvModels.find(item => item.name === name) || null;
 }
-// Relay 当前适配的三个图像模型均支持参考图；能力判断与供应商前缀无关。
 function cvModelSupportsRef(model) {
   const resolved = cvResolvedModel(model);
-  return !!(resolved && ['gpt-image-2', 'seedream-5.0', 'seedream-4.5'].includes(resolved.adapterId));
-}
-// 是否支持多图融合(2+ 张参考图):仅豆包。GPT 编辑只取第一张。
-function cvModelSupportsMultiRef(model) {
-  const resolved = cvResolvedModel(model);
-  return !!(resolved && ['seedream-5.0', 'seedream-4.5'].includes(resolved.adapterId));
+  return !!resolved?.capabilities?.operations?.some(op => op === 'image_to_image' || op === 'image_to_video');
 }
 
 // 读文件为 dataURL(校验是图片 + 大小),追加到参考图数组
-function cvLoadRefFromPath(file) {
+function cvLoadRefFromPath(file, owner = cvComposerOwner) {
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   if (!IMAGE_EXTS.includes(ext)) { return; }   // 只收图片
   if (file.size && file.size > CV_REF_MAX) { alert('参考图过大(单张上限 8MB)'); return; }
-  if (cvRefImages.length >= CV_REF_COUNT_MAX) { alert('参考图最多 ' + CV_REF_COUNT_MAX + ' 张'); return; }
+  const currentOwner = owner === cvComposerOwner || (owner?.id && owner.id === cvComposerOwner?.id);
+  const draft = currentOwner ? cvCaptureComposer() : cvSavedDraft(owner);
+  const targetModel = cvModels.find(model => model.name === (draft?.model || cvModelValue));
+  if ((draft?.refs || []).length >= (targetModel?.capabilities?.references?.max || CV_REF_COUNT_MAX)) { alert('参考图最多 ' + CV_REF_COUNT_MAX + ' 张'); return; }
   const reader = new FileReader();
-  reader.onload = () => { cvRefImages.push({ name: file.name, dataUrl: reader.result }); cvRenderRef(); };
+  reader.onload = () => {
+    const ref = { name: file.name, dataUrl: reader.result };
+    if (owner === cvComposerOwner || (owner?.id && owner.id === cvComposerOwner?.id)) { cvRefImages.push(ref); cvRenderRef(); }
+    else if (owner) { const saved = cvSavedDraft(owner); if (saved) cvStoreDraft(owner, { ...saved, refs: [...(saved.refs || []), ref] }); }
+  };
   reader.readAsDataURL(file);
 }
 
 // 点击 + 选图(支持多选;用浏览器原生文件选择,直接拿 File 读 dataURL,避免再走主进程读路径)
 if ($('cvBtnAttach')) $('cvBtnAttach').addEventListener('click', () => {
+  const owner = cvComposerOwner;
   const inp = document.createElement('input');
   inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
-  inp.onchange = () => { if (inp.files) Array.from(inp.files).forEach((f) => cvLoadRefFromPath(f)); };
+  inp.onchange = () => { if (inp.files) Array.from(inp.files).forEach((f) => cvLoadRefFromPath(f, owner)); };
   inp.click();
 });
 
@@ -6121,13 +6582,14 @@ if (cvInputCardEl) {
   //   兜底同对话框:DOM 取不到 file 项时,从原生剪贴板读 PNG dataURL 转成 File。
   const cvPromptEl = $('cvPrompt');
   if (cvPromptEl) cvPromptEl.addEventListener('paste', async (e) => {
+    const owner = cvComposerOwner;
     const imgs = imagesFromClipboard(e);
     if (!imgs.length) {
       let nativeUrl = null;
       try { const r = await window.api.image.readClipboardImage(); if (r && r.ok && r.dataUrl) nativeUrl = r.dataUrl; } catch (_) {}
       if (!nativeUrl) return;
       e.preventDefault();
-      try { cvLoadRefFromPath(dataUrlToFile(nativeUrl, '粘贴的图片.png')); } catch (_) {}
+      try { cvLoadRefFromPath(dataUrlToFile(nativeUrl, '粘贴的图片.png'), owner); } catch (_) {}
       return;
     }
     e.preventDefault();
@@ -6135,20 +6597,120 @@ if (cvInputCardEl) {
       const named = (file.name && /\.[a-z0-9]+$/i.test(file.name))
         ? file
         : new File([file], `粘贴的图片.${(file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, { type: file.type });
-      cvLoadRefFromPath(named);
+      cvLoadRefFromPath(named, owner);
     });
   });
 }
 
 // 进行中的创作生成任务在通用运行态区声明。支持后台生成 + 多会话并发。
-function cvIsRunning(convId) { return convId != null && cvJobs.has(convId); }
-
-// 同步生成按钮的禁用态:仅当"当前所看的创作会话"正在生成时才禁用
+const cvSubmittingConversations = new WeakSet();
+function cvMediaProgressLabel(task, job) {
+  if (!task) return job?.ledgerState === 'queued' || job?.phase === 'queued' ? '排队中…' : '正在准备…';
+  const labels = { queued: '排队中…', preparing: '正在准备…', submitting: '正在提交…', accepted: '等待生成…', downloading: '正在下载…' };
+  return labels[task.state] || (task.remoteState === 'queued' ? '等待生成…' : task.mediaKind === 'video' ? '正在生成视频…' : '正在生成…');
+}
+function cvTaskForJob(convId) {
+  const job = convId && cvJobs.get(convId);
+  if (!job) return null;
+  const task = cvMediaTasks.get(job.taskId || job.runId)
+    || [...cvMediaTasks.values()].find(value => value.runId === job.runId && value.conversationId === convId);
+  return task && (!task.conversationId || task.conversationId === convId) ? task : null;
+}
+function cvIsRunning(convId) {
+  if (!convId || !cvJobs.has(convId)) return false;
+  const turn = currentCreateConv?.id === convId ? currentCreateConv.turns?.at(-1) : null;
+  const task = cvMediaTasks.get(turn?.mediaTaskId || turn?.runId) || cvTaskForJob(convId);
+  return !task || cvMediaActiveStates.has(task.state);
+}
+function cvCurrentMediaTask() {
+  const conv = currentCreateConv;
+  if (!conv?.id) return null;
+  const turn = conv.turns?.[conv.turns.length - 1];
+  const id = turn?.mediaTaskId || turn?.runId;
+  const task = id && cvMediaTasks.get(id);
+  if (task && (!task.conversationId || task.conversationId === conv.id)) return task;
+  const active = cvTaskForJob(conv.id);
+  return active && (!turn || active.id === id || active.runId === turn.runId) ? active : null;
+}
+function cvRememberMediaTask(task) {
+  if (!task?.id) return null;
+  const previous = cvMediaTasks.get(task.id);
+  if (previous?.updatedAt && task.updatedAt && previous.updatedAt > task.updatedAt) return previous;
+  cvMediaTasks.set(task.id, task);
+  const convId = task.conversationId;
+  const job = convId && cvJobs.get(convId);
+  const ownsJob = job && (job.taskId === task.id || job.runId === task.id || job.runId === task.runId);
+  const latest = currentCreateConv?.id === convId ? currentCreateConv.turns?.at(-1) : null;
+  const ownsLatest = !latest || (latest.mediaTaskId || latest.runId) === task.id || latest.runId === task.runId;
+  if (cvMediaActiveStates.has(task.state)) {
+    if (convId && ownsLatest && (!job || ownsJob)) cvJobs.set(convId, {
+      ...job, runId: task.runId || task.id, taskId: task.id, turnIndex: task.turnIndex, restored: job?.restored ?? true,
+    });
+  } else if (ownsJob) cvJobs.delete(convId);
+  cvSyncGenerateBtn();
+  return task;
+}
+async function cvReadMediaTask(taskId) {
+  if (!taskId || !window.api.media?.get) return null;
+  const previous = cvMediaTasks.get(taskId);
+  try {
+    const task = await window.api.media.get(taskId);
+    // A service event received during this read is newer than its response.
+    if (cvMediaTasks.get(taskId) !== previous) return cvMediaTasks.get(taskId) || null;
+    return task?.id === taskId ? cvRememberMediaTask(task) : null;
+  } catch (_) { return cvMediaTasks.get(taskId) || null; }
+}
+function cvComposerAction() {
+  const task = cvCurrentMediaTask();
+  const hasDraft = !!$('cvPrompt')?.value.trim() || cvRefImages.length > 0;
+  const lastTurn = currentCreateConv?.turns?.[currentCreateConv.turns.length - 1];
+  const pendingGeneration = [task?.id, task?.runId, lastTurn?.mediaTaskId, lastTurn?.runId].some(id => cvPendingGenerations.has(id));
+  const preparing = !!currentCreateConv && (cvSubmittingConversations.has(currentCreateConv) || cvPendingCreationConversations.has(currentCreateConv.id));
+  const busy = !!task && cvMediaControls.has(task.id);
+  if (task && cvMediaActiveStates.has(task.state)) return { action: 'stop', task, disabled: busy, title: '停止等待' };
+  const unsafe = task?.submissionOutcome === 'submission_unknown' || task?.state === 'submission_unknown';
+  let action = 'generate';
+  if (!hasDraft && task && !unsafe && !['completed', 'failed'].includes(task.state)) {
+    if (task.remoteState === 'succeeded' || task.state === 'download_failed') action = 'retryDownload';
+    else if (task.remoteHandle) action = 'resume';
+  }
+  const title = action === 'resume' ? '继续查询' : action === 'retryDownload' ? '重试下载'
+    : !task && (preparing || cvIsRunning(currentCreateConv?.id)) ? cvMediaProgressLabel(null, cvJobs.get(currentCreateConv?.id))
+    : !hasDraft && unsafe ? '提交结果未知，请勿重复生成'
+    : !cvCurrentModel()?.ok && cvModelValue ? '原模型不可用，请重新选择可用模型' : '生成 (Enter)';
+  return { action, task, title,
+    disabled: busy || pendingGeneration || preparing || (!task && cvIsRunning(currentCreateConv?.id))
+      || (action === 'generate' && (!cvCurrentModel()?.ok || !hasDraft)),
+  };
+}
 function cvSyncGenerateBtn() {
   if (!btnGenerate) return;
-  const cur = currentCreateConv && currentCreateConv.id;
-  btnGenerate.disabled = !cvModels.length || cvIsRunning(cur);
-  btnGenerate.title = cvModels.length ? '' : '请先在设置的服务商中获取图像模型';
+  const state = cvComposerAction();
+  btnGenerate.dataset.action = state.action;
+  btnGenerate.classList.toggle('is-stop', state.action === 'stop');
+  btnGenerate.classList.toggle('is-resume', state.action === 'resume' || state.action === 'retryDownload');
+  btnGenerate.disabled = state.disabled;
+  btnGenerate.title = state.title;
+  btnGenerate.setAttribute('aria-label', state.title);
+}
+async function cvSubmitComposer() {
+  const state = cvComposerAction();
+  if (state.disabled) return;
+  if (state.action === 'generate') return generateImages();
+  const taskId = state.task.id;
+  cvMediaControls.set(taskId, state.action);
+  cvSyncGenerateBtn();
+  try {
+    const previous = cvMediaTasks.get(taskId);
+    const task = await window.api.media[state.action](taskId);
+    if (task?.id === taskId) {
+      if (cvMediaTasks.get(taskId) === previous) cvRememberMediaTask(task);
+    } else await cvReadMediaTask(taskId);
+    for (const host of cvMessagesEl?.querySelectorAll('[data-media-task-id]') || []) {
+      if (host.dataset.mediaTaskId === taskId) void cvMountTaskControls(host, taskId);
+    }
+  } catch (error) { showToast(error?.message || '任务操作失败，请重试'); }
+  finally { cvMediaControls.delete(taskId); cvSyncGenerateBtn(); }
 }
 
 async function generateImages() {
@@ -6156,21 +6718,39 @@ async function generateImages() {
   const prompt = (promptEl.value || '').trim();
   if (!prompt) { promptEl.focus(); return; }
   if (!cvModels.length || !cvModelValue) {
-    showToast('未发现图像模型，请在“设置 → 服务商”中获取模型');
+    showToast('请在“设置 → 服务商”中添加图片或视频模型');
     return;
   }
   const model = cvModelValue;
-  const size  = cvSizeValue;
-  const n     = cvCountValue;
+  const selected = cvCurrentModel();
+  if (!selected?.ok) { showToast('原模型不可用，请重新选择可用模型'); return; }
+  let parameters;
+  try { parameters = cvReadParameters(); } catch (error) { showToast(error.message); return; }
+  const size = parameters.size;
+  const mediaKind = selected?.modality || 'image';
+  const maxRefs = selected?.capabilities?.references?.max || 0;
+  if (cvRefImages.length > maxRefs || (cvRefImages.length && !cvModelSupportsRef(selected))) { showToast(`此模型最多支持 ${maxRefs} 张参考图`); return; }
+  if (selected?.capabilities?.references?.required && !cvRefImages.length) { showToast('请添加参考图'); return; }
 
   if (!currentCreateConv) newCreateConv();   // 没有会话则新建
   // 同一会话正在生成时,不重复提交(不同会话可并发)
-  if (currentCreateConv.id && cvIsRunning(currentCreateConv.id)) return;
+  if (currentCreateConv.id && (cvIsRunning(currentCreateConv.id) || cvPendingCreationConversations.has(currentCreateConv.id))) return;
+  if (cvMediaActiveStates.has(cvCurrentMediaTask()?.state)) return;
+  const latestTaskId = currentCreateConv.turns?.at(-1)?.mediaTaskId || currentCreateConv.turns?.at(-1)?.runId;
+  if (cvPendingGenerations.has(latestTaskId) || cvMediaControls.has(latestTaskId)) return;
   // 从第一个 await 之前就捕获本轮归属。保存参考图、读取上一张、写历史和
   // 生成 IPC 都可能耗时，期间用户可以任意切换创作历史，不能再读 currentCreateConv。
   const sentConv = currentCreateConv;
   const manualRefs = cvRefImages.map((ref) => ({ ...ref }));
-  const automaticRefPath = cvLastResultPath(sentConv);
+  const roles = selected?.capabilities?.references?.roles || [];
+  if (roles.length && manualRefs.some(ref => !roles.includes(ref.role))) { showToast('请为参考图选择角色'); return; }
+  if (cvSubmittingConversations.has(sentConv)) return;
+  cvSubmittingConversations.add(sentConv);
+  if (sentConv.id) cvPendingCreationConversations.add(sentConv.id);
+  let pendingRunId = null;
+  cvSyncGenerateBtn();
+  try {
+  const automaticRefPath = mediaKind === 'image' ? cvLastResultPath(sentConv) : null;
   const isViewingSentConv = () => activeView === 'create' && currentCreateConv === sentConv;
 
   // 参考图在点击发送时就由本轮消费。若等 await 后再清理，会误删切到新会话后新上传的图。
@@ -6178,6 +6758,7 @@ async function generateImages() {
   cvRenderRef();
   promptEl.value = '';
   autoGrowCvPrompt();
+  cvCaptureComposer({ persist: true });
 
   // 清掉欢迎页
   const welcome = isViewingSentConv() ? cvMessagesEl.querySelector('.welcome') : null;
@@ -6195,11 +6776,10 @@ async function generateImages() {
 
   // 组图意图:从提示词自动判断(仅豆包支持组图)。命中即一次出一组关联图。
   //   一旦判为组图,就视作"新起一组系列",不再走"基于上一张迭代"那条参考图逻辑(下面据此跳过自动取上一张)。
-  const wantsGroup = cvPromptWantsGroup(prompt) && cvModelSupportsMultiRef({ name: model });
+  const wantsGroup = parameters.sequential === true || parameters.sequential === 'auto';
 
   // 2) loading 占位(挂一个稳定标记,回填/重渲染时能找回)
   //   组图优先级最高;否则若在基于上一张迭代则显示"调整中";再否则普通"生成 N 张"。
-  const iterating = !wantsGroup && !manualRefs.length && !!automaticRefPath && cvModelSupportsRef({ name: model });
   let loadingMsg = null;
   if (isViewingSentConv()) {
     // 1) 用户气泡(若有手动参考图,先在气泡上方展示缩略图,与普通对话上传图一致)
@@ -6215,7 +6795,7 @@ async function generateImages() {
     // 2) loading 占位。只能插入提交时那条会话的 DOM，切换后由 loadCreateConv 按账本重建。
     loadingMsg = document.createElement('div');
     loadingMsg.className = 'message assistant cv-result-msg cv-loading-msg';
-    const loadingText = wantsGroup ? '正在生成一组图片，请稍候…' : (iterating ? '正在基于上一张图调整…' : '正在生成 ' + n + ' 张图片，请稍候…');
+    const loadingText = '正在准备…';
     loadingMsg.innerHTML = `<div class="cv-loading"><div class="cv-spinner"></div><div>${loadingText}</div></div>`;
     cvMessagesEl.appendChild(loadingMsg);
     cvMessagesEl.scrollTop = cvMessagesEl.scrollHeight;
@@ -6224,7 +6804,6 @@ async function generateImages() {
   // 决定参考图:① 用户手动上传的优先(支持多张,豆包多图融合);② 否则同会话上下文迭代——自动拿上一张结果
   //   多图仅豆包支持;若当前模型不支持多图(GPT),只取第一张。
   let refList = manualRefs.map((r) => r.dataUrl);
-  if (refList.length > 1 && !cvModelSupportsMultiRef({ name: model })) refList = refList.slice(0, 1);
   let usedRef = refList.length > 0;
   // 组图模式下不自动取上一张结果作参考(组图是"新起一组系列",非"改上一张")。
   //   用户若手动上传了参考图则尊重(refList 已非空,上面不会进这里)。
@@ -6234,34 +6813,37 @@ async function generateImages() {
     }
   }
   // 传给后端:0 张→不传;1 张→string;多张→array
-  const refImage = refList.length === 0 ? null : (refList.length === 1 ? refList[0] : refList);
 
   // 与新对话一致:提交即先把本轮(空结果占位)写入会话并入历史侧边栏
   //   refPaths:手动上传的参考图本地路径,持久化以便历史重载时仍能展示(只存路径不存 base64)。
   const runId = newClientRunId();
-  const turn = { prompt, model, size, resultPaths: [], usedRef, refPaths, runId };
+  pendingRunId = runId;
+  cvPendingGenerations.add(runId);
+  const turn = { prompt, model, size, mediaKind, parameters, resultPaths: [], usedRef, refPaths, runId };
+  const turnIndex = sentConv.turns.length;
   sentConv.turns.push(turn);
   const isFirstTurn = sentConv.turns.length === 1;
   if (!sentConv.title) sentConv.title = truncateByWidth(prompt, 64);
   await saveCreateConv(sentConv);
+  cvPendingCreationConversations.add(sentConv.id);
   if (isFirstTurn && !sentConv.titleGenerated) void maybeTitleCreateConv(prompt, sentConv);
 
   // 标记本会话进入"生成中"(支持后台:即便用户切走,任务继续,完成后按 id 写回)
   const convId = sentConv.id;
-  const turnIndex = sentConv.turns.length - 1;   // 本轮在 turns 里的下标(用于按 id+下标 回填,避免对象引用失效)
-  cvJobs.set(convId, { runId, turnIndex, restored: false });
+  cvJobs.set(convId, { runId, taskId: runId, turnIndex, restored: false });
+  cvPendingGenerations.add(runId);
+  if (loadingMsg) loadingMsg.dataset.mediaTaskId = runId;
   cvSyncGenerateBtn();
   refreshHistoryList();   // 侧边栏给这个会话亮起 running 指示
 
   // 组图开关 = 上面据提示词自动判断的 wantsGroup(仅豆包)。把张数上限提到 CV_GROUP_MAX
   //   (实际张数由模型 sequential auto 决定);常规仍为 n(=1)。
-  const effN = wantsGroup ? CV_GROUP_MAX : n;
   // 画质(分辨率档)已经体现在 size 像素值里:豆包直接用大尺寸,GPT 由后端按 size 反推 quality。
   //   故这里只传 size,不再单独传 quality。
   let res;
   try {
-    res = await window.api.image.generate({
-      prompt, model, size, n: effN, image: refImage, sequential: wantsGroup,
+    res = await window.api.media.generate({
+      prompt, model, mediaKind, ...parameters, references: refList.map((url, index) => ({url, ...(manualRefs[index]?.role ? {role:manualRefs[index].role} : {})})),
       runId, conversationId: convId, turnIndex,
     });
   }
@@ -6272,12 +6854,18 @@ async function generateImages() {
 
   // 回填结果到对应会话并落盘(按 id + 下标 找回,即便期间被 loadCreateConv 换了对象/用户切走也写对)
   await cvFinishTurn(convId, turnIndex, prompt, res, loadingMsg);
+  } catch (error) { showToast(error.message || '生成任务保存失败'); }
+  finally {
+    if (pendingRunId) cvPendingGenerations.delete(pendingRunId);
+    cvPendingCreationConversations.delete(sentConv.id);
+    cvSubmittingConversations.delete(sentConv); cvSyncGenerateBtn();
+  }
 }
 
 // 回填本轮结果:始终从【磁盘真相】按 id 读回该会话,写第 turnIndex 轮的 resultPaths,再存。
 //   关键:不依赖 turn 对象引用(loadCreateConv 会用磁盘新对象替换 currentCreateConv,旧引用会失效)。
 async function cvFinishTurn(convId, turnIndex, prompt, res, loadingNode) {
-  const resultPaths = (res && res.ok && res.paths) ? res.paths : [];
+  const resultPaths = Array.isArray(res?.paths) ? res.paths : [];
   // 失败原因:持久化到 turn.error,这样切走再切回(从历史重渲染)也能看到具体为什么没出图,
   //   而不是只显示笼统的「本轮无结果」。成功则清空该字段。
   const errMsg = (!res || !res.ok) ? ((res && res.error) || '未知错误') : '';
@@ -6285,11 +6873,14 @@ async function cvFinishTurn(convId, turnIndex, prompt, res, loadingNode) {
     const conv = await window.api.history.load(convId);
     if (conv && Array.isArray(conv.turns) && conv.turns[turnIndex]) {
       conv.turns[turnIndex].resultPaths = resultPaths;
+      if (['image', 'video'].includes(res?.mediaKind)) conv.turns[turnIndex].mediaKind = res.mediaKind;
+      if (res?.taskId) conv.turns[turnIndex].mediaTaskId = res.taskId;
       conv.turns[turnIndex].error = errMsg || undefined;
       await window.api.history.save(conv);
       // 若该会话正是当前内存里这个,把结果也同步进内存对象(保持一致)
       if (currentCreateConv && currentCreateConv.id === convId && currentCreateConv.turns[turnIndex]) {
         currentCreateConv.turns[turnIndex].resultPaths = resultPaths;
+        if (['image', 'video'].includes(res?.mediaKind)) currentCreateConv.turns[turnIndex].mediaKind = res.mediaKind;
         currentCreateConv.turns[turnIndex].error = errMsg || undefined;
       }
     }
@@ -6299,12 +6890,17 @@ async function cvFinishTurn(convId, turnIndex, prompt, res, loadingNode) {
   const viewingThis = activeView === 'create' && currentCreateConv && currentCreateConv.id === convId;
   if (viewingThis && loadingNode && loadingNode.isConnected) {
     loadingNode.classList.remove('cv-loading-msg');
+    loadingNode.classList.toggle('error', !res || !res.ok);
     if (!res || !res.ok) {
-      loadingNode.innerHTML = `<div class="cv-error">❌ 生成失败：${escapeHtml((res && res.error) || '未知错误')}</div>`;
+      loadingNode.innerHTML = window.RelayActivity.renderError(errMsg);
+      loadingNode.dataset.raw = errMsg;
+      if (resultPaths.length) loadingNode.appendChild(buildImageGrid(resultPaths, prompt));
     } else {
+      delete loadingNode.dataset.raw;
       loadingNode.innerHTML = '';
       loadingNode.appendChild(buildImageGrid(res.paths, prompt));
     }
+    if (res?.taskId) cvMountTaskControls(loadingNode, res.taskId);
     cvMessagesEl.scrollTop = cvMessagesEl.scrollHeight;
   } else if (viewingThis && (!loadingNode || !loadingNode.isConnected)) {
     // loading 节点已被 loadCreateConv 重建过(切走又切回)→ 直接重渲染该会话,显示最新结果
@@ -6315,6 +6911,7 @@ async function cvFinishTurn(convId, turnIndex, prompt, res, loadingNode) {
 
   cvSyncGenerateBtn();
   refreshHistoryList();   // 关掉侧边栏 running 指示
+  if (viewingThis) window.relayHistoryCompletionView?.ready('create', convId);
 }
 
 // 给创作会话生成简短标题(复用聊天的快模型摘要)。按 id 找回写入,避免切走后写错。
@@ -6323,7 +6920,8 @@ async function maybeTitleCreateConv(firstPrompt, targetConv = currentCreateConv)
   targetConv.titleGenerated = true;
   const convId = targetConv.id;
   try {
-    const res = await window.api.summarizeTitle('用户想生成的图片:' + firstPrompt);
+    const mediaLabel = targetConv.turns?.[0]?.mediaKind === 'video' ? '视频' : '图片';
+    const res = await window.api.summarizeTitle(`用户想生成的${mediaLabel}:` + firstPrompt);
     const t = (res && res.title || '').trim();
     if (!t) return;
     // 始终从磁盘读回再只改 title 字段后存盘,避免与结果回填(cvFinishTurn)互相覆盖
@@ -6361,6 +6959,9 @@ function buildImageGrid(paths, caption) {
   for (const p of paths) {
     const cell = document.createElement('div');
     cell.className = 'cv-cell';
+    if (/\.(mp4|webm|mov)$/i.test(p)) {
+      const video = document.createElement('video'); video.src = toFileUrl(p); video.controls = true; video.preload = 'metadata'; video.setAttribute('aria-label', caption || '生成的视频'); cell.append(video); grid.append(cell); continue;
+    }
     const img = document.createElement('img');
     // 优化:① 去掉 ?t=Date.now() 防缓存 —— 生成图文件名唯一(img-时间戳-序号.png),
     //   绝无同名覆盖,按路径走浏览器缓存即可,再打开资料库秒出(此前每次都重读+重解码全部原图,卡顿主因)。
@@ -6460,7 +7061,9 @@ function autoGrowCvPrompt() {
   // 与新对话输入框一致:超过最大高度才显示滚动条,否则隐藏(否则内容被裁、滚动条也不出现)
   t.style.overflowY = full > max ? 'auto' : 'hidden';
 }
-if ($('cvPrompt')) $('cvPrompt').addEventListener('input', autoGrowCvPrompt);
+if ($('cvPrompt')) $('cvPrompt').addEventListener('input', () => { autoGrowCvPrompt(); cvCaptureComposer(); cvSyncGenerateBtn(); });
+$('cvMediaParameters')?.addEventListener('input', () => cvCaptureComposer());
+$('cvMediaParameters')?.addEventListener('change', () => cvCaptureComposer({ persist: true }));
 
 // ── 资料库主页面：真实本地资料，挂载后保留页面与查询状态 ──
 let myWorkEl = null;
@@ -6475,12 +7078,13 @@ const LIB_KIND_DETAILS = {
   process: '查看会话临时目录中的脚本、草稿和中间文件；删除会话时可能一并清理。',
   legacy: '保留从历史记录发现的其他文件，它们尚未确认为交付成果。',
 };
-const LIB_TYPES = [['all', '全部'], ['document', '文档'], ['image', '图片'], ['spreadsheet', '表格'], ['presentation', '演示文稿'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
+const LIB_TYPES = [['all', '全部'], ['document', '文档'], ['image', '图片'], ['video', '视频'], ['spreadsheet', '表格'], ['presentation', '演示文稿'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
 const LIB_FILE_ICONS = {
   document: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>',
   spreadsheet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/></svg>',
   presentation: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M12 16v4M9 20h6"/></svg>',
   image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 16-5-5L7 20"/></svg>',
+  video: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="m10 8 6 4-6 4z"/></svg>',
   code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m16 6 6 6-6 6M8 6l-6 6 6 6"/></svg>',
 };
 const LIB_UI_ICONS = {
@@ -6513,7 +7117,7 @@ function normalizeLibraryItems(items, source) {
   return (Array.isArray(items) ? items : []).filter(item => item && typeof item.path === 'string' && item.path.trim()).map(item => {
     const name = typeof item.name === 'string' && item.name ? item.name : item.path.split(/[\\/]/).pop();
     const ext = String(item.ext || (name.includes('.') ? name.split('.').pop() : '')).toLowerCase();
-    const type = item.isDirectory ? 'other' : source === 'images' || /^(png|jpe?g|webp|gif|bmp|svg)$/.test(ext) ? 'image' : LIB_TYPES.some(([value]) => value === item.type) ? item.type : 'other';
+    const type = item.isDirectory ? 'other' : /^(mp4|webm|mov)$/.test(ext) ? 'video' : /^(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(ext) ? 'image' : LIB_TYPES.some(([value]) => value === item.type) ? item.type : 'other';
     const kind = LIB_KINDS.some(([value]) => value === item.kind) ? item.kind : source === 'images' ? 'output' : 'legacy';
     return { path: item.path, name, ext, type, kind, isDirectory: item.isDirectory === true, mtime: Number(item.mtime) || 0, size: Number.isFinite(item.size) ? item.size : null, generatedImage: source === 'images',
       ...(typeof item.conversationId === 'string' && item.conversationId ? { conversationId: item.conversationId } : {}) };
@@ -6883,97 +7487,120 @@ function showSearchModal() {
     const input = searchEl.querySelector('.search-input');
     const resultsEl = searchEl.querySelector('[data-results]');
     let timer = null, revision = 0, composing = false;
+    let resultItems = [], resultQuery = '', hasMore = false, nextOffset = 0, loadingMore = false, opening = false, resultNotice = '';
     const showStatus = (text, busy = false) => {
       resultsEl.replaceChildren();
       const status = document.createElement('div');
-      status.className = 'search-empty';
-      status.setAttribute('role', 'status');
-      status.textContent = text;
+      status.className = 'search-empty'; status.setAttribute('role', 'status'); status.textContent = text;
       resultsEl.appendChild(status);
       if (busy) resultsEl.setAttribute('aria-busy', 'true'); else resultsEl.removeAttribute('aria-busy');
     };
     const invalidateSearch = () => {
-      clearTimeout(timer); timer = null;
-      revision++;
+      clearTimeout(timer); timer = null; revision++;
+      loadingMore = false; opening = false;
       resultsEl.removeAttribute('aria-busy');
-      // Cancel the old scan as soon as input changes, before the next debounce fires.
       try { Promise.resolve(window.api.history.cancelSearch?.()).catch(() => {}); } catch (_) {}
       return revision;
     };
     resetHistorySearch = () => {
-      invalidateSearch(); composing = false;
+      invalidateSearch(); composing = false; resultItems = []; resultQuery = ''; resultNotice = ''; hasMore = false; nextOffset = 0;
       showStatus('输入关键词搜索你的历史对话');
     };
-
-    const renderResults = (q, items, partial = false) => {
+    const renderResults = (preserveScroll = false) => {
+      const scrollTop = preserveScroll ? resultsEl.scrollTop : 0;
       resultsEl.removeAttribute('aria-busy');
-      if (!q) { showStatus('输入关键词搜索你的历史对话'); return; }
-      if (!items.length) { showStatus(partial ? '部分历史暂时无法读取，请稍后重试。' : `没有找到包含「${q}」的对话`); return; }
-      const groups = groupSearchResults(items);
-      resultsEl.innerHTML = groups.map(([label, arr]) => `
+      if (!resultQuery) { showStatus('输入关键词搜索你的历史对话'); return; }
+      if (!resultItems.length) { showStatus(resultNotice || `没有找到包含「${resultQuery}」的对话`); return; }
+      resultsEl.innerHTML = groupSearchResults(resultItems).map(([label, arr]) => `
         <div class="search-group-title">${escapeHtml(label)}</div>
-        ${arr.map((it) => `
-          <button class="search-result" data-id="${escapeAttr(it.id)}" data-kind="${escapeAttr(it.kind)}"${it.turnIndex != null ? ` data-turn="${it.turnIndex}" data-side="${escapeAttr(it.matchSide || '')}"` : ''}>
-            <span class="sr-ico">${histIconSvg(it)}</span>
-            <span class="sr-meta">
-              <span class="sr-title">${escapeHtml(it.title)}</span>
-              <span class="sr-snippet">${renderSnippet(it.snippet)}</span>
-            </span>
-          </button>
-        `).join('')}
+        ${arr.map(it => `<button class="search-result" data-id="${escapeAttr(it.id)}" data-kind="${escapeAttr(it.kind)}"${opening ? ' disabled' : ''}>
+          <span class="sr-ico">${histIconSvg(it)}</span><span class="sr-meta">
+          <span class="sr-title">${escapeHtml(it.title)}</span><span class="sr-snippet">${renderSnippet(it.snippet)}</span></span></button>`).join('')}
       `).join('');
-      if (partial) {
-        const notice = document.createElement('div');
-        notice.className = 'search-empty';
-        notice.textContent = '部分历史暂时无法读取，以上为已检索到的结果。';
-        resultsEl.appendChild(notice);
+      const footer = document.createElement('div'); footer.className = 'search-footer';
+      const count = document.createElement('span'); count.className = 'search-count';
+      count.textContent = `已显示 ${resultItems.length} 条对话${hasMore || resultNotice ? '' : ' · 全部结果'}`; footer.appendChild(count);
+      if (hasMore) {
+        const more = document.createElement('button'); more.type = 'button'; more.className = 'search-more';
+        more.textContent = loadingMore ? '正在加载…' : '加载更多'; more.disabled = loadingMore || opening; footer.appendChild(more);
       }
+      resultsEl.appendChild(footer);
+      if (resultNotice || opening) {
+        const notice = document.createElement('div'); notice.className = 'search-notice'; notice.setAttribute('role', 'status');
+        notice.textContent = opening ? '正在打开对话…' : resultNotice; resultsEl.appendChild(notice);
+      }
+      if (loadingMore || opening) resultsEl.setAttribute('aria-busy', 'true');
+      resultsEl.scrollTop = scrollTop;
     };
-    // A single delegated listener covers every returned row without rebinding on each query.
-    resultsEl.addEventListener('click', (event) => {
-      const row = event.target.closest('.search-result');
-      if (!row || !resultsEl.contains(row)) return;
-      const id = row.dataset.id, isCreate = row.dataset.kind === 'create';
-      const jumpTo = row.dataset.turn != null
-        ? { turnIndex: parseInt(row.dataset.turn, 10), side: row.dataset.side || null }
-        : null;
-      hideSearchModal();
-      if (isCreate) loadCreateConv(id, jumpTo); else loadConversation(id, jumpTo);
-    });
     const isCurrent = (version, query) => version === revision && !composing
       && searchEl.classList.contains('show') && input.value.trim() === query;
-    const doSearch = async (version, query) => {
+    const doSearch = async (version, query, offset = 0) => {
       timer = null;
       if (!isCurrent(version, query)) return;
+      if (offset) { loadingMore = true; resultNotice = ''; renderResults(true); }
       try {
-        const result = await window.api.history.search(query, 50);
+        const result = await window.api.history.search(query, 50, offset);
         if (!isCurrent(version, query) || result?.canceled) return;
-        if (!result || result.ok === false) { showStatus(result?.error || '搜索暂时失败，请稍后重试。'); return; }
-        renderResults(query, Array.isArray(result.items) ? result.items : [], !!result.partial);
-      } catch (_) {
-        if (isCurrent(version, query)) showStatus('搜索暂时失败，请稍后重试。');
+        if (!result || result.ok === false) throw Object.assign(new Error('Search failed'), { searchMessage: result?.error || '搜索暂时失败，请稍后重试。' });
+        const items = Array.isArray(result.items) ? result.items : [];
+        const seen = new Set(offset ? resultItems.map(item => item.id) : []);
+        resultItems = (offset ? resultItems : []).concat(items.filter(item => { if (seen.has(item.id)) return false; seen.add(item.id); return true; }));
+        resultQuery = query;
+        nextOffset = Number.isSafeInteger(result.nextOffset) ? result.nextOffset : offset + items.length;
+        hasMore = !!result.hasMore && nextOffset > offset;
+        loadingMore = false;
+        resultNotice = result.partial ? result.warning || (items.length ? '部分历史暂时无法读取，以上为已检索到的结果。' : '部分历史暂时无法读取，请稍后重试。') : '';
+        renderResults(!!offset);
+      } catch (error) {
+        if (!isCurrent(version, query)) return;
+        loadingMore = false;
+        if (offset) { resultNotice = error.searchMessage || '加载失败，请重试'; renderResults(true); }
+        else showStatus(error.searchMessage || '搜索暂时失败，请稍后重试。');
       }
     };
-    const scheduleSearch = (event) => {
+    resultsEl.addEventListener('click', async event => {
+      if (event.target.closest('.search-more')) {
+        if (hasMore && !loadingMore && !opening) void doSearch(revision, resultQuery, nextOffset);
+        return;
+      }
+      const row = event.target.closest('.search-result');
+      if (!row || !resultsEl.contains(row) || opening) return;
+      const item = resultItems.find(entry => entry.id === row.dataset.id);
+      if (!item) return;
+      const version = revision, query = resultQuery;
+      const jumpTo = item.turnIndex != null || item.turnId ? { turnIndex: item.turnIndex, turnId: item.turnId,
+        side: item.matchSide || null, messageKey: item.messageKey || null, query } : null;
+      opening = true; resultNotice = ''; renderResults(true);
+      try {
+        const loaded = item.kind === 'create' ? await loadCreateConv(item.id, jumpTo) : await loadConversation(item.id, jumpTo);
+        if (!isCurrent(version, query)) return;
+        if (!loaded) throw new Error('这条对话暂时无法打开，请重试');
+        hideSearchModal();
+      } catch (_) {
+        if (!isCurrent(version, query)) return;
+        opening = false; resultNotice = '这条对话暂时无法打开，请重试'; renderResults(true);
+      }
+    });
+    const scheduleSearch = event => {
       const version = invalidateSearch(), query = input.value.trim();
+      resultItems = []; resultQuery = query; resultNotice = ''; hasMore = false; nextOffset = 0;
       if (composing || event?.isComposing) { showStatus('输入完成后开始搜索'); return; }
-      if (!query) { renderResults('', []); return; }
+      if (!query) { showStatus('输入关键词搜索你的历史对话'); return; }
       showStatus('正在搜索…', true);
       timer = setTimeout(() => doSearch(version, query), 180);
     };
     input.addEventListener('input', scheduleSearch);
-    input.addEventListener('compositionstart', () => {
-      composing = true; invalidateSearch(); showStatus('输入完成后开始搜索');
-    });
+    input.addEventListener('compositionstart', () => { composing = true; invalidateSearch(); showStatus('输入完成后开始搜索'); });
     input.addEventListener('compositionend', () => { composing = false; scheduleSearch(); });
-    input.addEventListener('keydown', (event) => {
+    input.addEventListener('keydown', event => {
       if (composing || event.isComposing || event.keyCode === 229) {
         if (event.key === 'Escape') event.stopPropagation();
         return;
       }
       if (event.key === 'Enter') {
+        if (timer) { event.preventDefault(); clearTimeout(timer); timer = null; void doSearch(revision, input.value.trim()); return; }
         const first = resultsEl.querySelector('.search-result');
-        if (first) { event.preventDefault(); first.click(); }
+        if (first && !opening) { event.preventDefault(); first.click(); }
       }
     });
   }
@@ -7029,6 +7656,7 @@ let skillPanelConfigCache = null;    // 自动提炼/体检模型的最近快照
 let skillUsageUpdateOff = null;      // 主进程增量索引完成通知，只保留一个监听器
 let skillDraftEventOff = null;       // Skill 草稿创建/发布/忽略通知，只保留一个监听器
 let memoryUsageUpdateOff = null;     // 同一份增量索引也承载记忆实际 Read 遥测
+let memoryMaintenanceUpdateOff = null;
 let providerChangeOff = null;        // 托盘或设置页切换服务商后的实时刷新
 const providerHealth = new Map();    // 最近一次已保存配置的检测结果，绑定配置版本
 const providerHealthProfiles = new Map();
@@ -7083,7 +7711,10 @@ function bindSettingsContentLayout(content) {
   settingsContentResizeObserver = null;
   if (!content) return;
   // Avoid CSS layout containment here: model menus use viewport coordinates.
-  const update = width => content.classList.toggle('is-provider-compact', width <= 560);
+  const update = width => {
+    content.classList.toggle('is-provider-compact', width <= 560);
+    content.classList.toggle('is-provider-narrow', width <= 400);
+  };
   const style = getComputedStyle(content);
   update(content.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0));
   if (typeof ResizeObserver === 'undefined') return;
@@ -7172,10 +7803,10 @@ function loadSettingsForm(activeCat = lastSettingsCat) {
   if (settingsThemeObserver) settingsThemeObserver.disconnect();
   if (settingsDirtyObserver) settingsDirtyObserver.disconnect();
   settingsThemeObserver = settingsDirtyObserver = null;
-  for (const off of [memoryUsageUpdateOff, providerChangeOff]) {
+  for (const off of [memoryUsageUpdateOff, memoryMaintenanceUpdateOff, providerChangeOff]) {
     if (off) off();
   }
-  memoryUsageUpdateOff = providerChangeOff = null;
+  memoryUsageUpdateOff = memoryMaintenanceUpdateOff = providerChangeOff = null;
   modalHint.textContent = '';
   modalHint.dataset.error = 'false';
   settingsFormPromise = renderSettingsForm(activeCat).then(() => {
@@ -7281,7 +7912,7 @@ async function renderSettingsForm(activeCat = lastSettingsCat) {
       <div class="set-panel">
         <div class="set-row">
           <div class="set-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg></div>
-          <div class="rgp-label"><label>允许命令任务</label><p>允许定时任务执行命令；对话权限在输入框中选择。</p></div>
+          <div class="rgp-label"><label>允许命令任务</label></div>
           <div class="switch ${s.app.allowCommandTasks?'on':''}" id="sw-allowCommand"></div>
         </div>
       </div>
@@ -7321,7 +7952,6 @@ async function renderSettingsForm(activeCat = lastSettingsCat) {
      <!-- ── 记忆 ── 内容由 renderMemoryPanel 异步填充进 #memorySection -->
      <section class="set-cat" data-cat="memory" aria-label="个性化">
       <section id="relayInstructionsSection" class="relay-guidance" aria-label="Relay 说明"></section>
-      <h2 class="relay-memory-heading">Relay 记忆</h2>
       <div id="memorySection"></div>
       <div id="memoryPreferencesSection"></div>
      </section>
@@ -7754,49 +8384,23 @@ function providerHealthMarkup(id, currentResult = null) {
 }
 
 function providerCapabilityMarkup(profile) {
-  const imageCount = Array.isArray(profile.imageModels) ? profile.imageModels.length : 0;
-  const imageState = profile.imageDiscovery && profile.imageDiscovery.status;
   const badges = [];
   if (profile.chatReady) badges.push(`<span class="provider-capability is-chat">对话 ${Number(profile.chatModelCount) || 0}</span>`);
-  if (imageCount) badges.push(`<span class="provider-capability is-image" title="目录中的图像候选，调用权限未验证">图像候选 ${imageCount}</span>`);
-  else if (imageState === 'error') badges.push('<span class="provider-capability is-error">图像识别失败</span>');
-  else if (imageState === 'unknown') badges.push('<span class="provider-capability is-pending">图像待识别</span>');
+  for (const [kind, label] of [['image', '图片'], ['video', '视频']]) {
+    const count = (profile.mediaModels || []).filter(model => model.modality === kind && model.enabled !== false).length;
+    if (count) badges.push(`<span class="provider-capability is-image">${label} ${count}</span>`);
+  }
   return badges.join('');
 }
-
-const PROVIDER_IMAGE_LABELS = {
-  'gpt-image-2': 'GPT Image 2',
-  'seedream-5.0': 'Seedream 5',
-  'seedream-4.5': 'Seedream 4.5',
-};
 
 function providerAssignmentMarkup(profile) {
   const roles = [];
   for (const tier of Array.isArray(profile.activeTiers) ? profile.activeTiers : []) {
     roles.push(`<span class="provider-assignment is-chat">${escapeHtml(providerTierLabel(tier))}</span>`);
   }
-  for (const adapterId of Array.isArray(profile.activeImageAdapters) ? profile.activeImageAdapters : []) {
-    roles.push(`<span class="provider-assignment is-image">${escapeHtml(PROVIDER_IMAGE_LABELS[adapterId] || adapterId)}</span>`);
-  }
+  const media = (profile.mediaModels || []).filter(model => model.enabled !== false);
+  if (media.length) roles.push(`<span class="provider-assignment is-image">媒体 ${media.length}</span>`);
   return roles.length ? roles.join('') : '<span class="provider-assignment is-spare">备用</span>';
-}
-
-function providerImageModelsMarkup(profile, selectedAdapters = null) {
-  const models = profile && Array.isArray(profile.imageModels) ? profile.imageModels : [];
-  const discovery = profile && profile.imageDiscovery || {};
-  const selected = selectedAdapters instanceof Set
-    ? selectedAdapters
-    : new Set(profile && Array.isArray(profile.activeImageAdapters) ? profile.activeImageAdapters : []);
-  if (models.length) {
-    return `<div class="provider-image-capabilities">${models.map((item) => `
-      <div class="provider-image-capability ${selected.has(item.adapterId) ? 'is-routed' : ''}" title="${escapeAttr(item.remoteModelId)}">
-        ${ICON_IMAGE}<strong>${escapeHtml(PROVIDER_IMAGE_LABELS[item.adapterId] || item.adapterId)}</strong><small>${escapeHtml(item.remoteModelId)}</small>
-        <button class="provider-route-toggle ${selected.has(item.adapterId) ? 'is-active' : ''}" data-image-route-adapter="${escapeAttr(item.adapterId)}" title="选择 Relay 使用的图像模型；调用权限未验证" type="button">${selected.has(item.adapterId) ? '已选用' : '选用'}</button>
-      </div>`).join('')}</div>`;
-  }
-  if (discovery.status === 'error') return '<span class="provider-capability-note is-error">识别失败</span>';
-  if (discovery.status === 'none') return '<span class="provider-capability-note">未发现</span>';
-  return '<span class="provider-capability-note">未识别</span>';
 }
 
 function providerActionIcon(action) {
@@ -7926,11 +8530,11 @@ function bindProviderModelPickers(mount, initialModels = []) {
       popup.innerHTML = `<div class="provider-model-empty">${catalog.length ? '没有匹配模型' : '尚未获取模型'}</div>`;
       return;
     }
-    popup.innerHTML = (catalog.length ? '<div class="provider-model-empty">服务商目录 · 调用权限未验证</div>' : '') + options.map((model) => {
+    popup.innerHTML = options.map((model) => {
       const selected = model.value === current;
       const customCurrent = selected && !currentIsCatalogModel;
       const routeHint = !customCurrent && model.idKind === 'owner-qualified' && model.rawId !== model.value
-        ? '兼容路由'
+        ? ''
         : (!customCurrent && model.ownedBy ? model.ownedBy : '');
       const title = model.rawId !== model.value
         ? `${model.value}\n接口原始 ID：${model.rawId}`
@@ -8023,24 +8627,23 @@ async function renderProviderPanel(mount) {
     const routes = result && result.routes || { defaultModel: 'haiku', chatRoutes: [], imageRoutes: [] };
     applyProviderRouting(routes);
     const configuredChatCount = (routes.chatRoutes || []).filter((item) => item && item.configured && item.available).length;
-    const configuredImageCount = (routes.imageRoutes || []).filter((item) => item && item.configured && item.available).length;
+    const configuredImageCount = profiles.reduce((total, profile) => total + (profile.mediaModels || []).filter(model => model.enabled !== false).length, 0);
     const cards = profiles.map((profile) => `
       <article class="provider-row ${profile.routed ? 'is-active' : ''}" data-provider-id="${escapeAttr(profile.id)}" title="点击编辑服务商">
         <div class="provider-avatar" style="--provider-hue:${providerAccent(profile.id)}">
           ${escapeHtml(providerMonogram(profile.name))}
-          <span class="provider-avatar-state"></span>
+          <span class="provider-avatar-state ${profile.enabled !== false ? 'is-enabled' : 'is-disabled'}" title="${profile.enabled !== false ? '已启用' : '已停用'}"></span>
         </div>
         <div class="provider-row-main">
           <div class="provider-row-titleline">
             <strong>${escapeHtml(profile.name)}</strong>
-            ${providerCapabilityMarkup(profile)}
             ${profile.enabled ? '' : '<span class="provider-disabled-badge">已停用</span>'}
           </div>
           <div class="provider-endpoint" title="${escapeAttr(profile.baseUrl)}">${escapeHtml(profile.baseUrl)}</div>
           <div class="provider-row-meta">
             ${providerHealthMarkup(profile.id)}
             <span>${profile.hasCredential ? escapeHtml(profile.credentialHint || '密钥已保存') : '未配置密钥'}</span>
-            <span>${profile.chatReady ? `${Number(profile.chatModelCount) || 0} 个对话模型` : '无对话模型'}${profile.imageReady ? ` · ${profile.imageModels.length} 个图像候选` : ''}</span>
+            ${providerCapabilityMarkup(profile)}
           </div>
         </div>
         <div class="provider-row-actions">
@@ -8058,14 +8661,17 @@ async function renderProviderPanel(mount) {
       <div class="provider-page">
         <div class="provider-toolbar">
           <div class="provider-summary">
-            <strong>${profiles.length} 个服务商</strong>
-            <span>${configuredChatCount}/3 对话档位</span>
-            <span>${configuredImageCount}/3 图像模型</span>
+            <h2>服务商</h2>
           </div>
           <button class="provider-add-btn" id="providerAdd" type="button">${providerActionIcon('plus')}<span>添加服务商</span></button>
         </div>
+        <div class="provider-overview" aria-label="服务商配置概览">
+          <div class="provider-overview-item"><strong>${profiles.length}</strong><span>个服务商</span></div>
+          <div class="provider-overview-item"><strong>${configuredChatCount}<small> / 3</small></strong><span>对话档位已配置</span></div>
+          <div class="provider-overview-item"><strong>${configuredImageCount}</strong><span>媒体模型已配置</span></div>
+        </div>
         <div class="provider-list-panel" id="providerList">
-          ${cards || '<div class="provider-empty"><strong>还没有服务商</strong><span>添加模型服务后，可分别分配对话与图像能力。</span></div>'}
+          ${cards || '<div class="provider-empty"><strong>还没有服务商</strong></div>'}
         </div>
       </div>`;
 
@@ -8175,12 +8781,20 @@ function renderProviderEditor(mount, profile, routeState = null) {
         <span>${editing ? '编辑服务商' : '添加服务商'}</span>
       </div>
       <section class="provider-edit-primary">
-        <input class="provider-edit-name" id="providerName" type="text" maxlength="48"
-          value="${escapeAttr(editing ? seed.name : '')}" placeholder="服务商名称" autocomplete="off" />
+        <input class="provider-edit-name" id="providerName" type="text" maxlength="48" required aria-required="true" aria-label="服务商名称"
+          aria-describedby="providerNameError" aria-invalid="false"
+          value="${escapeAttr(editing ? seed.name : '')}" placeholder="点击填写服务商名称" autocomplete="off" />
+        <p class="provider-field-error" id="providerNameError" role="alert" hidden></p>
       </section>
 
-      <section class="provider-edit-section">
-        <div class="provider-edit-section-title">连接</div>
+      <section class="provider-edit-section" aria-labelledby="providerConnectionTitle">
+        <div class="provider-edit-section-head">
+          <h3 class="provider-edit-section-title" id="providerConnectionTitle">连接配置</h3>
+          <div class="provider-section-actions">
+            <span class="provider-test-state">${editing ? providerHealthMarkup(seed.id) : '<span class="provider-health is-idle"><i></i>未检测</span>'}</span>
+            <button class="provider-inline-btn" id="providerEditorTest" type="button" disabled>检测当前填写</button>
+          </div>
+        </div>
         <div class="provider-edit-panel">
           <label class="provider-edit-row">
             <span class="provider-edit-label"><strong>网关 URL</strong></span>
@@ -8195,28 +8809,17 @@ function renderProviderEditor(mount, profile, routeState = null) {
               <button id="providerShowKey" type="button">显示</button>
             </span>
           </label>
-          <div class="provider-edit-row">
-            <span class="provider-edit-label"><strong>对话检查</strong></span>
-            <span class="provider-edit-row-control">
-              <span class="provider-test-state">${editing ? providerHealthMarkup(seed.id) : '<span class="provider-health is-idle"><i></i>未检测</span>'}</span>
-              <button class="provider-inline-btn" id="providerEditorTest" type="button" disabled>检测当前填写</button>
-            </span>
-          </div>
         </div>
       </section>
 
-      <section class="provider-edit-section">
-        <div class="provider-edit-section-title">模型配置</div>
-        <p class="provider-catalog-notice">调用权限未验证：服务商目录可能包含当前 Key 未获授权的模型。选用仅保存配置，对话检查仅验证所测模型。</p>
+      <section class="provider-edit-section" aria-labelledby="providerModelsTitle">
+        <div class="provider-edit-section-head">
+          <h3 class="provider-edit-section-title" id="providerModelsTitle">模型配置</h3>
+          <div class="provider-section-actions">
+            <button class="provider-inline-btn" id="providerDiscover" type="button" title="刷新模型目录">刷新模型</button>
+          </div>
+        </div>
         <div class="provider-edit-panel">
-          <div class="provider-edit-row">
-            <span class="provider-edit-label"><strong>模型目录</strong></span>
-            <button class="provider-inline-btn" id="providerDiscover" type="button" title="自动探测并刷新模型目录">刷新模型</button>
-          </div>
-          <div class="provider-edit-row provider-image-capability-row">
-            <span class="provider-edit-label"><strong>图像候选</strong></span>
-            <div id="providerImageCapabilities">${providerImageModelsMarkup(seed, selectedImageRoutes)}</div>
-          </div>
           <div class="provider-edit-row">
             <span class="provider-edit-label"><strong>快速</strong></span>
             ${providerChatRouteControlMarkup('haiku', 'providerModelHaiku', models.haiku || '', selectedChatRoutes.has('haiku'))}
@@ -8229,11 +8832,12 @@ function renderProviderEditor(mount, profile, routeState = null) {
             <span class="provider-edit-label"><strong>专家</strong></span>
             ${providerChatRouteControlMarkup('opus', 'providerModelOpus', models.opus || '', selectedChatRoutes.has('opus'))}
           </div>
+
         </div>
       </section>
 
-      <section class="provider-edit-section">
-        <div class="provider-edit-section-title">可用性</div>
+      <section class="provider-edit-section" id="providerMediaEditor"></section>
+      <section class="provider-edit-section provider-availability" aria-label="可用性">
         <div class="provider-edit-panel">
           <div class="provider-edit-row">
             <span class="provider-edit-label"><strong>启用服务商</strong></span>
@@ -8242,14 +8846,32 @@ function renderProviderEditor(mount, profile, routeState = null) {
         </div>
       </section>
 
-      <div class="provider-editor-status" id="providerEditorStatus"></div>
+      <div class="provider-editor-status" id="providerEditorStatus" role="status" aria-live="polite"></div>
       <div class="provider-editor-actions">
         <button class="provider-secondary-btn" id="providerEditorCancel" type="button">取消</button>
         <button class="provider-primary-btn" id="providerEditorSave" type="button">保存服务商</button>
       </div>
     </div>`;
 
+  const mediaEditor = window.RelayMediaUI.mountProvider(mount.querySelector('#providerMediaEditor'), seed, window.api.providers);
   const editorRoot = mount.querySelector('.provider-editor');
+  const nameInput = mount.querySelector('#providerName');
+  const nameError = mount.querySelector('#providerNameError');
+  let nameValidationStarted = false;
+  const validateName = (focus = false) => {
+    nameValidationStarted = true;
+    const valid = !!nameInput.value.trim();
+    nameInput.setAttribute('aria-invalid', String(!valid));
+    nameError.hidden = valid;
+    nameError.textContent = valid ? '' : '请输入服务商名称。';
+    if (!valid && focus) {
+      nameInput.focus({ preventScroll: true });
+      nameInput.closest('.provider-edit-primary').scrollIntoView({ block: 'center', behavior: 'instant' });
+    }
+    return valid;
+  };
+  nameInput.addEventListener('blur', () => validateName());
+  nameInput.addEventListener('input', () => { if (nameValidationStarted) validateName(); });
   bindSettingsSegmented(mount);
   const back = () => renderProviderPanel(mount);
   mount.querySelector('#providerEditorBack').addEventListener('click', back);
@@ -8294,23 +8916,6 @@ function renderProviderEditor(mount, profile, routeState = null) {
   });
   syncChatRouteButtons();
 
-  let imageSelectionTouched = false;
-  const bindImageRouteButtons = () => {
-    mount.querySelectorAll('[data-image-route-adapter]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const adapterId = button.dataset.imageRouteAdapter;
-        imageSelectionTouched = true;
-        if (selectedImageRoutes.has(adapterId)) selectedImageRoutes.delete(adapterId);
-        else selectedImageRoutes.add(adapterId);
-        const capability = button.closest('.provider-image-capability');
-        const active = selectedImageRoutes.has(adapterId);
-        button.classList.toggle('is-active', active);
-        button.textContent = active ? '已选用' : '选用';
-        if (capability) capability.classList.toggle('is-routed', active);
-      });
-    });
-  };
-  bindImageRouteButtons();
   const cachedCatalog = editing ? providerModelCatalog.get(seed.id) : null;
   const cacheMatches = !!(cachedCatalog && cachedCatalog.baseUrl === seed.baseUrl
     && cachedCatalog.profileKey === providerHealthProfileKey(seed));
@@ -8325,46 +8930,45 @@ function renderProviderEditor(mount, profile, routeState = null) {
   let discoveryRequest = 0;
   let discoveryTimer = null;
   let discoveryProfile = seed;
+  let discoveryPending = false;
   let savePending = false;
   let editorStatusOwner = 'directory';
 
-  const clearDiscovery = (discoveryStatus = 'unknown') => {
+  const clearDiscovery = () => {
     if (editing) providerModelCatalog.delete(seed.id);
     modelPickers.setModels([]);
     discoveredImageModels = [];
-    const capability = mount.querySelector('#providerImageCapabilities');
-    if (capability) capability.innerHTML = providerImageModelsMarkup({ imageDiscovery: { status: discoveryStatus } });
+    mediaEditor.applyCatalog([]);
   };
 
   const canDiscover = () => !!(
     baseUrlInput.value.trim()
     && (keyInput.value.trim() || (editing && discoveryProfile.hasCredential))
   );
+  const missingConnectionFields = () => [
+    !baseUrlInput.value.trim() && '网关 URL',
+    !(keyInput.value.trim() || (editing && discoveryProfile.hasCredential)) && 'API Key',
+  ].filter(Boolean);
   const updateDiscoverAvailability = () => {
     if (discover) discover.disabled = savePending || !canDiscover();
+    const missing = missingConnectionFields();
+    const description = missing.length ? `请先填写${missing.join('、')}` : '刷新模型目录';
+    discover.title = description;
+    discover.setAttribute('aria-description', description);
+    mediaEditor.setDiscoveryState({ enabled: !savePending && canDiscover(), loading: discoveryPending, description });
   };
   const renderDiscoveryCapabilities = (response) => {
-    const capability = mount.querySelector('#providerImageCapabilities');
-    if (!capability || !response || !response.ok) return;
-    if (response.profile) {
-      discoveredImageModels = Array.isArray(response.profile.imageModels) ? response.profile.imageModels.slice() : [];
-      if (!imageSelectionTouched) {
-        selectedImageRoutes.clear();
-        for (const adapterId of Array.isArray(response.profile.activeImageAdapters) ? response.profile.activeImageAdapters : []) {
-          selectedImageRoutes.add(adapterId);
-        }
-      }
-      capability.innerHTML = providerImageModelsMarkup(response.profile, selectedImageRoutes);
-      bindImageRouteButtons();
-      return;
-    }
-    const imageModels = Array.isArray(response.imageModels) ? response.imageModels : [];
-    discoveredImageModels = imageModels.slice();
-    capability.innerHTML = providerImageModelsMarkup({
-      imageModels,
-      imageDiscovery: { status: imageModels.length ? 'ready' : 'none' },
-    }, selectedImageRoutes);
-    bindImageRouteButtons();
+    if (!response?.ok) return;
+    const records = value => Array.isArray(value) ? value : (Array.isArray(value?.models) ? value.models : []);
+    const media = [response.mediaCandidates, response.mediaModels, response.mediaCatalog, response.profile?.mediaCatalog].flatMap(records);
+    // Standard model directories may omit all modality and protocol metadata.
+    // Keep those IDs selectable; an explicit template resolves their contract.
+    const candidates = records(response.modelCatalog).filter(item => {
+      const type = String(item.modality || item.model_type || item.modelType || '').toLowerCase();
+      return !type || ['image', 'video', 'image_generation', 'video_generation', 'text_to_image', 'image_to_image', 'text_to_video', 'image_to_video'].includes(type);
+    });
+    mediaEditor.applyCatalog([...media, ...candidates]);
+    discoveredImageModels = response.profile?.imageModels || response.imageModels || discoveredImageModels;
   };
   const applyDiscoveredModelIdCorrections = (catalog) => {
     let corrected = 0;
@@ -8412,8 +9016,10 @@ function renderProviderEditor(mount, profile, routeState = null) {
       && Object.keys(draftModels).every(tier => draftModels[tier] === String((discoveryProfile.models || {})[tier] || '').trim());
     discover.disabled = true;
     discover.textContent = '同步中…';
+    discoveryPending = true;
+    mediaEditor.setDiscoveryState({ enabled: true, loading: true });
     if (editorStatusOwner === 'directory') {
-      status.textContent = '正在探测模型目录…';
+      status.textContent = manual ? '正在刷新模型目录…' : '';
       status.classList.remove('is-error', 'is-warning');
     }
     let response = null;
@@ -8437,9 +9043,10 @@ function renderProviderEditor(mount, profile, routeState = null) {
       response = { ok: false, stale: true, message: '服务商配置已更改，请重新刷新模型目录。' };
     }
     discover.textContent = '刷新模型';
+    discoveryPending = false;
     updateDiscoverAvailability();
     if (editorStatusOwner === 'directory') {
-      status.textContent = response && response.message || '模型目录探测失败';
+      status.textContent = response?.ok ? (manual ? '模型目录已刷新' : '') : (response?.message || '模型目录刷新失败');
       status.classList.toggle('is-error', !(response && response.ok));
     }
     if (response && response.ok && Array.isArray(response.models)) {
@@ -8448,7 +9055,7 @@ function renderProviderEditor(mount, profile, routeState = null) {
         : response.models;
       modelPickers.setModels(responseCatalog);
       const correctedModels = applyDiscoveredModelIdCorrections(response.modelCatalog);
-      if (correctedModels && editorStatusOwner === 'directory') status.textContent = `${status.textContent} · 已匹配 ${correctedModels} 个旧模型路由`;
+      if (correctedModels && editorStatusOwner === 'directory') status.textContent = `已匹配 ${correctedModels} 个模型 ID`;
       if (usesSavedProfile) {
         if (response.profile) discoveryProfile = response.profile;
         providerModelCatalog.set(profile.id, {
@@ -8456,13 +9063,14 @@ function renderProviderEditor(mount, profile, routeState = null) {
           profileKey: responseProfileKey,
           models: response.models.slice(),
           modelCatalog: Array.isArray(response.modelCatalog) ? response.modelCatalog.slice() : [],
+          mediaCandidates: Array.isArray(response.mediaCandidates) ? response.mediaCandidates.slice() : undefined,
           fetchedAt: Date.now(),
           endpoint: response.endpoint || '',
         });
       }
       renderDiscoveryCapabilities(response);
     } else {
-      clearDiscovery('error');
+      clearDiscovery();
     }
     return response;
   };
@@ -8472,6 +9080,7 @@ function renderProviderEditor(mount, profile, routeState = null) {
     discoveryRequest += 1;
     clearTimeout(discoveryTimer);
     clearDiscovery();
+    discoveryPending = false;
     discover.textContent = '刷新模型';
     editorStatusOwner = 'directory';
     status.textContent = '连接信息已更改，正在等待刷新模型目录…';
@@ -8496,6 +9105,7 @@ function renderProviderEditor(mount, profile, routeState = null) {
   });
   updateDiscoverAvailability();
   const cacheIsFresh = cacheMatches && Date.now() - Number(cachedCatalog.fetchedAt || 0) < 5 * 60 * 1000;
+  if (cacheIsFresh) renderDiscoveryCapabilities({ ...cachedCatalog, ok: true, profile: seed });
   if (editing && seed.hasCredential && seed.baseUrl && !cacheIsFresh) {
     setTimeout(() => loadProviderModels(), 0);
   }
@@ -8517,6 +9127,11 @@ function renderProviderEditor(mount, profile, routeState = null) {
   });
   const updateProbeAvailability = () => {
     testButton.disabled = savePending || !canDiscover() || !Object.values(probeDraft().models).some(Boolean);
+    const missing = missingConnectionFields();
+    if (!Object.values(probeDraft().models).some(Boolean)) missing.push('至少一个对话模型');
+    const description = missing.length ? `请先填写${missing.join('、')}` : '检测当前填写的对话模型';
+    testButton.title = description;
+    testButton.setAttribute('aria-description', description);
   };
   const invalidateDraftProbe = (event) => {
     probeRequest += 1;
@@ -8576,9 +9191,13 @@ function renderProviderEditor(mount, profile, routeState = null) {
 
   mount.querySelector('#providerEditorSave').addEventListener('click', async (event) => {
     if (savePending) return;
+    if (!validateName(true)) return;
     const button = event.currentTarget;
+    let mediaInput;
+    try { mediaInput = mediaEditor.read(); } catch (error) { status.textContent = error.message; status.classList.add('is-error'); return; }
     const input = {
-      name: mount.querySelector('#providerName').value.trim(),
+      ...mediaInput,
+      name: nameInput.value.trim(),
       baseUrl: mount.querySelector('#providerBaseUrl').value.trim(),
       apiKey: keyInput.value.trim(),
       models: {
@@ -8598,21 +9217,32 @@ function renderProviderEditor(mount, profile, routeState = null) {
       input.authMode = successfulDraftProbe.authMode;
     }
     input.routeTiers = Array.from(selectedChatRoutes).filter((tier) => input.models[tier]);
-    if (!input.name || !input.baseUrl || (!editing && !input.apiKey)) {
-      status.textContent = '请填写名称、网关和 API Key。';
+    const anonymousMediaOnly = !Object.values(input.models).some(Boolean) && input.mediaModels.length > 0 && input.mediaModels.every(binding => (binding.auth?.mode || input.mediaConnection.authMode) === 'none');
+    if (!input.baseUrl || (!editing && !input.apiKey && !anonymousMediaOnly)) {
+      editorStatusOwner = 'validation';
+      status.textContent = !input.baseUrl ? '请填写网关 URL。' : '请填写 API Key。';
+      status.classList.remove('is-warning');
       status.classList.add('is-error');
+      const missingInput = !input.baseUrl ? baseUrlInput : keyInput;
+      missingInput.focus({ preventScroll: true });
+      missingInput.scrollIntoView({ block: 'center', behavior: 'instant' });
       return;
     }
     savePending = true;
+    mediaEditor.setSaving(true);
     editorStatusOwner = 'save';
     enabledSwitch.setAttribute('aria-disabled', 'true');
     probeRequest += 1;
-    const controlStates = new Map(Array.from(editorRoot.querySelectorAll('input, button'), control => [control, control.disabled]));
+    const controlStates = new Map(Array.from(editorRoot.querySelectorAll('input, button, select, textarea'), control => [control, control.disabled]));
     for (const control of controlStates.keys()) control.disabled = true;
     button.textContent = '保存中…';
+    discoveryPending = false;
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.textContent = '正在保存…';
+    status.classList.remove('is-error', 'is-warning');
     discoveryRequest += 1;
     clearTimeout(discoveryTimer);
-    const savedImageRoutes = new Set(input.imageRouteAdapters);
     let response;
     try {
       response = editing
@@ -8625,11 +9255,21 @@ function renderProviderEditor(mount, profile, routeState = null) {
       savePending = false;
       enabledSwitch.setAttribute('aria-disabled', String(enabledSwitch.dataset.locked === 'true'));
       for (const [control, disabled] of controlStates) control.disabled = disabled;
-      status.textContent = (response && response.message) || '保存失败';
+      mediaEditor.setSaving(false);
+      const storageFailure = response?.code === 'PROVIDER_STORAGE_WRITE_FAILED';
+      status.textContent = storageFailure
+        ? `${response.message || '配置文件保存失败，请稍后重试。'} 当前填写内容已保留。`
+        : ((response && response.message) || '保存失败');
+      status.setAttribute('role', 'alert');
+      status.setAttribute('aria-live', 'assertive');
       status.classList.add('is-error');
       button.textContent = '保存服务商';
       updateDiscoverAvailability();
       updateProbeAvailability();
+      if (editorRoot.isConnected) {
+        status.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        button.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      }
       return;
     }
     if (editing) providerHealth.delete(profile.id);
@@ -8648,27 +9288,15 @@ function renderProviderEditor(mount, profile, routeState = null) {
           profileKey: providerHealthProfileKey(discovery.profile || savedProfile),
           models: discovery.models.slice(),
           modelCatalog: Array.isArray(discovery.modelCatalog) ? discovery.modelCatalog.slice() : [],
+          mediaCandidates: Array.isArray(discovery.mediaCandidates) ? discovery.mediaCandidates.slice() : undefined,
           fetchedAt: Date.now(),
           endpoint: discovery.endpoint || '',
         });
       }
-      if (discovery && discovery.ok && discovery.profile) {
-        const detected = new Set((discovery.profile.imageModels || []).map((item) => item.adapterId));
-        const activeAfterDiscovery = new Set(discovery.profile.activeImageAdapters || []);
-        for (const adapterId of ['gpt-image-2', 'seedream-5.0', 'seedream-4.5']) {
-          const shouldUse = savedImageRoutes.has(adapterId) && detected.has(adapterId);
-          if (shouldUse || activeAfterDiscovery.has(adapterId)) {
-            await window.api.providers.setImageRoute(adapterId, shouldUse ? savedProfile.id : null).catch(() => null);
-          }
-        }
-      }
     }
     imageConfigLoaded = false;
-    const imageCount = discovery && discovery.profile && Array.isArray(discovery.profile.imageModels)
-      ? discovery.profile.imageModels.length
-      : 0;
     showToast(discovery && discovery.ok
-      ? `${editing ? '服务商已更新' : '服务商已添加'} · 目录含 ${imageCount} 个图像候选，调用权限未验证`
+      ? (editing ? '服务商已更新' : '服务商已添加')
       : `${editing ? '服务商已更新' : '服务商已添加'}；模型目录稍后可重试`);
     if (editorRoot.isConnected) await renderProviderPanel(mount);
   });
@@ -8729,26 +9357,37 @@ function backToSettings() {
   loadSettingsForm(lastSettingsCat || 'general');
 }
 // 管理列表统一的「···」菜单：低频操作收起，点击空白处关闭。
-function bindDpMenu(row) {
+let activeDpMenu = null;
+function closeDpMenus() {
+  const active = activeDpMenu;
+  if (!active) return;
+  activeDpMenu = null;
+  cancelAnimationFrame(active.frame);
+  if (active.menu.matches(':popover-open')) active.menu.hidePopover();
+  active.menu.classList.remove('open');
+  active.menu.style.visibility = '';
+  active.button.classList.remove('open');
+  active.button.setAttribute('aria-expanded', 'false');
+}
+
+function bindDpMenu(row, { topLayer = false } = {}) {
   const button = row.querySelector('.dp-more');
   const menu = row.querySelector('.dp-menu');
   if (!button || !menu) return;
-  const close = () => {
-    menu.classList.remove('open');
-    button.classList.remove('open');
-    button.setAttribute('aria-expanded', 'false');
-    menu.style.visibility = '';
-  };
+  button.setAttribute('aria-expanded', 'false');
+  // Container-query ancestors also contain fixed descendants. The top layer
+  // keeps viewport coordinates valid without moving delegated menu actions.
+  if (topLayer) menu.setAttribute('popover', 'manual');
   const place = () => {
-    // 先显示再测量，按按钮的真实视口位置决定向上或向下展开，避免靠“最后一行”
-    // 猜测方向造成菜单偏移；fixed 也不会被列表卡片的 overflow 裁切。
     menu.style.position = 'fixed';
     menu.style.right = 'auto';
     menu.style.bottom = 'auto';
     menu.style.visibility = 'hidden';
     menu.classList.add('open');
+    if (topLayer) menu.showPopover();
     const anchor = button.getBoundingClientRect();
-    const box = menu.getBoundingClientRect();
+    // Use layout dimensions so the opening animation cannot skew placement.
+    const box = { width: menu.offsetWidth, height: menu.offsetHeight };
     const gap = 6;
     const edge = 12;
     const below = anchor.bottom + gap;
@@ -8759,41 +9398,55 @@ function bindDpMenu(row) {
     menu.style.top = `${Math.round(top)}px`;
     menu.style.left = `${Math.round(left)}px`;
     menu.style.visibility = '';
+    if (topLayer) {
+      const active = activeDpMenu;
+      const watchAnchor = () => {
+        if (activeDpMenu !== active) return;
+        const current = button.getBoundingClientRect();
+        // A top-layer popup must not outlive a hidden/replaced settings page,
+        // or stay at stale coordinates after the list changes underneath it.
+        if (!button.isConnected || !menu.matches(':popover-open')
+          || !button.checkVisibility({ visibilityProperty: true })
+          || ['left', 'top', 'width', 'height'].some(key => Math.abs(current[key] - anchor[key]) > 1)) {
+          closeDpMenus();
+          return;
+        }
+        active.frame = requestAnimationFrame(watchAnchor);
+      };
+      active.frame = requestAnimationFrame(watchAnchor);
+    }
   };
   button.addEventListener('click', (e) => {
     e.stopPropagation();
     const willOpen = !menu.classList.contains('open');
-    document.querySelectorAll('.dp-menu.open').forEach((it) => it.classList.remove('open'));
-    document.querySelectorAll('.dp-more.open').forEach((it) => {
-      it.classList.remove('open');
-      it.setAttribute('aria-expanded', 'false');
-    });
+    closeDpMenus();
     if (willOpen) {
+      activeDpMenu = { button, menu, frame: 0 };
       place();
       button.classList.add('open');
       button.setAttribute('aria-expanded', 'true');
-    } else close();
+    }
   });
-  menu.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+  menu.addEventListener('click', (e) => { e.stopPropagation(); closeDpMenus(); });
   if (!bindDpMenu.bound) {
     bindDpMenu.bound = true;
-    document.addEventListener('click', () => {
-      document.querySelectorAll('.dp-menu.open').forEach((it) => it.classList.remove('open'));
-      document.querySelectorAll('.dp-more.open').forEach((it) => {
-        it.classList.remove('open');
-        it.setAttribute('aria-expanded', 'false');
-      });
-    });
+    document.addEventListener('click', closeDpMenus);
+    // Capture outside presses even when another control stops click bubbling.
+    document.addEventListener('pointerdown', event => {
+      if (activeDpMenu && !activeDpMenu.menu.contains(event.target)
+        && !activeDpMenu.button.contains(event.target)) closeDpMenus();
+    }, true);
+    document.addEventListener('keydown', event => {
+      if (!activeDpMenu || event.key !== 'Escape' || event.isComposing || event.keyCode === 229) return;
+      const trigger = activeDpMenu.button;
+      closeDpMenus();
+      event.preventDefault();
+      event.stopPropagation();
+      if (trigger.isConnected && trigger.checkVisibility({ visibilityProperty: true })) trigger.focus({ preventScroll: true });
+    }, true);
     // fixed 菜单不应在列表滚动或窗口尺寸变化后留在旧坐标。
-    const closeFloatingMenus = () => {
-      document.querySelectorAll('.dp-menu.open').forEach((it) => it.classList.remove('open'));
-      document.querySelectorAll('.dp-more.open').forEach((it) => {
-        it.classList.remove('open');
-        it.setAttribute('aria-expanded', 'false');
-      });
-    };
-    document.addEventListener('scroll', closeFloatingMenus, true);
-    window.addEventListener('resize', closeFloatingMenus);
+    document.addEventListener('scroll', closeDpMenus, true);
+    window.addEventListener('resize', closeDpMenus);
   }
 }
 
@@ -10520,10 +11173,14 @@ async function renderSkillCuratorPanel(mount) {
 // Relay 记忆管理：模型通过受控工具提出候选，用户可确认、编辑和恢复。
 //   在设置右侧查看/编辑单条、删除、查看只读索引 MEMORY.md。
 //   mount = #memorySection 容器。
+function memoryHealthPresentation(health) {
+  const labels = { active: '可用', draft: '待确认', inactive: '未生效', invalid: '需修复' };
+  if (!health || !Object.hasOwn(labels, health.state)) return null;
+  return { state: health.state, label: labels[health.state], reason: health.reason || '', legacy: !!health.legacy };
+}
+
 async function renderMemoryPanel(mount) {
   const q = (sel) => mount.querySelector(sel);
-  // type → 中文徽标(与记忆 frontmatter 的 type 对齐;空/未知不显示徽标)
-  const TYPE_LABEL = { user: '用户', feedback: '反馈', project: '项目', reference: '参考' };
   // 整理时间下拉:半小时粒度(00:00~23:30 共 48 项),与「每周X」同款自绘下拉
   const timeOpts = [];
   for (let h = 0; h < 24; h++) for (const m of [0, 30]) {
@@ -10532,20 +11189,13 @@ async function renderMemoryPanel(mount) {
   }
   const memoryMaintenanceModel = await getMaintenanceModel('memoryMaintenanceModel', 'memory-consolidate', 'opus');
   mount.innerHTML = `
-    <div class="mem-toolbar">
-      <span class="dp-count" data-count></span>
-      <div class="mem-toolbar-btns">
-        <button class="mem-btn" type="button" data-mem-archived aria-pressed="false">已移除</button>
-        <button class="mem-btn" data-mem-index>查看索引</button>
-      </div>
-    </div>
-    <div class="set-panel dp-list" data-list></div>
+    <div data-memory-overview></div>
     <section class="memory-maintenance" aria-label="自动整理与维护">
     <h3 class="set-section-head mem-auto-heading">自动整理与维护</h3>
     <div class="set-panel mem-auto-panel" data-mem-auto-panel>
       <div class="set-row">
         <div class="set-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg></div>
-        <div class="set-label">定期自动整理</div>
+        <div class="set-label">定期提炼与整理<div class="set-sub" data-memory-learning-status hidden></div></div>
         <div class="memory-maintenance-controls">
           ${buildSettingsSegmented('mem-auto-model', MAINTENANCE_MODEL_OPTIONS, memoryMaintenanceModel)}
           <button class="row-btn" data-auto-run>立即整理</button>
@@ -10571,8 +11221,9 @@ async function renderMemoryPanel(mount) {
 
   // ── 定期自动整理:本质是一个 builtin 标记的普通定时任务,在定时任务列表里同样可见/可管 ──
   //   开关=创建或启停;周几+时间=改 cron;「立即整理」=没有任务就先建一个(不启用),然后手动跑一次。
+  let overview = null;
   const CONSOLIDATE_BUILTIN = 'memory-consolidate';
-  const CONSOLIDATE_PROMPT = '通过 relay-memory 的 list/read 核对已确认记忆，只对重复、过时或冲突提出替代候选。propose 必须携带刚读取的 revision，核心条目只报告问题。不要直接覆写或删除文件，不要改 MEMORY.md。已确认事实在用户接受候选前保持有效；无需改动时不要制造候选。';
+  const CONSOLIDATE_PROMPT = '增量提炼已结束的历史会话，生成带来源的记忆候选；在同一作用域内归并重复和冲突，等待用户确认。';
   const autoOn = q('[data-auto-on]'), autoNext = q('[data-auto-next]'), autoRun = q('[data-auto-run]');
   bindCustomSelects(mount);   // 激活「每周X」「时间」自绘下拉(与设置其它下拉同款)
   bindSettingsSegmented(mount);
@@ -10606,7 +11257,7 @@ async function renderMemoryPanel(mount) {
     return `${m} ${h} * * ${getDow()}`;
   };
   const consolidateTaskBody = (enabled) => ({
-    name: '记忆库整理',
+    name: '记忆提炼与整理',
     builtin: CONSOLIDATE_BUILTIN,
     enabled,
     schedule: { kind: 'cron', cron: buildCron() },
@@ -10633,6 +11284,17 @@ async function renderMemoryPanel(mount) {
   // 把任务现状回填到控件;cron 不是「分 时 * * 周」简单形态(对话里改过)就原样展示不动控件
   let autoFirstFill = true;   // 首次回填时抑制开关滑动动画(状态来自异步,避免"先关后开"滑入)
   const refreshAuto = async () => {
+    const statusNode = q('[data-memory-learning-status]');
+    let learningRunning = false;
+    if (window.api.memory.learningStatus) {
+      try {
+        const state = await window.api.memory.learningStatus();
+        learningRunning = !!state?.running;
+        statusNode.hidden = !state?.running && !state?.lastRun;
+        statusNode.textContent = state?.running ? '正在提炼与整理…' : state?.lastRun ? `新增 ${state.lastRun.candidates || 0} 条 · 归并 ${state.lastRun.merged || 0} 条` : '';
+        if (!state?.running && state?.lastRun?.ok === false) statusNode.textContent = state.lastRun.cancelled ? '上次整理已取消' : '上次整理未完成，可重新运行';
+      } catch (_) { statusNode.hidden = true; }
+    }
     const t = await findConsolidate();
     if (autoFirstFill) {
       autoFirstFill = false;
@@ -10644,7 +11306,7 @@ async function renderMemoryPanel(mount) {
       autoOn.classList.toggle('on', !!(t && t.enabled));
     }
     autoNext.textContent = '';
-    if (!t) return;
+    if (!t) { overview?.setSchedule(learningRunning ? '正在提炼与整理…' : '自动整理已关闭', learningRunning); return; }
     const m = String((t.schedule || {}).cron || '').match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+(\*|[0-6])$/);
     if (m) {
       const pad = (n) => String(n).padStart(2, '0');
@@ -10652,8 +11314,11 @@ async function renderMemoryPanel(mount) {
       setSelect(dowRoot, m[3]);
     } else if (t.schedule && t.schedule.cron) {
       autoNext.textContent = `自定义 cron:${t.schedule.cron}`;
+      overview?.setSchedule(learningRunning ? '正在提炼与整理…' : t.enabled ? '按自定义时间自动整理' : '自动整理已关闭', learningRunning);
       return;
     }
+    const days = ['日', '一', '二', '三', '四', '五', '六'];
+    overview?.setSchedule(learningRunning ? '正在提炼与整理…' : t.enabled ? `${getDow() === '*' ? '每天' : '每周' + days[Number(getDow())]} ${getTime()} 自动整理` : '自动整理已关闭', learningRunning);
     if (t.enabled && t.nextRunAt) {
       const d = new Date(Date.parse(t.nextRunAt));
       if (!isNaN(d)) autoNext.textContent = `下次:${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -10691,130 +11356,74 @@ async function renderMemoryPanel(mount) {
       const body = consolidateTaskBody(t.enabled);
       await window.api.scheduler.update(t.id, { action: body.action });
     }
-    window.api.scheduler.runNow(t.id);   // 不等执行完(可能要跑几分钟),完成会有系统通知 + 落历史
-    showToast('整理已开始,完成后会通知并落历史会话');
+    const started = await window.api.scheduler.runNow(t.id);
+    showToast(started?.ok ? '提炼与整理已开始，完成后会通知' : started?.message || started?.error || '整理任务未启动');
     refreshAuto();
   });
   refreshAuto();
 
-  let showingArchived = false, listRequest = 0;
-  const renderList = (items) => {
-    const list = q('[data-list]');
-    if (showingArchived) {
-      q('[data-count]').textContent = items?.length ? `已移除 ${items.length} 条记忆` : '';
-      list.replaceChildren();
-      if (!items?.length) { list.innerHTML = '<div class="dp-empty">没有已移除的记忆。</div>'; return; }
-      for (const item of items) {
-        const row = document.createElement('div'); row.className = 'set-row dp-item';
-        row.innerHTML = '<div class="dp-item-main"><div class="dp-item-name"></div><div class="dp-item-desc"></div></div><button class="row-btn" type="button">恢复</button>';
-        row.querySelector('.dp-item-name').textContent = item.name || item.meta?.name || item.file;
-        row.querySelector('.dp-item-desc').textContent = item.description || item.meta?.description || item.file;
-        const button = row.querySelector('button');
-        button.addEventListener('click', async () => {
-          button.disabled = true;
-          try {
-            const result = await window.api.memory.restore(item.file, item.versionId, null);
-            if (!result?.ok) throw new Error(result?.message || '恢复失败');
-            showToast('记忆已恢复'); await load();
-          } catch (error) { showToast(error.message || '恢复失败'); button.disabled = false; }
-        });
-        list.appendChild(row);
-      }
-      return;
-    }
-    const count = q('[data-count]');
-    if (count) count.textContent = items && items.length ? `共 ${items.length} 条记忆` : '';
-    if (!items || !items.length) {
-      list.innerHTML = `<div class="dp-empty">还没有记忆。随着你和助手对话,它会自动把值得长期记住的事记在这里。</div>`;
-      return;
-    }
-    list.innerHTML = '';
-    items.forEach((it) => {
-      const row = document.createElement('div');
-      row.className = `set-row dp-item${it.status === 'draft' ? ' is-memory-draft' : ''}`;
-      const badge = TYPE_LABEL[it.type] ? `<span class="mem-badge">${TYPE_LABEL[it.type]}</span>` : '';
-      const reviewActions = it.status === 'draft'
-        ? '<button type="button" data-action="approve">确认记住</button><button type="button" data-action="dismiss">忽略候选</button>'
-        : '';
-      row.innerHTML = `
-        <div class="set-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5a3 3 0 0 0-5.7-1.3A3.8 3.8 0 0 0 4 10a4 4 0 0 0 .7 7.5A3.8 3.8 0 0 0 12 19V5Zm0 0a3 3 0 0 1 5.7-1.3A3.8 3.8 0 0 1 20 10a4 4 0 0 1-.7 7.5A3.8 3.8 0 0 1 12 19"/><path d="M8 9c0 2 2 2 2 3M16 9c0 2-2 2-2 3M8 17c0-2-2-2-2-3M16 17c0-2 2-2 2-3"/></svg></div>
-        <div class="dp-item-main">
-          <div class="dp-item-name"></div>
-          <div class="dp-item-desc"></div>
-        </div>
-        <div class="dp-item-actions dp-menu-wrap">
-          ${badge}
-          <button class="dp-more" type="button" aria-label="更多操作">···</button>
-          <div class="dp-menu">
-            ${reviewActions}
-            <button type="button" data-action="detail">详情</button>
-            <button type="button" data-action="pin"${it.pinnedInFile ? ' disabled title="该标记来自 Markdown frontmatter，请在编辑页修改"' : ''}>${it.pinnedInFile ? '核心来自 Markdown' : (it.pinned ? '取消核心' : '设为核心')}</button>
-            <button type="button" class="danger" data-action="delete">移除</button>
-          </div>
-        </div>
-      `;
-      row.querySelector('.dp-item-name').textContent = it.name || it.file;
-      const scopeLabel = it.scope === 'project' ? '项目'
-        : (it.scope === 'retired' ? '已停用' : '全局');
-      const statusLabel = it.status === 'draft' ? '待确认 · ' : '';
-      row.querySelector('.dp-item-desc').textContent = `${statusLabel}${it.pinned ? '核心 · ' : ''}${scopeLabel} · ${it.description || '(无摘要)'} · 展示 ${it.exposureCount || 0} / 实读 ${it.readCount || 0}`;
-      const approve = row.querySelector('[data-action="approve"]');
-      if (approve) approve.addEventListener('click', async () => {
-        const result = await window.api.memory.setStatus(it.file, 'active', it.revision);
-        if (result && result.ok) { showToast('已确认，以后会在合适的作用域中使用'); load(); }
-        else showToast(result && result.message || '确认失败');
-      });
-      const dismiss = row.querySelector('[data-action="dismiss"]');
-      if (dismiss) dismiss.addEventListener('click', async () => {
-        const result = await window.api.memory.setStatus(it.file, 'expired', it.revision);
-        if (result && result.ok) { showToast('已忽略这条候选记忆'); load(); }
-        else showToast(result && result.message || '操作失败');
-      });
-      row.querySelector('[data-action="detail"]').addEventListener('click', () => renderMemoryEditor(it.file, it.name || it.file));
-      row.querySelector('[data-action="pin"]').addEventListener('click', async () => {
-        if (it.pinnedInFile) return;
-        const r = await window.api.memory.setPinned(it.file, !it.pinned);
-        if (r && r.ok) { showToast(r.pinned ? '已设为核心记忆' : '已取消核心记忆'); load(); }
-        else showToast((r && r.message) || '设置失败');
-      });
-      row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
-        const ok = await customConfirm({
-          title: '移除记忆',
-          message: `移除「${it.name || it.file}」后，助手将不再使用这条记忆。可在“已移除”中恢复。`,
-          confirmText: '移除', cancelText: '取消', danger: true,
-        });
-        if (!ok) return;
-        const r = await window.api.memory.remove(it.file, it.revision);
-        if (r && r.ok) { showToast('已移除，可随时恢复'); load(); }
-        else showToast((r && r.message) || '移除失败');
-      });
-      bindDpMenu(row);
-      list.appendChild(row);
-    });
+  const host = getMemoryPageHost(mount);
+  const listPage = mount.querySelector('.memory-list-page');
+  const maintenance = q('.memory-maintenance');
+  const maintenancePage = document.createElement('section');
+  maintenancePage.className = 'mem-maintenance-page'; maintenancePage.hidden = true;
+  maintenancePage.setAttribute('aria-label', '整理与维护');
+  maintenancePage.innerHTML = '<header class="memory-detail-head"><button class="memory-back" type="button" data-memory-maintenance-back aria-label="返回记忆列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m14 6-6 6 6 6"/></svg></button><div class="memory-detail-title"><h2>整理与维护</h2></div></header>';
+  maintenancePage.append(maintenance); mount.append(maintenancePage);
+  let maintenanceScroll = 0;
+  const closeMaintenance = () => {
+    if (maintenancePage.hidden) return;
+    maintenancePage.hidden = true; listPage.hidden = false; delete mount.dataset.memoryView;
+    const content = mount.closest('.set-content'); if (content) content.scrollTop = maintenanceScroll;
+    q('[data-memory-maintenance]')?.focus({ preventScroll: true });
   };
-
-  q('[data-mem-index]').addEventListener('click', () => renderMemoryEditor('MEMORY.md', '记忆索引 (MEMORY.md)'));
-
-  const load = async () => {
-    const request = ++listRequest;
-    const res = showingArchived ? await window.api.memory.archived() : await window.api.memory.list();
-    if (!mount.isConnected || request !== listRequest) return;
-    if (res && !res.ok) { showToast(res.message || '记忆读取失败'); return; }
-    renderList(res && res.items);
-  };
-  q('[data-mem-archived]').addEventListener('click', () => {
-    showingArchived = !showingArchived;
-    q('[data-mem-archived]').setAttribute('aria-pressed', String(showingArchived));
-    q('[data-mem-archived]').textContent = showingArchived ? '返回记忆' : '已移除';
-    void load();
+  mount._memoryCloseMaintenance = closeMaintenance;
+  maintenancePage.querySelector('[data-memory-maintenance-back]').addEventListener('click', closeMaintenance);
+  maintenancePage.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !activeCustomSelect) { event.preventDefault(); event.stopPropagation(); closeMaintenance(); }
   });
-  getMemoryPageHost(mount).refreshList = load;
+  overview = window.RelayMemoryOverview.create({
+    mount: q('[data-memory-overview]'), api: window.api.memory, notify: showToast, confirm: customConfirm,
+    owned: () => $('memorySection') === mount || !!settingsViewSnapshot?.fragment?.contains(mount),
+    openDetail: renderMemoryEditor, renderBody: content => {
+      const body = memoryMarkdownBody(String(content || ''));
+      return body.trim() ? renderMarkdown(body) : '<p class="memory-preview-empty">这条记忆暂无正文。</p>';
+    },
+    buildSelect: buildCustomSelect, bindSelects: bindCustomSelects, closeSelect: closeCustomSelect,
+    revealSelectOption: revealCustomSelectOption, bindMenu: row => bindDpMenu(row, { topLayer: true }),
+    projects: () => window.api.projects?.list(), projectName: id => getProjectComposer()?.project?.(id)?.name,
+    forget: file => host.forget(file), hasDraft: file => host.hasDraft(file),
+    onPendingCount: count => {
+      const nav = mount.closest('.set-layout')?.querySelector('.set-nav-item[data-cat="memory"]');
+      if (!nav) return;
+      let badge = nav.querySelector('.mem-nav-count');
+      if (!badge) { badge = document.createElement('span'); badge.className = 'mem-nav-count'; nav.append(badge); }
+      badge.textContent = String(count); badge.hidden = !count; badge.setAttribute('aria-label', `${count} 条待确认记忆`);
+    },
+    openMaintenance: () => {
+      host.back(); const content = mount.closest('.set-content'); maintenanceScroll = content?.scrollTop || 0;
+      closeCustomSelect(); listPage.hidden = true; maintenancePage.hidden = false; mount.dataset.memoryView = 'maintenance';
+      if (content) content.scrollTop = 0;
+      maintenancePage.querySelector('[data-memory-maintenance-back]').focus({ preventScroll: true });
+      void refreshAuto();
+    },
+    run: () => autoRun.click(),
+    openConversation: async source => {
+      try { if (!await loadConversation(source.conversationId, { turnId: source.turnId, turnIndex: source.turnIndex, side: source.role })) showToast('原对话已不存在，仍保留提炼时的摘录'); }
+      catch (_) { showToast('原对话暂时无法打开'); }
+    },
+  });
+  mount._memoryFileBusy = file => overview.isBusy(file);
+  host.refreshList = () => overview.load();
   if (memoryUsageUpdateOff) memoryUsageUpdateOff();
-  memoryUsageUpdateOff = window.api.skills.onUsageUpdated(() => {
+  memoryUsageUpdateOff = window.api.skills.onUsageUpdated(() => { if (mount.isConnected) void overview.load(); });
+  memoryMaintenanceUpdateOff?.();
+  memoryMaintenanceUpdateOff = window.api.scheduler.onUpdate?.(() => {
     if (!mount.isConnected) return;
-    load();
+    void refreshAuto(); void overview.load();
   });
-  await load();
+  await overview.load();
+  void refreshAuto();
 }
 
 // 用量页先同步绘制轻量界面，再以快照更新数字，统计读取由后台完成。
@@ -10960,6 +11569,7 @@ function getMemoryPageHost(mount) {
   const detail = document.createElement('section'); detail.className = 'memory-detail'; detail.hidden = true;
   detail.setAttribute('aria-label', '记忆详情'); mount.append(list, detail);
   const records = new Map();
+  const recordKey = file => /^Win/i.test(navigator.platform || '') ? file.toLowerCase() : file;
   let active = null, listScroll = 0, listFocus = null, motion = null;
   const owned = () => $('memorySection') === mount || !!settingsViewSnapshot?.fragment?.contains(mount);
   const visible = () => mount.isConnected && mount.closest('.set-cat')?.classList.contains('active');
@@ -10989,9 +11599,18 @@ function getMemoryPageHost(mount) {
     record.pendingRead = (async () => {
       try {
         const result = await window.api.memory.read(record.file);
-        if (!result || !result.ok) throw new Error(result?.message || result?.error || '记忆读取失败，请重试');
-        record.original = record.content = String(result.content || ''); record.revision = result.revision; record.loaded = true;
-      } catch (error) { record.readError = true; record.error = error.message || '记忆读取失败，请重试'; }
+        if (!result || !result.ok) throw Object.assign(new Error(result?.message || result?.error || '记忆读取失败，请重试'), { code: result?.code });
+        record.original = record.content = String(result.content || ''); record.revision = result.revision; record.health = result.health;
+        record.sources = Array.isArray(result.meta?.sources) ? result.meta.sources : [];
+        record.replaces = Array.isArray(result.meta?.replaces) ? result.meta.replaces : [];
+        record.memoryStatus = result.meta?.status; record.loaded = true;
+      } catch (error) {
+        if (error.code === 'MEMORY_NOT_FOUND') {
+          record.original = record.content = ''; record.sources = []; record.replaces = [];
+          record.loaded = false; record.editing = false; record.revision = null; record.health = null;
+        }
+        record.readError = true; record.error = error.message || '记忆读取失败，请重试';
+      }
       finally { record.loading = false; record.pendingRead = null; notify(record); }
     })();
     return record.pendingRead;
@@ -11004,6 +11623,7 @@ function getMemoryPageHost(mount) {
       const result = await window.api.memory.write(record.file, content, record.revision);
       if (!result || !result.ok) throw new Error(result?.message || result?.error || '保存失败，请重试');
       record.original = content; record.revision = result.revision; record.editing = false; record.status = '已保存';
+      await load(record);
       if (owned()) void host.refreshList?.().catch(() => {});
     } catch (error) { record.error = error.message || '保存失败，请重试'; }
     finally { record.saving = false; notify(record); }
@@ -11017,9 +11637,11 @@ function getMemoryPageHost(mount) {
       <header class="memory-detail-head">
         <button class="memory-back" type="button" data-memory-back aria-label="返回记忆列表" title="返回记忆列表"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
         <div class="memory-detail-title"><h2>${escapeHtml(record.title)}</h2><span>${escapeHtml(record.file)}</span></div>
-        <div class="detail-head-actions">${record.isIndex ? '' : '<button class="mem-view-toggle" type="button" data-memory-history aria-expanded="false">修改记录</button>'}<button class="mem-view-toggle" id="memOpenLocal" type="button">在本地打开</button>${record.isIndex ? '' : '<button class="mem-view-toggle" id="memViewToggle" type="button">编辑</button>'}</div>
+        <div class="detail-head-actions"><button class="mem-view-toggle" id="memOpenLocal" type="button">在本地打开</button>${record.isIndex ? '' : '<button class="mem-view-toggle" id="memViewToggle" type="button">编辑</button>'}</div>
       </header>
-      <div class="memory-version-list set-panel" data-memory-history-list hidden></div>
+      <div class="memory-detail-health" data-memory-detail-health hidden><span class="memory-health-badge"></span><span class="memory-health-reason"></span></div>
+      <details class="memory-provenance" data-memory-sources hidden><summary></summary><div data-memory-source-items></div></details>
+      <div class="memory-merge-targets" data-memory-replaces hidden></div>
       <div class="memory-markdown-view" id="dpMemoryPreview" data-memory-file="${escapeAttr(record.file)}"></div>
       <div class="memory-edit-workspace hidden" id="dpMemorySource">
         <section class="memory-edit-pane"><div class="memory-pane-head"><span>Markdown</span><code>${escapeHtml(record.file)}</code></div><textarea class="data-editor" id="dpEditor" aria-label="记忆 Markdown 源码" spellcheck="false" wrap="soft" ${record.isIndex ? 'readonly' : ''}></textarea></section>
@@ -11036,58 +11658,54 @@ function getMemoryPageHost(mount) {
     record.paint = () => {
       if (active !== record || !detail.contains(editor)) return;
       detail.dataset.memoryFile = record.file; detail.dataset.memoryEditing = String(record.editing);
+      const health = record.isIndex ? null : memoryHealthPresentation(record.health);
+      const healthPanel = q('[data-memory-detail-health]');
+      healthPanel.hidden = !health || health.state === 'active' || record.loading || record.readError;
+      if (health) {
+        healthPanel.dataset.memoryHealth = health.state;
+        healthPanel.querySelector('.memory-health-badge').textContent = health.state === 'active' ? '' : health.label;
+        healthPanel.querySelector('.memory-health-reason').textContent = health.state === 'active' ? '' : health.reason;
+      }
+      const provenance = q('[data-memory-sources]'), sourceItems = q('[data-memory-source-items]');
+      provenance.hidden = !record.sources?.length || record.editing || record.loading || record.readError;
+      provenance.querySelector('summary').textContent = record.sources?.length ? `来源（${record.sources.length}）` : '';
+      sourceItems.replaceChildren();
+      for (const item of record.sources || []) {
+        const row = document.createElement('div'); row.className = 'memory-source-item';
+        const label = document.createElement('div'); label.className = 'memory-source-label';
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'row-btn';
+        if (item.kind === 'conversation') {
+          const date = new Date(item.at);
+          label.textContent = `${item.title || '历史对话'} · ${item.role === 'user' ? '用户' : '助手'}${Number.isNaN(date.getTime()) ? '' : ' · ' + date.toLocaleDateString('zh-CN')}`;
+          button.textContent = '查看对话';
+          button.addEventListener('click', async () => {
+            try {
+              if (!await loadConversation(item.conversationId, { turnId: item.turnId, turnIndex: item.turnIndex, side: item.role })) showToast('原对话已不存在，仍保留提炼时的摘录');
+            } catch (_) { showToast('原对话暂时无法打开'); }
+          });
+          const quote = document.createElement('blockquote'); quote.textContent = item.quote; row.append(label, quote, button);
+        } else if (item.kind === 'memory') {
+          label.textContent = `${item.file} · ${String(item.revision || '').slice(0, 8)}`; button.textContent = '查看记忆';
+          button.addEventListener('click', () => renderMemoryEditor(item.file, item.file)); row.append(label, button);
+        }
+        sourceItems.appendChild(row);
+      }
+      const replacements = q('[data-memory-replaces]');
+      replacements.hidden = !record.replaces?.length || record.editing || record.loading || record.readError;
+      replacements.textContent = record.replaces?.length
+        ? `${record.memoryStatus === 'draft' ? '确认后将替代' : '归并目标'}：${record.replaces.map(item => item.file).join('、')}` : '';
       detail.setAttribute('aria-busy', String(record.loading || record.saving));
       editor.value = record.content; editor.readOnly = record.isIndex || record.loading || record.saving || !record.loaded;
       preview.classList.toggle('hidden', record.editing); source.classList.toggle('hidden', !record.editing);
       if (toggle) { toggle.hidden = record.editing; toggle.disabled = !record.loaded || record.loading || record.saving; }
       for (const button of [saveButton, cancelButton]) if (button) { button.hidden = !record.editing; button.disabled = record.saving; }
       if (saveButton) saveButton.textContent = record.saving ? '保存中…' : '保存';
-      if (historyButton) historyButton.disabled = record.editing || record.saving || record.loading;
       retry.hidden = !record.readError; retry.disabled = record.loading;
       status.textContent = record.error || (record.loading ? '正在读取…' : record.saving ? '正在保存…' : record.status);
       status.dataset.error = String(!!record.error);
       if (record.loaded) markdown(record.editing ? live : preview);
       else { preview.textContent = record.loading ? '正在读取记忆…' : record.error || '正在读取记忆…'; }
     };
-    const historyButton = q('[data-memory-history]'), historyList = q('[data-memory-history-list]');
-    historyButton?.addEventListener('click', async () => {
-      if (record.saving || record.loading || record.editing) return;
-      const opening = historyList.hidden;
-      historyList.hidden = !opening; historyButton.setAttribute('aria-expanded', String(opening));
-      if (!opening) return;
-      historyList.textContent = '正在读取修改记录…';
-      try {
-        const result = await window.api.memory.history(record.file);
-        if (!result?.ok) throw new Error(result?.message || '读取修改记录失败');
-        if (active !== record || !detail.contains(historyList)) return;
-        historyList.replaceChildren();
-        const labels = { create: '创建', write: '编辑', update: '编辑', status: '状态调整', approve: '确认候选', restore: '恢复', propose: '候选更新' };
-        if (!result.items?.length) historyList.textContent = '暂无修改记录。';
-        for (const item of (result.items || []).slice(0, 30)) {
-          const row = document.createElement('div'); row.className = 'set-row';
-          row.innerHTML = '<div class="set-label"></div><button type="button" class="row-btn">恢复</button>';
-          const at = new Date(item.createdAt);
-          row.querySelector('.set-label').textContent = (Number.isNaN(at.getTime()) ? '' : at.toLocaleString('zh-CN')) + ' · ' + (labels[item.operation] || '更新') + '留档';
-          const button = row.querySelector('button');
-          if (item.requiresRelatedRestore) { button.textContent = '恢复关联变更'; button.title = '这条记忆曾参与候选批准，需要连同关联记忆一起恢复。'; }
-          button.addEventListener('click', async () => {
-            if (record.saving || record.editing) return;
-            const accepted = await customConfirm({ title: '恢复记忆', message: (item.requiresRelatedRestore ? '先撤销关联的候选批准或恢复操作。' : '恢复此记录保存的内容。') + '涉及替代关系的记忆将一起恢复，当前内容也会保留版本。', confirmText: '恢复', cancelText: '取消' });
-            if (!accepted || active !== record) return;
-            record.saving = true; button.disabled = true; notify(record);
-            try {
-              const restored = await window.api.memory.restore(record.file, item.requiresRelatedRestore ? item.relatedVersionId : item.versionId, record.revision);
-              if (!restored?.ok) throw new Error(restored?.message || '恢复失败');
-              record.revision = restored.revision; record.status = '已恢复';
-              historyList.hidden = true; historyButton.setAttribute('aria-expanded', 'false');
-              await load(record); await host.refreshList?.();
-            } catch (error) { record.error = error.message || '恢复失败'; }
-            finally { record.saving = false; button.disabled = false; notify(record); }
-          });
-          historyList.appendChild(row);
-        }
-      } catch (error) { historyList.textContent = error.message || '读取修改记录失败'; }
-    });
     q('[data-memory-back]').addEventListener('click', returnToList);
     q('#memOpenLocal').addEventListener('click', async () => {
       try { const result = await window.api.memory.revealFile(record.file); if (!result || !result.ok) throw new Error(result?.message || result?.error || '打开失败'); }
@@ -11118,9 +11736,16 @@ function getMemoryPageHost(mount) {
   });
   const host = {
     refreshList: null,
-    async open(file, title) {
+    hasDraft(file) { return [...records.values()].some(record => recordKey(record.file) === recordKey(file) && record.editing && record.content !== record.original); },
+    forget(file) {
+      if (active && recordKey(active.file) === recordKey(file)) returnToList();
+      for (const name of records.keys()) if (recordKey(name) === recordKey(file)) records.delete(name);
+    },
+    async open(file, title, options = {}) {
       if (!owned()) return;
-      let record = records.get(file);
+      if (mount._memoryFileBusy?.(file)) { showToast('正在处理这条记忆，请稍候'); return; }
+      mount._memoryCloseMaintenance?.();
+      let record = records.get(file) || [...records.values()].find(entry => recordKey(entry.file) === recordKey(file));
       if (!record) { record = { file, title: title || file, isIndex: file.toLowerCase() === 'memory.md', content: '', original: '', loaded: false, loading: false, readError: false, saving: false, editing: false, error: '', status: '', paint: null }; records.set(file, record); }
       else if (title) record.title = title;
       if (!active) { listScroll = mount.closest('.set-content')?.scrollTop || 0; listFocus = list.contains(document.activeElement) ? document.activeElement : null; }
@@ -11133,6 +11758,10 @@ function getMemoryPageHost(mount) {
       // Files and the generated index may change outside this page. Refresh a
       // clean document on every open, while an unsaved editor owns its draft.
       if (!record.loaded || (!record.editing && !record.saving)) await load(record);
+      if (options.edit && active === record && record.loaded && !record.loading && !record.readError && !record.saving && !record.isIndex) {
+        record.editing = true; record.status = ''; notify(record);
+        requestAnimationFrame(() => { if (active === record && visible()) detail.querySelector('#dpEditor')?.focus({ preventScroll: true }); });
+      }
     },
     back: returnToList,
   };
@@ -11141,10 +11770,10 @@ function getMemoryPageHost(mount) {
 }
 
 // Index links reuse the same right-hand document surface; index remains read-only.
-async function renderMemoryEditor(file, title) {
+async function renderMemoryEditor(file, title, options) {
   const mount = $('memorySection');
   if (!mount || typeof file !== 'string' || /[\\/]/.test(file) || !file.toLowerCase().endsWith('.md')) return;
-  return getMemoryPageHost(mount).open(file, title);
+  return getMemoryPageHost(mount).open(file, title, options);
 }
 
 
@@ -11417,10 +12046,14 @@ function positionCustomSelect(active) {
       const style = getComputedStyle(parent);
       const clipsY = /auto|scroll|hidden|clip/.test(style.overflowY);
       const clipsX = /auto|scroll|hidden|clip/.test(style.overflowX);
-      if (!clipsY && !clipsX) continue;
-      const bounds = parent.getBoundingClientRect();
-      if (clipsY) { clipTop = Math.max(clipTop, bounds.top); clipBottom = Math.min(clipBottom, bounds.bottom); }
-      if (clipsX) { clipLeft = Math.max(clipLeft, bounds.left); clipRight = Math.min(clipRight, bounds.right); }
+      if (clipsY || clipsX) {
+        const bounds = parent.getBoundingClientRect();
+        if (clipsY) { clipTop = Math.max(clipTop, bounds.top); clipBottom = Math.min(clipBottom, bounds.bottom); }
+        if (clipsX) { clipLeft = Math.max(clipLeft, bounds.left); clipRight = Math.min(clipRight, bounds.right); }
+      }
+      // A top-layer popover escapes all outer clipping ancestors. Its own
+      // scroll viewport still matters for nested selectors.
+      if (parent.matches(':popover-open')) break;
     }
     if (r.bottom <= clipTop || r.top >= clipBottom || r.right <= clipLeft || r.left >= clipRight) {
       closeCustomSelect();
@@ -11981,6 +12614,7 @@ async function saveMainSettings() {
   const EDIT_TYPE_OPTIONS = [
     { value: 'chat', label: '对话任务' },
     { value: 'image', label: '图像生成' },
+    { value: 'video', label: '视频生成' },
     { value: 'command', label: '命令任务' },
   ];
   const EDIT_REPEAT_OPTIONS = [
@@ -12108,7 +12742,7 @@ async function saveMainSettings() {
     editingTask = isNew ? null : task;
     const action = task.action || {};
     const scheduleState = parseScheduleForEditor(task.schedule);
-    const taskType = ['chat', 'image', 'command'].includes(action.type) ? action.type : 'chat';
+    const taskType = ['chat', 'image', 'video', 'command'].includes(action.type) ? action.type : 'chat';
     const model = ['haiku', 'sonnet', 'opus'].includes(action.model) ? action.model : 'haiku';
     const memory = ['off', 'read', 'readwrite'].includes(action.memory) ? action.memory : 'read';
     const actionMode = action.mode === 'agent' ? 'agent' : 'plain';
@@ -12189,6 +12823,18 @@ async function saveMainSettings() {
               <span>长期记忆</span>
               ${buildCustomSelect('svEditMemory', EDIT_MEMORY_OPTIONS, memory)}
             </div>
+            <div class="sv-edit-row hidden" data-sv-media-only>
+              <label for="svEditMediaModel">媒体模型</label>
+              <select class="sv-edit-inline-input" id="svEditMediaModel" aria-label="媒体模型"></select>
+            </div>
+            <div class="hidden" data-sv-media-only>
+              <div id="svEditMediaParameters" class="media-parameters"></div>
+              <details style="padding: 10px 16px"><summary>参考素材</summary>
+                <div id="svEditMediaReferences"></div>
+                <button type="button" class="btn-ghost" id="svEditMediaAddReference">添加素材地址</button>
+              </details>
+              <p id="svEditMediaStatus" class="sv-schedule-timezone" role="status"></p>
+            </div>
           </div>
         </section>
 
@@ -12236,12 +12882,21 @@ async function saveMainSettings() {
               <span>时间</span>
               ${buildCustomSelect('svEditTime', editTimeOptions, scheduleState.time)}
             </div>
+            <div class="sv-edit-row" data-sv-timezone-row>
+              <label for="svEditTimezone">重复计划时区</label>
+              <input class="sv-edit-inline-input" id="svEditTimezone" list="svTimezoneOptions" autocomplete="off" spellcheck="false" value="${escapeAttr(task.schedule?.tz || 'local')}" aria-label="重复计划时区">
+              <datalist id="svTimezoneOptions"><option value="local">跟随系统</option><option value="Asia/Shanghai"></option><option value="Asia/Singapore"></option><option value="America/New_York"></option><option value="Europe/London"></option><option value="UTC"></option></datalist>
+            </div>
+            <div class="sv-edit-row">
+              <span>上轮未结束时</span>
+              ${buildCustomSelect('svEditOverlap', [{value:'skip',label:'跳过本轮'}, {value:'queueLatest',label:'结束后补跑最近一次'}], task.overlapPolicy === 'queueLatest' ? 'queueLatest' : 'skip')}
+            </div>
             <div class="sv-edit-row" title="Relay 未运行时错过计划，下次启动是否补跑最近一次">
               <span>错过后补跑</span>
               <label class="sv-switch"><input id="svEditCatchUp" type="checkbox" ${task.catchUp !== false ? 'checked' : ''}><span class="sv-slider"></span></label>
             </div>
           </div>
-          <p class="sv-schedule-timezone">${escapeHtml(task.schedule && task.schedule.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || '本地时间')} · 单次日期按本机时间输入</p>
+          <p class="sv-schedule-timezone">local 表示跟随系统；也可填写城市时区，如 Asia/Shanghai。单次日期按本机时间输入。</p>
         </section>
 
         <details class="sv-edit-section sv-edit-advanced">
@@ -12276,12 +12931,91 @@ async function saveMainSettings() {
     const timeRoot = editorPane.querySelector('#svEditTime');
     const monthDayRoot = editorPane.querySelector('#svEditMonthDay');
     const catchUpInput = editorPane.querySelector('#svEditCatchUp');
+    const timezoneInput = editorPane.querySelector('#svEditTimezone');
+    const overlapRoot = editorPane.querySelector('#svEditOverlap');
     const webhookUrlInput = editorPane.querySelector('#svEditWebhookUrl');
     const webhookSecretInput = editorPane.querySelector('#svEditWebhookSecret');
     const atInput = editorPane.querySelector('#svEditAt');
     const everyAmountInput = editorPane.querySelector('#svEditEveryAmount');
     const everyUnitRoot = editorPane.querySelector('#svEditEveryUnit');
     const cronInput = editorPane.querySelector('#svEditCron');
+    const mediaModelInput = editorPane.querySelector('#svEditMediaModel');
+    const mediaParametersHost = editorPane.querySelector('#svEditMediaParameters');
+    const mediaReferencesHost = editorPane.querySelector('#svEditMediaReferences');
+    const mediaStatus = editorPane.querySelector('#svEditMediaStatus');
+    const mediaAddReference = editorPane.querySelector('#svEditMediaAddReference');
+    let mediaModels = [], mediaSelection = action.mediaModel || action.imageModel || '';
+    let mediaParameters = { ...(action.size ? { size: action.size } : {}), ...(action.n != null ? { n: action.n } : {}), ...(action.parameters || {}) };
+    let mediaReferences = structuredClone(action.references || []);
+    let readMediaParameters = () => ({}), mediaParameterKeys = [], mediaEditRevision = 0;
+    const editedMediaParameterKeys = new Set();
+    let mediaParametersEdited = false, mediaReferencesEdited = false, mediaSelectionEdited = false;
+    const selectedMediaModel = () => mediaModels.find(item => item.modality === typeRoot.dataset.value
+      && (item.routeId === mediaSelection || (item.aliases || []).includes(mediaSelection)));
+    const touchMedia = () => { mediaEditRevision++; updateEditorDirtyState(); };
+    const captureMediaParameters = () => {
+      if (!mediaParametersEdited) return;
+      const values = readMediaParameters();
+      for (const field of editedMediaParameterKeys) {
+        delete mediaParameters[field];
+        if (Object.hasOwn(values, field)) mediaParameters[field] = values[field];
+      }
+    };
+    const renderMediaReferences = () => {
+      mediaReferencesHost.replaceChildren();
+      const caps = selectedMediaModel()?.capabilities?.references || {};
+      mediaReferences.forEach((reference, index) => {
+        const saved = typeof reference === 'string' ? { url: reference } : reference;
+        const row = document.createElement('div'); row.className = 'sv-edit-row';
+        const url = document.createElement('input'); url.className = 'sv-edit-inline-input'; url.style.minWidth = '0'; url.style.flex = '1';
+        url.value = saved.url || ''; url.placeholder = 'https://…'; url.setAttribute('aria-label', `参考素材 ${index + 1}`);
+        const role = document.createElement('select'); role.className = 'sv-edit-inline-input'; role.style.width = 'auto'; role.setAttribute('aria-label', `参考素材 ${index + 1} 角色`);
+        const roles = [...new Set(['', ...(caps.roles || []), ...(saved.role ? [saved.role] : [])])];
+        for (const value of roles) { const option = document.createElement('option'); option.value = value; option.textContent = ({'':'默认角色',first_frame:'首帧',last_frame:'尾帧',reference_image:'参考图',reference_video:'参考视频',reference_audio:'参考音频',driving_audio:'驱动音频',first_clip:'首段视频'})[value] || value; role.append(option); }
+        role.value = saved.role || ''; role.hidden = typeRoot.dataset.value !== 'video' && !saved.role;
+        const change = () => { mediaReferences[index] = { ...saved, url: url.value.trim() }; if (role.value) mediaReferences[index].role = role.value; else delete mediaReferences[index].role; mediaReferencesEdited = true; touchMedia(); };
+        url.addEventListener('input', change); role.addEventListener('change', change);
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn-ghost'; remove.textContent = '移除';
+        remove.onclick = () => { mediaReferences.splice(index, 1); mediaReferencesEdited = true; renderMediaReferences(); touchMedia(); };
+        row.append(url, role, remove); mediaReferencesHost.append(row);
+      });
+      mediaAddReference.disabled = !Number.isInteger(caps.max) || mediaReferences.length >= caps.max;
+    };
+    const renderMediaControls = () => {
+      const kind = typeRoot.dataset.value;
+      mediaModelInput.replaceChildren();
+      const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = '选择已配置模型'; mediaModelInput.append(placeholder);
+      const matching = mediaModels.filter(item => item.modality === kind);
+      for (const item of matching) {
+        const option = document.createElement('option'); option.value = item.routeId;
+        option.textContent = `${item.label || item.modelId} · ${item.providerName || item.providerId || ''}${item.available === false ? '（不可用）' : ''}`;
+        option.disabled = item.available === false && item.routeId !== mediaSelection; mediaModelInput.append(option);
+      }
+      if (mediaSelection && !matching.some(item => item.routeId === mediaSelection)) {
+        const original = document.createElement('option'); original.value = mediaSelection; original.textContent = `${mediaSelection}（保留原配置）`; mediaModelInput.append(original);
+      }
+      mediaModelInput.value = mediaSelection;
+      const model = selectedMediaModel();
+      mediaParameterKeys = window.RelayMediaUI?.parameterDescriptors(model?.capabilities).map(item => item.key) || [];
+      readMediaParameters = window.RelayMediaUI?.mountParameters(mediaParametersHost, model ? { ...model, capabilities: { ...model.capabilities, defaults: { ...model.capabilities?.defaults, ...mediaParameters } } } : null) || (() => ({}));
+      mediaStatus.textContent = model ? (model.available === false ? '当前模型不可用；原任务配置仍保留。' : '')
+        : mediaSelection ? '原模型未在当前目录中；已保留参数与参考素材。' : '请先在服务商设置中配置图片或视频模型。';
+      renderMediaReferences();
+    };
+    mediaModelInput.addEventListener('change', () => {
+      if (mediaModelInput.value === mediaSelection) return;
+      mediaSelection = mediaModelInput.value; mediaSelectionEdited = true;
+      mediaParameters = {}; editedMediaParameterKeys.clear(); mediaParametersEdited = false;
+      renderMediaControls(); touchMedia();
+    });
+    const changeMediaParameter = event => {
+      const index = Array.from(mediaParametersHost.children).indexOf(event.target.closest('label'));
+      if (mediaParameterKeys[index]) editedMediaParameterKeys.add(mediaParameterKeys[index]);
+      mediaParametersEdited = true; touchMedia();
+    };
+    mediaParametersHost.addEventListener('input', changeMediaParameter);
+    mediaParametersHost.addEventListener('change', changeMediaParameter);
+    mediaAddReference.onclick = () => { mediaReferences.push({ url: '' }); mediaReferencesEdited = true; renderMediaReferences(); touchMedia(); };
 
     nameInput.value = task.name || '';
     promptInput.value = promptText;
@@ -12303,6 +13037,7 @@ async function saveMainSettings() {
       root.dataset.popupWidth = '128';
       root.dataset.popupHeight = '360';
     });
+    overlapRoot.dataset.popupWidth = '240';
     bindCustomSelects(editorPane);
     bindSettingsSegmented(editorPane);
     bindTransientScrollbar(promptInput);
@@ -12315,6 +13050,8 @@ async function saveMainSettings() {
     const updateTypeRows = () => {
       const chat = typeRoot.dataset.value === 'chat';
       editorPane.querySelectorAll('[data-sv-chat-only]').forEach((row) => row.classList.toggle('hidden', !chat));
+      const media = ['image', 'video'].includes(typeRoot.dataset.value);
+      editorPane.querySelectorAll('[data-sv-media-only]').forEach((row) => row.classList.toggle('hidden', !media));
       const command = typeRoot.dataset.value === 'command';
       promptInput.placeholder = command ? '执行命令' : (isNew ? '描述 Relay 应该做什么' : '任务内容');
       promptInput.setAttribute('aria-label', command ? '执行命令' : '任务内容');
@@ -12329,6 +13066,7 @@ async function saveMainSettings() {
       editorPane.querySelector('[data-sv-every-row]').classList.toggle('hidden', repeat !== 'every');
       editorPane.querySelector('[data-sv-cron-row]').classList.toggle('hidden', repeat !== 'cron');
       editorPane.querySelector('[data-sv-time-row]').classList.toggle('hidden', ['at', 'every', 'cron'].includes(repeat));
+      editorPane.querySelector('[data-sv-timezone-row]').classList.toggle('hidden', ['at', 'every'].includes(repeat));
       editorPane.querySelector('[data-sv-custom-repeat-row]').classList.toggle('hidden', !custom);
       editorPane.querySelector('[data-sv-custom-interval-row]').classList.toggle('hidden', !custom);
       editorPane.querySelector('[data-sv-week-row]').classList.toggle(
@@ -12341,15 +13079,25 @@ async function saveMainSettings() {
           : customRepeat === 'weekly' ? '周' : '个月';
       }
     };
-    typeRoot.querySelectorAll('.cs-option').forEach((option) => option.addEventListener('click', updateTypeRows));
+    typeRoot.querySelectorAll('.cs-option').forEach((option) => option.addEventListener('click', () => {
+      try { captureMediaParameters(); } catch (_) {}
+      updateTypeRows(); renderMediaControls();
+    }));
     modeRoot.querySelectorAll('.cs-option').forEach((option) => option.addEventListener('click', updateAgentRow));
     repeatRoot.querySelectorAll('.cs-option').forEach((option) => option.addEventListener('click', updateScheduleRows));
     customRepeatRoot.querySelectorAll('.cs-option').forEach((option) => option.addEventListener('click', updateScheduleRows));
     updateTypeRows();
     updateScheduleRows();
+    renderMediaControls();
+    if (window.api.providers?.listMediaModels) {
+      Promise.resolve(window.api.providers.listMediaModels()).then(result => {
+        if (!result?.ok) throw new Error(result?.message || '读取媒体模型失败');
+        mediaModels = result.models || []; renderMediaControls();
+      }).catch(() => { mediaStatus.textContent = '媒体模型暂时无法读取；已保留原配置。'; });
+    }
 
     const scheduleControls = [repeatRoot, timeRoot, customRepeatRoot, customIntervalInput,
-      weekRoot, monthDayRoot, atInput, everyAmountInput, everyUnitRoot, cronInput];
+      weekRoot, monthDayRoot, atInput, everyAmountInput, everyUnitRoot, cronInput, timezoneInput];
     const controlValue = (control) => control.dataset.value !== undefined ? control.dataset.value
       : control.type === 'checkbox' ? control.checked : control.value;
     const readScheduleState = () => JSON.stringify(scheduleControls.map(controlValue));
@@ -12412,7 +13160,7 @@ async function saveMainSettings() {
       const name = nameInput.value.trim();
       const text = promptInput.value.trim();
       if (!name) { editorHint.textContent = '请输入任务名称'; nameInput.focus(); return; }
-      if (!text) { editorHint.textContent = typeRoot.dataset.value === 'command' ? '请输入执行命令' : '请输入任务内容'; promptInput.focus(); return; }
+      if (!text && !(typeRoot.dataset.value === 'video' && mediaReferences.length)) { editorHint.textContent = typeRoot.dataset.value === 'command' ? '请输入执行命令' : '请输入任务内容'; promptInput.focus(); return; }
       editorSave.disabled = true;
       savingTaskKey = key;
       editorBack.disabled = true;
@@ -12423,7 +13171,7 @@ async function saveMainSettings() {
       try {
         const currentTask = scheduleItems.find((item) => item.id === task.id) || task;
         const enabled = currentTask.enabled !== false;
-        const schedule = { ...(task.schedule || {}), ...buildEditedSchedule() };
+        const schedule = { ...(task.schedule || {}), ...buildEditedSchedule(), tz: timezoneInput.value.trim() || 'local' };
         const preview = await sched.preview(schedule);
         const completedOnce = !enabled && schedule.kind === 'at';
         if (!preview || !preview.ok || (!(preview.times || []).length && !completedOnce)) {
@@ -12446,7 +13194,7 @@ async function saveMainSettings() {
           type,
         };
         if (type === 'command') editedAction.command = text;
-        else editedAction.prompt = text;
+        else if (isNew || type !== taskType || promptInput.value !== promptText) editedAction.prompt = text;
         if (type === 'chat') {
           editedAction.model = modelRoot.dataset.value;
           editedAction.memory = memoryRoot.dataset.value;
@@ -12456,10 +13204,41 @@ async function saveMainSettings() {
             throw new Error('Agent 模式必须填写 Agent ID');
           }
         }
+        if (['image', 'video'].includes(type)) {
+          if ((isNew || type !== taskType || mediaSelectionEdited) && (!mediaSelection || !selectedMediaModel() || selectedMediaModel().available === false)) {
+            throw new Error('请选择可用的媒体模型');
+          }
+          if (mediaSelectionEdited || isNew || type !== taskType) editedAction.mediaModel = mediaSelection;
+          if (mediaParametersEdited || mediaSelectionEdited || isNew || type !== taskType) {
+            captureMediaParameters();
+            editedAction.parameters = type === taskType && !mediaSelectionEdited ? { ...(action.parameters || {}) } : {};
+            if (mediaSelectionEdited || isNew || type !== taskType) Object.assign(editedAction.parameters, readMediaParameters());
+            else for (const field of editedMediaParameterKeys) {
+              delete editedAction.parameters[field];
+              if (Object.hasOwn(mediaParameters, field)) editedAction.parameters[field] = mediaParameters[field];
+            }
+            if (mediaSelectionEdited || type !== taskType) {
+              delete editedAction.imageModel; delete editedAction.size; delete editedAction.n;
+            }
+          }
+          if (mediaReferencesEdited) {
+            if (mediaReferences.some(reference => !(typeof reference === 'string' ? reference : reference.url)?.trim())) throw new Error('请填写参考素材地址或移除空行');
+            editedAction.references = structuredClone(mediaReferences);
+          }
+          if (selectedMediaModel() && (isNew || type !== taskType || mediaSelectionEdited || mediaReferencesEdited)) {
+            const caps = selectedMediaModel().capabilities || {};
+            const refs = editedAction.references || [];
+            const operation = `${refs.length ? 'image' : 'text'}_to_${type}`;
+            if (Array.isArray(caps.operations) && !caps.operations.includes(operation)) throw new Error('该模型不支持当前生成方式，请检查参考素材');
+            if (caps.references?.required && !refs.length) throw new Error('该模型需要参考素材');
+            if (Number.isInteger(caps.references?.max) && refs.length > caps.references.max) throw new Error('参考素材超过当前模型上限，请检查后保存');
+          }
+        }
         const payload = {
           name,
           enabled,
           catchUp: !!catchUpInput.checked,
+          overlapPolicy: overlapRoot.dataset.value,
           schedule,
           action: editedAction,
           delivery: {
@@ -12499,8 +13278,8 @@ async function saveMainSettings() {
       }
     };
     editorSave.onclick = saveDraft;
-    const formControls = Array.from(editorPane.querySelectorAll('input, textarea, .custom-select, .settings-segmented'));
-    const readState = () => JSON.stringify(formControls.map(controlValue));
+    const formControls = Array.from(editorPane.querySelectorAll('input, textarea, .custom-select, .settings-segmented')).filter(control => !control.closest('[data-sv-media-only]'));
+    const readState = () => JSON.stringify([formControls.map(controlValue), mediaEditRevision]);
     activeDraft = { key, task, isNew, dirty: isNew, readState, initialState: readState(), save: saveDraft, resizePromptInput };
     modelRoot.addEventListener('settings-segment-change', updateEditorDirtyState);
     retainEditorDraft();
@@ -12527,7 +13306,7 @@ async function saveMainSettings() {
     try {
       const result = await sched.runNow(id);
       if (!result || !result.ok) throw new Error(result && result.error || '运行失败');
-      showToast('任务已开始运行');
+      showToast(result.status === 'queued' ? '任务已加入队列' : '任务已受理');
     } catch (error) {
       showToast(error.message || '运行失败');
     } finally {
@@ -12676,7 +13455,7 @@ async function saveMainSettings() {
       runsList.innerHTML = `<div class="sv-runs-empty"><h2>${query ? '没有找到相关记录' : '还没有运行记录'}</h2><p>${query ? '试试其他关键词，或切换任务筛选。' : '任务运行后，可以在这里查看结果与执行时间。'}</p></div>`;
       return;
     }
-    const statuses = { ok: '已完成', error: '失败', canceled: '已取消', skipped: '已跳过', blocked: '未执行' };
+    const statuses = { ok: '已完成', error: '失败', canceled: '已取消', skipped: '已跳过', blocked: '未执行', queued: '排队中', running: '运行中', interrupted: '已中断' };
     const durationText = ms => {
       if (!Number.isFinite(ms)) return '';
       const seconds = Math.max(0, Math.round(ms / 1000));
@@ -12687,14 +13466,22 @@ async function saveMainSettings() {
       const row = document.createElement('article');
       row.className = 'sv-run-record';
       row.dataset.taskId = record.taskId || '';
+      row.dataset.runId = record.runId || '';
       const date = new Date(record.at);
       const when = Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '时间未知';
       const duration = durationText(record.ms);
-      row.innerHTML = `<div class="sv-run-record-head"><div class="sv-run-heading"><h2>${escapeHtml(titleOf(record))}</h2><span>${escapeHtml(when)}${duration ? ` · ${escapeHtml(duration)}` : ''}</span></div><span class="sv-run-status${record.status === 'error' ? ' is-error' : ''}">${escapeHtml(statuses[record.status] || '已结束')}</span></div><div class="sv-run-output" role="region" tabindex="0"></div><div class="sv-run-record-actions"></div>`;
+      row.innerHTML = `<div class="sv-run-record-head"><div class="sv-run-heading"><h2>${escapeHtml(titleOf(record))}</h2><span>${escapeHtml(when)}${duration ? ` · ${escapeHtml(duration)}` : ''}</span></div><span class="sv-run-status${['error', 'interrupted'].includes(record.status) ? ' is-error' : ''}">${escapeHtml(statuses[record.status] || '已结束')}</span></div><div class="sv-run-output" role="region" tabindex="0"></div><div class="sv-run-record-actions"></div>`;
       const output = row.querySelector('.sv-run-output');
       output.setAttribute('aria-label', `${titleOf(record)} ${when} 运行结果`);
       bindTransientScrollbar(output);
-      const content = String(record.error || record.summary || (record.status === 'ok' ? '任务已完成。' : '暂无更多信息。'));
+      const defaults = { ok: '任务已完成。', queued: '任务已受理，正在等待执行。', running: '任务正在执行。', interrupted: 'Relay 在任务完成前退出，执行已中断。' };
+      const content = String(record.error || record.summary || defaults[record.status] || '暂无更多信息。');
+      const timing = document.createElement('p');
+      timing.className = 'sv-schedule-timezone';
+      const source = { manual: '手动运行', timer: '计划触发', catchup: '错过后补跑' }[record.trigger] || '';
+      const formatTime = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '';
+      timing.textContent = [source, record.scheduledFor ? `计划时间：${formatTime(record.scheduledFor)}` : '', record.startedAt ? `开始时间：${formatTime(record.startedAt)}` : ''].filter(Boolean).join(' · ');
+      if (timing.textContent) output.before(timing);
       if (typeof window.relayRenderReadOnlyMarkdown === 'function') window.relayRenderReadOnlyMarkdown(output, content);
       else output.textContent = content;
       const actions = row.querySelector('.sv-run-record-actions');
@@ -12785,7 +13572,7 @@ async function saveMainSettings() {
       select.setAttribute('aria-pressed', String(selected));
       select.innerHTML = '<span class="sv-card-name"></span><span class="sv-card-meta"></span><span class="sv-card-state"></span>';
       select.querySelector('.sv-card-name').textContent = name || (task ? '未命名任务' : '新建任务草稿');
-      select.querySelector('.sv-card-meta').textContent = task ? schedDesc(task) : '配置内容与运行时间';
+      select.querySelector('.sv-card-meta').textContent = task ? [EDIT_TYPE_OPTIONS.find(option => option.value === task.action?.type)?.label, schedDesc(task)].filter(Boolean).join(' · ') : '配置内容与运行时间';
       const status = !task ? '未保存' : task.running ? '运行中' : task.enabled ? '已启用' : '已暂停';
       select.querySelector('.sv-card-state').textContent = status + (task && cached && cached.dirty ? ' · 未保存' : '');
       select.addEventListener('click', () => openTaskEditor(task));
@@ -13013,4 +13800,63 @@ window.relayTurnDeliverables = window.RelayTurnDeliverables?.createController({
   isVisible: () => activeView === 'chat', bridge: window.api.deliverables,
   onPresentationChanged: owner => window.relayTurnDeliveryReferences?.refresh(
     owner, scope => window.relayMessageFileLinks?.decorate(scope)),
+});
+
+// Subscribe after all view state has initialized; focus acknowledges only the
+// currently rendered conversation, never every unread item in the sidebar.
+void historyCompletions?.start();
+window.addEventListener('focus', () => window.relayHistoryCompletionView.syncVisible());
+document.addEventListener('visibilitychange', () => window.relayHistoryCompletionView.syncVisible());
+
+// Media controls live in the composer; history only carries concise status.
+async function cvMountTaskControls(host, taskId) {
+  host.dataset.mediaTaskId = taskId;
+  const task = await cvReadMediaTask(taskId);
+  if (!host.isConnected || host.dataset.mediaTaskId !== taskId) return;
+  host.querySelector('.cv-media-task')?.remove();
+  if (!task) {
+    const job = cvJobs.get(currentCreateConv?.id);
+    const label = host.querySelector('.cv-loading > div:last-child');
+    if (label && (job?.taskId || job?.runId) === taskId) label.textContent = cvMediaProgressLabel(null, job);
+    return;
+  }
+  if (['completed', 'failed'].includes(task.state)) return;
+  if (cvMediaActiveStates.has(task.state)) {
+    host.classList.remove('error');
+    delete host.dataset.raw;
+    host.querySelector('.conversation-error')?.remove();
+    host.querySelector('.cv-empty')?.remove();
+    if (!host.querySelector('.cv-loading')) {
+      const loading = document.createElement('div'); loading.className = 'cv-loading';
+      loading.innerHTML = '<div class="cv-spinner"></div><div></div>';
+      loading.lastElementChild.textContent = cvMediaProgressLabel(task);
+      host.prepend(loading); host.classList.add('cv-loading-msg');
+    }
+    host.querySelector('.cv-loading > div:last-child').textContent = cvMediaProgressLabel(task);
+    return;
+  }
+  host.classList.remove('cv-loading-msg');
+  host.querySelector('.cv-loading')?.remove();
+  // Existing diagnostics already explain the condition; do not add a second bar.
+  if (host.querySelector('.conversation-error')) return;
+  const labels = { needs_attention: '任务已暂停', submission_unknown: '提交结果未知，请勿重复生成', stopped: '已停止等待', download_failed: '下载未完成' };
+  const text = task.submissionOutcome === 'submission_unknown' ? labels.submission_unknown : labels[task.state];
+  if (!text) return;
+  const status = document.createElement('div'); status.className = 'cv-media-task'; status.textContent = text;
+  host.append(status);
+}
+window.api.media?.onChanged(task => {
+  if (!task?.id) return;
+  cvRememberMediaTask(task);
+  for (const host of cvMessagesEl?.querySelectorAll('[data-media-task-id]') || []) {
+    if (host.dataset.mediaTaskId === task.id) void cvMountTaskControls(host, task.id);
+  }
+  if (['completed', 'failed', 'stopped', 'needs_attention', 'download_failed', 'submission_unknown'].includes(task.state)) {
+    if (task.conversationId) pendingConversationViewReloads.add(`create:${task.conversationId}`);
+    if (activeView === 'create' && currentCreateConv?.id === task.conversationId
+      && !cvIsRunning(task.conversationId) && !cvPendingCreationConversations.has(task.conversationId)
+      && !cvPendingGenerations.has(task.id) && !cvPendingGenerations.has(task.runId)) {
+      loadCreateConv(task.conversationId, null, { forceReload: true }).catch(()=>{});
+    }
+  }
 });

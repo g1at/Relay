@@ -17,22 +17,36 @@ const sliceBetween = (source, startMarker, endMarker) => {
   return source.slice(start, end);
 };
 
-test('打开旧历史会话的服务商迁移不刷新左侧排序时间', () => {
+test('打开旧历史会话的服务商迁移不刷新左侧排序时间', t => {
   const main = mainSources();
   const preload = read('preload.js');
   const renderer = read('renderer/app.js');
 
   assert.match(preload, /invalidateSessionForProvider:[\s\S]{0,180}history:invalidateSessionForProvider/);
 
-  const metadataPersist = sliceBetween(
-    read('src/main/app/history-store.js').replace(/^  /gm, ''),
-    'function persistConversationRecord(conv)',
-    '\nfunction forEachConversation(fn)',
-  );
-  assert.match(metadataPersist, /writeJsonAtomic\(convFilePath\(conv\.id\), conv\)/);
-  assert.match(metadataPersist, /writeHistoryIndex\(items\)/);
-  assert.doesNotMatch(metadataPersist, /updatedAt\s*=/);
-  assert.doesNotMatch(metadataPersist, /\.title\s*=/);
+  // Verify the durable outcome, not the name of the index-writing helper.
+  const dataDir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'relay-provider-history-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const createStore = () => require('../src/main/app/history-store').createHistoryStore({
+    getUserDataDir: () => dataDir, recoverLegacyOutput: value => value,
+  });
+  const store = createStore();
+  store.writeHistoryIndex([]);
+  const original = { id: 'legacy-provider', title: '原会话', updatedAt: '2026-01-01T00:00:00Z',
+    sessionId: 'old-session', pinned: true, turns: [{ user: '保留原问题', assistant: '保留原回答' }] };
+  const unrelated = { ...original, id: 'unrelated', title: '另一会话', updatedAt: '2026-02-01T00:00:00Z' };
+  store.persistConversationRecord(original);
+  store.persistConversationRecord(unrelated);
+  const previousIndex = store.readHistoryIndex();
+  const migrated = store.loadConversation(original.id);
+  migrated.sessionId = null; migrated.carryContextOnNextTurn = 'provider';
+  store.persistConversationRecord(migrated);
+  const restored = createStore(), metadata = restored.readHistoryIndex();
+  assert.deepEqual(metadata.map(item => item.id), previousIndex.map(item => item.id));
+  assert.deepEqual(metadata.find(item => item.id === unrelated.id), previousIndex.find(item => item.id === unrelated.id));
+  assert.deepEqual(metadata.find(item => item.id === original.id), { ...previousIndex.find(item => item.id === original.id), sessionId: null });
+  assert.deepEqual(restored.loadConversation(original.id), { ...original, sessionId: null, carryContextOnNextTurn: 'provider' });
+  assert.deepEqual(restored.loadConversation(unrelated.id), unrelated);
 
   const handler = sliceBetween(
     main,

@@ -14,16 +14,39 @@ function setup(t, initial = {}) {
   return { store, runtime, reads, changes, core, setContext: next => { context = { ...context, ...next }; } };
 }
 const doc = (meta, body = 'known fact') => serializeMemoryFrontmatter(meta) + '\n' + body;
-test('model tool schema requires revisions and returns failures as tool errors', async t => {
+test('model tool schema requires an explicit supported type and revision and returns failures as tool errors', async t => {
   const { runtime } = setup(t), tools = [];
   const servers = runtime.factory({ tool: (name, description, schema, handler) => { const tool = { name, schema, handler }; tools.push(tool); return tool; }, createSdkMcpServer: value => value });
   assert.equal(servers['relay-memory'].name, 'relay-memory');
   assert.deepEqual(tools.map(tool => tool.name), ['list', 'read', 'propose']);
   const propose = tools.find(tool => tool.name === 'propose');
+  const list = tools.find(tool => tool.name === 'list');
+  assert.equal(list.schema.offset.safeParse(0).success, true);
+  assert.equal(list.schema.offset.safeParse(-1).success, false);
+  assert.equal(list.schema.offset.safeParse(1.5).success, false);
   assert.equal(propose.schema.expectedRevision.safeParse(undefined).success, false);
   assert.equal(propose.schema.expectedRevision.safeParse(null).success, true);
+  assert.equal(propose.schema.type.safeParse(undefined).success, false);
+  assert.equal(propose.schema.type.safeParse('unsupported').success, false);
+  for (const type of ['user', 'feedback', 'project', 'reference']) assert.equal(propose.schema.type.safeParse(type).success, true);
   assert.equal((await propose.handler({ file: 'new.md', content: 'new fact' })).isError, true);
-  assert.equal((await propose.handler({ file: 'new.md', content: 'new fact', expectedRevision: null })).isError, undefined);
+  assert.equal((await propose.handler({ file: 'new.md', content: 'new fact', expectedRevision: null })).isError, true);
+  assert.equal((await propose.handler({ type: 'reference', file: 'new.md', content: 'new fact', expectedRevision: null })).isError, undefined);
+});
+
+test('direct runtime calls enforce type before writing and persist the selected type independently of file names', t => {
+  const { store, runtime, changes } = setup(t);
+  for (const type of [undefined, null, '', 'unknown', ['feedback']]) {
+    assert.throws(() => runtime.propose({ file: 'new.md', content: 'A fact.', expectedRevision: null, type }), /type/);
+  }
+  assert.deepEqual(store.list(), []);
+  assert.deepEqual(changes, []);
+  const saved = runtime.propose({ file: 'reference-misleading.md', content: 'Verify the result before reporting completion.', expectedRevision: null, type: 'feedback' });
+  assert.equal(saved.meta.type, 'feedback');
+  assert.match(saved.content, /^type: feedback$/m);
+  assert.equal(changes.length, 1);
+  assert.throws(() => runtime.propose({ file: 'conflict.md', content: doc({ type: 'project' }), expectedRevision: null, type: 'user' }), /不一致/);
+  assert.equal(changes.length, 1);
 });
 test('runtime reads and queries filter other projects and unconfirmed candidates, and record actual reads', t => {
   const { store, runtime, reads, setContext } = setup(t);
@@ -43,19 +66,29 @@ test('runtime reads and queries filter other projects and unconfirmed candidates
 });
 test('host alone controls confirmation and source; candidates cannot forge global or core status', t => {
   const { runtime, setContext } = setup(t);
-  const saved = runtime.propose({ file: 'new.md', expectedRevision: null, content: doc({ status: 'active', confidence: 'user_confirmed', scope: 'global', core: true, sourceRef: 'fake' }), userConfirmed: true });
+  const saved = runtime.propose({ type: 'reference', file: 'new.md', expectedRevision: null, content: doc({ status: 'active', confidence: 'user_confirmed', scope: 'global', core: true, sourceRef: 'fake' }), userConfirmed: true });
   assert.equal(saved.meta.status, 'draft');
   assert.equal(saved.meta.core, false);
   assert.equal(saved.meta.projectId, 'a');
   assert.equal(saved.meta.sourceRef, 'conversation:a/run:1');
   setContext({ userConfirmed: true });
-  assert.equal(runtime.propose({ file: 'remember.md', content: 'requested fact', expectedRevision: null }).meta.status, 'active');
+  assert.equal(runtime.propose({ type: 'reference', file: 'remember.md', content: 'requested fact', expectedRevision: null }).meta.status, 'active');
+});
+test('list searches body content and exposes stable offset pagination while full reads remain explicit', t => {
+  const { store, runtime, reads } = setup(t);
+  for (const file of ['one.md', 'two.md', 'three.md']) store.write(file, doc({ name: '普通标题' }, 'reportneedle 的项目列必须存在。'));
+  const all = runtime.list({ query: 'reportneedle' });
+  assert.equal(all.length, 3);
+  assert.deepEqual(runtime.list({ query: 'reportneedle', limit: 1, offset: 1 }), all.slice(1, 2));
+  assert.equal(runtime.list({ offset: 3 }).length, 0);
+  assert.ok(all.every(entry => !Object.hasOwn(entry, 'content') && entry.snippet.includes('项目列')));
+  assert.deepEqual(reads, [], 'indexing bodies is not a model read or usefulness signal');
 });
 test('read mode, plan, disabled memory and changed live context enforce the same mutation boundary', async t => {
   const { runtime, setContext } = setup(t);
   for (const context of [{ mode: 'read' }, { mode: 'full', plan: true }, { mode: 'off', plan: false }]) {
     setContext(context);
-    assert.throws(() => runtime.propose({ file: 'new.md', content: 'fact', expectedRevision: null }));
+    assert.throws(() => runtime.propose({ type: 'reference', file: 'new.md', content: 'fact', expectedRevision: null }));
     const result = await runtime.hook({ tool_name: 'mcp__relay-memory__propose', tool_input: {} });
     assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
   }
@@ -66,23 +99,23 @@ test('read mode, plan, disabled memory and changed live context enforce the same
 test('confirmed corrections are deduplicated candidates and conflicts never clobber a newer fact', t => {
   const { store, runtime } = setup(t);
   const before = store.write('global.md', 'original');
-  const candidate = runtime.propose({ file: before.file, content: 'corrected', expectedRevision: before.revision });
-  const repeated = runtime.propose({ file: before.file, content: 'corrected', expectedRevision: before.revision });
+  const candidate = runtime.propose({ type: 'reference', file: before.file, content: 'corrected', expectedRevision: before.revision });
+  const repeated = runtime.propose({ type: 'reference', file: before.file, content: 'corrected', expectedRevision: before.revision });
   assert.equal(candidate.file, repeated.file);
   assert.equal(repeated.deduplicated, true);
   assert.equal(store.read(before.file).content, 'original');
   store.write(before.file, 'user changed it');
-  assert.throws(() => runtime.propose({ file: before.file, content: 'stale', expectedRevision: before.revision }), /发生变化/);
+  assert.throws(() => runtime.propose({ type: 'reference', file: before.file, content: 'stale', expectedRevision: before.revision }), /发生变化/);
   assert.throws(() => store.setStatus(candidate.file, 'active'), /原记忆已变化/);
   assert.equal(store.read(before.file).content, 'user changed it');
 });
 test('maintenance cannot promote new facts or propose edits to core entries', t => {
   const { store, runtime, core } = setup(t, { mode: 'maintenance', userConfirmed: true });
-  assert.equal(runtime.propose({ file: 'candidate.md', content: 'inference', expectedRevision: null }).meta.status, 'draft');
+  assert.equal(runtime.propose({ type: 'reference', file: 'candidate.md', content: 'inference', expectedRevision: null }).meta.status, 'draft');
   const original = store.write('core.md', doc({ core: true }, 'core fact'));
-  assert.throws(() => runtime.propose({ file: original.file, content: 'changed', expectedRevision: original.revision }), /核心/);
+  assert.throws(() => runtime.propose({ type: 'reference', file: original.file, content: 'changed', expectedRevision: original.revision }), /核心/);
   const pinned = store.write('pinned.md', 'pinned by UI'); core.add(pinned.file);
-  assert.throws(() => runtime.propose({ file: pinned.file, content: 'changed', expectedRevision: pinned.revision }), /核心/);
+  assert.throws(() => runtime.propose({ type: 'reference', file: pinned.file, content: 'changed', expectedRevision: pinned.revision }), /核心/);
   assert.equal(store.read(original.file).revision, original.revision);
   assert.match(MEMORY_CONSOLIDATION_PROMPT, /只.*报告问题/);
 });

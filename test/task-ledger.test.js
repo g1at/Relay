@@ -168,6 +168,72 @@ test('recover 可在内存队列丢失时中断从未启动的队列项', (t) =>
   assert.equal(ledger.get('orphaned-queued').state, RUN_STATES.INTERRUPTED);
 });
 
+test('restart recovery keeps the last real activity before health checks and excludes downtime', t => {
+  const { ledger, rootDir } = makeLedger(t);
+  const start = '2026-08-24T10:00:00.000Z';
+  const heartbeat = '2026-08-24T10:00:30.000Z';
+  const healthCheck = '2026-08-24T10:05:00.000Z';
+  const newEvent = '2026-08-24T10:06:00.000Z';
+  const restart = '2026-08-25T12:00:00.000Z';
+  for (const runId of ['silent-run', 'later-output']) {
+    ledger.create({ runId, state: RUN_STATES.RUNNING, createdAt: start });
+    ledger.update(runId, { metadata: { orchestration: { lastActivityAt: heartbeat } } }, { at: heartbeat });
+    ledger.update(runId, { health: 'stalled', metadata: { orchestration: { lastHealthCheckAt: healthCheck } } }, { at: healthCheck });
+  }
+  ledger.update('later-output', { progress: { label: 'real SDK output' } }, { at: newEvent });
+  const reopened = new TaskLedger({ rootDir, logger: { warn() {} } });
+  const recovered = reopened.recover({ at: restart, retainQueued: false });
+  assert.equal(recovered.interrupted.length, 2);
+  assert.equal(reopened.get('silent-run').recovery.lastActiveAt, heartbeat);
+  assert.equal(reopened.get('later-output').recovery.lastActiveAt, newEvent);
+  for (const run of recovered.interrupted) {
+    assert.equal(run.state, RUN_STATES.INTERRUPTED);
+    assert.equal(run.result.error.code, 'APP_RESTART');
+    assert.equal(run.recovery.lastRecoveredAt, restart);
+    assert.equal(run.endedAt, restart, 'the detection time remains available separately');
+    assert.equal(run.lastEventAt, restart);
+    assert.ok(run.recovery.lastActiveAt < restart);
+  }
+  assert.deepEqual(reopened.recover({ at: '2026-08-26T12:00:00Z' }).interrupted, []);
+  assert.equal(reopened.get('silent-run').recovery.lastActiveAt, heartbeat, 'a later launch cannot extend the active interval');
+});
+
+test('restart activity falls back to startedAt and never charges an unstarted queue wait', t => {
+  const { ledger } = makeLedger(t);
+  const created = '2026-08-24T10:00:00.000Z';
+  const started = '2026-08-24T10:01:00.000Z';
+  ledger.create({ runId: 'legacy-active', state: RUN_STATES.RUNNING, createdAt: created, startedAt: started,
+    progress: { lastEventAt: 'invalid' }, metadata: { orchestration: {
+      lastActivityAt: Number.MAX_VALUE, lastHealthCheckAt: '2026-08-24T10:10:00Z',
+    } } });
+  ledger.create({ runId: 'orphaned-queue', createdAt: created });
+  ledger.update('orphaned-queue', { progress: { label: 'still queued' } }, { at: '2026-08-24T11:00:00Z' });
+  ledger.recover({ at: '2026-08-25T12:00:00Z', retainQueued: false });
+  assert.equal(ledger.get('legacy-active').recovery.lastActiveAt, started);
+  assert.equal(ledger.get('orphaned-queue').recovery.lastActiveAt, created);
+});
+
+test('controlled exit shares the interruption clock contract and survives late cancel and restart', t => {
+  const { ledger, rootDir } = makeLedger(t);
+  const created = '2026-08-24T10:00:00.000Z';
+  const exit = '2026-08-24T11:00:00.000Z';
+  ledger.create({ runId: 'active-at-exit', state: RUN_STATES.RUNNING, createdAt: created });
+  ledger.create({ runId: 'queued-at-exit', createdAt: created });
+  ledger.update('queued-at-exit', { title: 'still waiting' }, { at: '2026-08-24T10:30:00Z' });
+  for (const runId of ['active-at-exit', 'queued-at-exit']) {
+    const interrupted = ledger.terminal(runId, RUN_STATES.INTERRUPTED, {
+      result: { error: { code: 'APP_EXIT', message: 'Relay exited' } },
+    }, { at: exit });
+    assert.deepEqual(ledger.terminal(runId, RUN_STATES.CANCELED), interrupted, 'teardown cannot replace exit attribution');
+  }
+  const reopened = new TaskLedger({ rootDir, logger: { warn() {} } });
+  assert.equal(reopened.recover({ at: '2026-08-25T12:00:00Z' }).interrupted.length, 0);
+  assert.equal(reopened.get('active-at-exit').recovery.lastActiveAt, exit);
+  assert.equal(reopened.get('active-at-exit').result.error.code, 'APP_EXIT');
+  assert.equal(reopened.get('queued-at-exit').recovery.lastActiveAt, created);
+  assert.equal(reopened.get('queued-at-exit').endedAt, exit);
+});
+
 test('启动恢复可不复制终态正文，仍完整中断活跃与丢失队列任务', (t) => {
   const { ledger, rootDir } = makeLedger(t);
   ledger.create({ runId: 'finished', state: RUN_STATES.STARTING });

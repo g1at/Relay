@@ -38,6 +38,91 @@ function fixture(overrides = {}) {
   return { controller, deps, history, calls, saves, states, changed, pauses, steers, finish };
 }
 
+test('mini completion is published after its final save and before the history reload notification', async () => {
+  const gate = deferred(), completed = [], events = []; let held = false;
+  const f = fixture({
+    saveConversation: async record => {
+      if (record.turns.at(-1)?.status === 'complete') { held = true; await gate.promise; }
+      f.history.set(record.id, copy(record));
+    },
+    onFinishedSaved: value => {
+      assert.equal(f.history.get(value.conversationId).turns.at(-1).assistant, 'durable result');
+      assert.equal(f.history.get(value.conversationId).turns.at(-1).status, 'complete');
+      completed.push(value);
+      events.push('completion');
+    },
+    onHistoryChanged: id => { if (f.history.get(id)?.turns.at(-1)?.status === 'complete') events.push('history'); },
+  });
+  const sent = await f.controller.submit({ text: 'request' });
+  f.calls[0].emit({ type: 'job-done', exitCode: 0, finalResult: success('durable result') });
+  await waitFor(() => held);
+  assert.equal(f.history.get(sent.conversationId).turns[0].status, 'running');
+  assert.equal(completed.length, 0); assert.equal(f.controller.isRunning(), true);
+  gate.resolve(); await waitFor(() => !f.controller.isRunning());
+  assert.deepEqual(completed, [{ conversationId: sent.conversationId, runId: sent.runId }]);
+  assert.deepEqual(events, ['completion', 'history']);
+  await f.controller.flush(); assert.equal(completed.length, 1);
+  f.controller.destroy();
+});
+
+test('a failed final mini history save creates no completion until a successful retry', async () => {
+  const completed = []; let fail = true;
+  const f = fixture({
+    saveConversation: record => {
+      if (record.turns.at(-1)?.status === 'complete' && fail) throw Error('synthetic disk failure');
+      f.history.set(record.id, copy(record));
+    },
+    onFinishedSaved: value => completed.push(value),
+  });
+  const sent = await f.controller.submit({ text: 'request' }); await f.finish('result kept for retry');
+  assert.equal(f.controller.state().conversation.turns[0].status, 'complete');
+  assert.match(f.controller.state().conversation.turns[0].saveError, /synthetic disk failure/);
+  assert.equal(f.history.get(sent.conversationId).turns[0].status, 'running');
+  assert.equal(completed.length, 0);
+  fail = false;
+  assert.equal((await f.controller.flush()).ok, true);
+  assert.equal(f.history.get(sent.conversationId).turns[0].assistant, 'result kept for retry');
+  assert.deepEqual(completed, [{ conversationId: sent.conversationId, runId: sent.runId }]);
+  await f.controller.flush(); assert.equal(completed.length, 1);
+  f.controller.destroy();
+});
+
+test('a declined final history write does not publish a mini completion', async () => {
+  const completed = [];
+  const f = fixture({
+    saveConversation: record => {
+      if (record.turns.at(-1)?.status === 'complete') return false;
+      f.history.set(record.id, copy(record));
+    },
+    onFinishedSaved: value => completed.push(value),
+  });
+  const sent = await f.controller.submit({ text: 'request' }); await f.finish('unsaved result');
+  assert.equal(completed.length, 0);
+  assert.equal(f.history.get(sent.conversationId).turns[0].status, 'running');
+  assert.equal((await f.controller.flush()).ok, false);
+  f.controller.destroy();
+});
+
+test('deletion during a delayed final mini save suppresses its late completion', async () => {
+  const gate = deferred(), completed = [], deleted = new Set(); let held = false;
+  const f = fixture({
+    saveConversation: async record => {
+      if (record.turns.at(-1)?.status === 'complete') { held = true; await gate.promise; }
+      if (deleted.has(record.id)) return false;
+      f.history.set(record.id, copy(record));
+    },
+    onFinishedSaved: value => completed.push(value),
+  });
+  const sent = await f.controller.submit({ text: 'request' });
+  f.calls[0].emit({ type: 'job-done', exitCode: 0, finalResult: success('obsolete result') });
+  await waitFor(() => held);
+  deleted.add(sent.conversationId); f.history.delete(sent.conversationId);
+  f.controller.forgetConversation(sent.conversationId); gate.resolve(); await tick(); await tick();
+  assert.equal(completed.length, 0); assert.equal(f.history.has(sent.conversationId), false);
+  assert.equal(f.controller.getConversationId(), null);
+  f.controller.destroy();
+});
+
 test('forgetting a deleted mini conversation clears only that owner and the next send gets a new ID', async () => {
   const f = fixture();
   const old = await f.controller.submit({ text: 'old request' }); await f.finish('old response');

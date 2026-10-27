@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { stripVTControlCharacters } = require('node:util');
+const { releaseExitedPtyResources } = require('../src/main/workspace/pty-exit-cleanup');
 
 if (!process.versions.electron || process.platform !== 'win32' || process.arch !== 'x64') {
   console.error('Native probe requires the actual Windows x64 Electron runtime.');
@@ -14,10 +15,12 @@ if (!process.versions.electron || process.platform !== 'win32' || process.arch !
 }
 const { app } = require('electron');
 let terminal = null;
+let terminalExited = false;
+let outputWorkerExited = false;
 const directory = process.env.RELAY_NATIVE_PROBE_ROOT;
 function fail(error) {
   console.error('Native runtime verification failed: ' + (error && error.stack || error));
-  try { terminal?.kill(); } catch (_) {}
+  try { if (terminal && !terminalExited) terminal.kill(); } catch (_) {}
   app.exit(1);
 }
 try {
@@ -47,14 +50,20 @@ app.whenReady().then(async () => {
   const cmd = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
   const result = await new Promise((resolve, reject) => {
     let output = '';
-    const timer = setTimeout(() => { try { terminal?.kill(); } catch (_) {} reject(new Error('Native PTY command timed out.')); }, 15000);
+    const timer = setTimeout(() => { try { if (terminal && !terminalExited) terminal.kill(); } catch (_) {} reject(new Error('Native PTY command timed out.')); }, 15000);
     try {
       terminal = pty.spawn(cmd, ['/d', '/s', '/c', `echo ${marker}`], {
         name: 'xterm-color', cols: 120, rows: 30, cwd: directory, env: { ...process.env }, useConpty: true,
       });
+      const outputWorker = terminal._agent?._conoutSocketWorker?._worker;
+      if (!outputWorker) throw new Error('Native PTY output worker was not observed.');
+      outputWorkerExited = outputWorker.threadId === -1;
+      outputWorker.once('exit', () => { outputWorkerExited = true; });
       terminal.onData(data => { output = (output + data).slice(-16384); });
-      terminal.onExit(({ exitCode }) => {
-        clearTimeout(timer);
+      terminal.onExit(event => {
+        clearTimeout(timer); terminalExited = true;
+        const { exitCode } = event;
+        if (!releaseExitedPtyResources(terminal, event)) { reject(new Error('Native PTY owned resource cleanup was not applied.')); return; }
         const normalized = stripVTControlCharacters(output).replace(/\r/g, '');
         const markerObserved = normalized.split('\n').some(line => line.trim() === marker);
         if (exitCode !== 0 || !markerObserved) reject(new Error(`Native PTY failed: exit=${exitCode}, marker=${markerObserved}`));
@@ -62,6 +71,8 @@ app.whenReady().then(async () => {
       });
     } catch (error) { clearTimeout(timer); reject(error); }
   });
+  for (let attempt = 0; attempt < 80 && !outputWorkerExited; attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  if (!outputWorkerExited) throw new Error('Native PTY output worker did not exit before shutdown.');
   terminal = null;
   const sha256 = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   const nativeFiles = Object.keys(require.cache).filter(file => file.endsWith('.node')
@@ -73,6 +84,6 @@ app.whenReady().then(async () => {
   if (nativeFiles.length === 0) throw new Error('No node-pty native addon was loaded.');
   console.log('RELAY_NATIVE_RUNTIME_OK ' + JSON.stringify({ schemaVersion: 1, platform: process.platform, arch: process.arch,
     electronVersion, nodeVersion: process.versions.node, napiVersion: process.versions.napi, nodePtyVersion,
-    ...result, nativeFiles }));
+    ...result, outputWorkerExited, nativeFiles }));
   app.exit(0);
 }).catch(fail);

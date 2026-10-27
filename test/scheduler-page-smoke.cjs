@@ -263,7 +263,7 @@ app.whenReady().then(async () => {
       update: async (id,payload) => { fixture.updates.push({id,payload:structuredClone(payload)}); if(fixture.failSave) return {ok:false,error:'合成保存失败'}; const task=fixture.items.find(item=>item.id===id); Object.assign(task,structuredClone(payload)); return {ok:true,task:structuredClone(task)}; },
       create: async payload => { const task={id:'new-created',...structuredClone(payload)};fixture.creates.push(task);fixture.items.push(task);return {ok:true,task}; },
       toggle: async (id,enabled) => { fixture.toggles.push({id,enabled});fixture.items.find(item=>item.id===id).enabled=enabled;return {ok:true}; },
-      runNow: async id => {fixture.runs.push(id);return {ok:true};},
+      runNow: async id => {fixture.runs.push(id);return {ok:true,status:'queued',runId:'fixture-run'};},
       remove: async id => {if(fixture.failRemove)return {ok:false,error:'合成删除失败'};(fixture.removed ||= []).push(id);fixture.items=fixture.items.filter(item=>item.id!==id);return {ok:true};},
       onUpdate: handler => {fixture.push=handler;}
     }}; void 0;
@@ -320,6 +320,12 @@ app.whenReady().then(async () => {
     fixture.failRuns=false;$('svRunsRefresh').click();await settle();
     check('recordRefreshRecovers',$('svRunsSummary').textContent==='5 条运行记录');
     const originalRuns=api.scheduler.runs;
+    api.scheduler.runs=async()=>({ok:true,items:['queued','running','interrupted','skipped'].map((status,i)=>({taskId:'cron',runId:'lifecycle-'+i,at:'2026-09-09T01:00:00Z',status,trigger:'timer',scheduledFor:'2026-09-09T00:59:00Z',startedAt:status==='running'?'2026-09-09T01:00:01Z':null,summary:status==='skipped'?'上轮尚未结束，已按任务设置跳过本轮':''}))});
+    $('svRunsRefresh').click();await settle();
+    check('lifecycleLabelsAreExplicit',['排队中','运行中','已中断','已跳过'].every(label=>$('svRunsList').textContent.includes(label)));
+    check('runPlanAndStartTimesVisible',$('svRunsList').textContent.includes('计划时间：')&&$('svRunsList').textContent.includes('开始时间：')&&$('svRunsList').textContent.includes('计划触发'));
+    check('skipReasonAndRunIdentityPreserved',$('svRunsList').textContent.includes('上轮尚未结束')&&!!$('svRunsList').querySelector('[data-run-id="lifecycle-3"]'));
+
     api.scheduler.runs=async()=>({ok:true,items:Array.from({length:45},(_,i)=>({taskId:'cron',at:new Date(Date.UTC(2026,8,1,0,i)).toISOString(),status:'ok',summary:'分页记录 '+i}))});
     $('svRunsRefresh').click();await settle();
     check('recordsRenderFirstPage',$('svRunsList').querySelectorAll('.sv-run-record').length===20&&!$('svRunsMore').classList.contains('hidden'));
@@ -370,7 +376,7 @@ app.whenReady().then(async () => {
       await select('every');await select('cron');
       check('model-'+model+'-reopens', $('svEditModel').dataset.value===model&&$('svEditModel').querySelector('button.active').dataset.value===model&&$('svEditModel').querySelector('button.active').textContent.trim()===label&&$('svEditorSave').disabled);
     }
-    await select('every');input('svEditName','间隔改名');await save();
+    await select('every');check('intervalHidesTimezone',$('svEditTimezone').closest('[data-sv-timezone-row]').classList.contains('hidden'));input('svEditName','间隔改名');await save();
     check('everyExactSchedulePreserved',fixture.updates.at(-1).payload.schedule.everyMs===5400000&&fixture.updates.at(-1).payload.schedule.kind==='every'&&fixture.updates.at(-1).payload.schedule.jitterSec===9);
     input('svEditEveryAmount','2.5');await option('svEditEveryUnit','3600000');await save();
     check('everyEditsRemainEvery',fixture.updates.at(-1).payload.schedule.everyMs===9000000&&fixture.updates.at(-1).payload.schedule.kind==='every');
@@ -381,9 +387,15 @@ app.whenReady().then(async () => {
     await select('complex');check('complexCronShownExactly',$('svEditRepeat').dataset.value==='cron'&&$('svEditCron').value==='5,25 8-18/2 * * 1,3,5');
     input('svEditName','复杂计划改名');await save();
     check('complexCronSavedExactly',fixture.updates.at(-1).payload.schedule.cron==='5,25 8-18/2 * * 1,3,5'&&fixture.updates.at(-1).payload.schedule.tz==='Europe/London'&&fixture.updates.at(-1).payload.action.command==='synthetic text only');
+    check('fixedTimezoneLoads',$('svEditTimezone').value==='Europe/London');
+    input('svEditTimezone','America/New_York');await option('svEditOverlap','queueLatest');await save();
+    check('timezoneAndOverlapSaved',fixture.updates.at(-1).payload.schedule.tz==='America/New_York'&&fixture.updates.at(-1).payload.overlapPolicy==='queueLatest');
+    await select('cron');await select('complex');
+    check('timezoneAndOverlapReopen',$('svEditTimezone').value==='America/New_York'&&$('svEditOverlap').dataset.value==='queueLatest');
+    input('svEditTimezone','local');await save();check('localTimezoneSaved',fixture.updates.at(-1).payload.schedule.tz==='local');
     await select('every');input('svEditPrompt','草稿仍然在');document.querySelector('[data-sv-detail-toggle]').click();await settle();await save();
     check('toggleDoesNotLoseDraftOrReenable',fixture.updates.at(-1).payload.enabled===false&&fixture.updates.at(-1).payload.action.prompt==='草稿仍然在');
-    document.querySelector('[data-sv-detail-run]').click();await settle();check('runButtonUsesExistingApi',fixture.runs.at(-1)==='every');
+    document.querySelector('[data-sv-detail-run]').click();await settle();check('runButtonUsesExistingApi',fixture.runs.at(-1)==='every');check('queuedReceiptToastIsHonest',fixture.toasts.at(-1)==='任务已加入队列');
     fixture.failSave=true;input('svEditName','失败后保留');await save();
     check('saveFailureKeepsDraft',$('svEditName').value==='失败后保留'&&$('svEditorHint').textContent==='合成保存失败'&&!$('svEditorSave').disabled);fixture.failSave=false;
     fixture.failList=true;fixture.push();await settle();check('listFailureKeepsCardsAndDraft',$('svList').querySelectorAll('.sv-card').length===4&&$('svEditName').value==='失败后保留');fixture.failList=false;

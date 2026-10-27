@@ -1,4 +1,4 @@
-.relay-browser-settings { width: 100%; max-width: 920px; margin: 0 auto; min-width: 0; color: var(--text); padding: 2px 0 26px; container-type: inline-size; }
+.relay-browser-settings { width: 100%; max-width: 960px; margin: 0 auto; min-width: 0; color: var(--text); padding: 2px 0 26px; container-type: inline-size; }
 .rbs-heading { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 8px; }
 .rbs-heading h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.03em; line-height: 1.35; }
 .rbs-heading p { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
@@ -8,11 +8,11 @@
 .relay-browser-settings svg { width: 15px; height: 15px; flex-shrink: 0; }
 .rbs-status { min-height: 28px; padding: 3px 0 8px; color: var(--text-muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .relay-browser-settings.has-error .rbs-status { color: var(--error-text, #b84b4b); }
-.rbs-section { margin-top: 22px; }
+.rbs-section { margin-top: 20px; }
 .rbs-section:first-child { margin-top: 0; }
-.rbs-section h3 { margin: 0 0 11px; font-size: 13px; font-weight: 600; color: var(--text-dim); }
-.rbs-card { overflow: hidden; padding: 0 18px; border: 1px solid var(--line-subtle); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-control); }
-.rbs-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; min-height: 69px; padding: 13px 0; }
+.rbs-section h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--text-dim); }
+.rbs-card { overflow: hidden; padding: 0 14px; border: 1px solid var(--line-subtle); border-radius: 14px; background: var(--surface-card); box-shadow: var(--shadow-control); }
+.rbs-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; min-height: 56px; padding: 13px 0; }
 .rbs-row + .rbs-row { border-top: 1px solid var(--line-subtle); }
 .rbs-label { flex: 1; min-width: 0; }
 .rbs-label strong { display: block; font-size: 13px; font-weight: 500; line-height: 1.5; }
@@ -37,7 +37,8 @@
 .rbs-switch[aria-checked="true"] { background: var(--text); }
 .rbs-switch[aria-checked="true"] span { transform: translateX(12px); }
 .relay-browser-settings :is(button, select):disabled { opacity: .45; cursor: default; }
-.relay-browser-settings :is(button, select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.relay-browser-settings :is(button, select, input[type="checkbox"]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.relay-browser-settings input:not([type="checkbox"]):focus-visible { border-color: var(--line-emphasis); outline: 1px solid var(--line-emphasis); outline-offset: -1px; box-shadow: none; }
 .rbs-clear { min-width: 0; padding: 0 0 17px; animation: rbs-clear-enter 160ms ease-out; }
 .rbs-clear-option { justify-content: flex-start; gap: 13px; cursor: pointer; }
 .rbs-clear-option .rbs-label > span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
@@ -88,15 +89,16 @@
 
 /* Trusted local browser pages share the existing management components and
    profile. They live under the browser address bar, independently of Settings. */
-.browser-internal-host { position: absolute; inset: 0; min-width: 0; overflow: auto; container-type: inline-size; background: var(--surface-canvas); }
+.browser-internal-host { position: absolute; inset: 0; min-width: 0; max-width: none; margin: 0; padding: 0; border: 0; border-radius: 0; overflow: auto; container-type: inline-size; background: var(--surface-canvas); }
 .browser-internal-host[hidden], .browser-internal-page[hidden] { display: none; }
-.browser-internal-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px clamp(14px, 3vw, 34px) 30px; min-width: 0; }
-.browser-internal-nav { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.browser-internal-page { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 0; width: 100%; max-width: none; min-height: 100%; margin: 0; padding: 0; border: 0; min-width: 0; }
+.browser-internal-nav { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 14px 14px 10px; border-bottom: 1px solid var(--line-subtle); }
 .browser-internal-nav button { border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); padding: 7px 10px; font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer; }
 .browser-internal-nav button:hover { background: var(--surface-hover); color: var(--text); }
 .browser-internal-nav button[aria-current="page"] { background: var(--surface-card); color: var(--text); font-weight: 550; box-shadow: var(--shadow-control); }
 .browser-internal-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.browser-internal-content { min-width: 0; }
+.browser-internal-content { min-width: 0; padding: 18px 16px 24px; }
+.browser-internal-host .relay-browser-settings { width: 100%; max-width: none; margin: 0; padding: 0; border: 0; border-radius: 0; }
 .browser-internal-content .rbs-heading h2 { font-size: 21px; }
 .browser-internal-content .rbs-heading p { margin-top: 6px; }
 .browser-internal-content .rbs-status:empty { min-height: 14px; padding: 0; }
@@ -104,7 +106,7 @@
 .browser-internal-content .rbs-row { min-height: 62px; padding-block: 10px; }
 .browser-internal-content .rbs-back { display: none; }
 @container (min-width: 800px) {
-  .browser-internal-page { grid-template-columns: 160px minmax(0, 1fr); gap: 28px; padding-top: 30px; }
-  .browser-internal-nav { flex-direction: column; align-items: stretch; align-self: start; position: sticky; top: 20px; }
+  .browser-internal-page { grid-template-columns: 176px minmax(0, 1fr); }
+  .browser-internal-nav { flex-direction: column; align-items: stretch; align-self: start; position: sticky; top: 0; padding: 20px 12px; border-bottom: 0; }
   .browser-internal-nav button { text-align: left; }
 }

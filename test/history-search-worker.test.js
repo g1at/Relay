@@ -39,3 +39,15 @@ test('canceling one client resolves only its current and queued jobs and never r
   assert.equal(replies.find(reply => reply.requestId === 2).result.canceled, true);
   assert.deepEqual(replies.find(reply => reply.requestId === 3).result.items, [{ id: 'fresh-b' }]);
 });
+
+test('dispatcher carries the requested page into the core and returns its pagination metadata', async () => {
+  const calls = [], replies = [];
+  const dispatcher = createHistorySearchDispatcher({ core: { search: async request => {
+    calls.push([request.query, request.limit, request.offset]);
+    return { ok: true, items: [{ id: 'older' }], hasMore: true, nextOffset: 100 };
+  } }, send: reply => replies.push(reply) });
+  dispatcher.handle({ type: 'search', requestId: 1, clientId: 'a', query: 'needle', limit: 50, offset: 50 });
+  await yieldTurn();
+  assert.deepEqual(calls, [['needle', 50, 50]]);
+  assert.equal(replies[0].result.hasMore, true); assert.equal(replies[0].result.nextOffset, 100);
+});

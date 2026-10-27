@@ -55,11 +55,14 @@ test('a late history read cannot restore older grouping or remove a new running 
     getProjectComposer: () => null, isConvRunning: () => false,
     historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
   });
-  vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
-  const first = context.refreshHistoryList(), second = context.refreshHistoryList();
+  vm.runInContext('let historyRefreshRevision = 0, historyRefreshPromise = null;\n' + source.slice(start, end), context);
+  const first = context.refreshHistoryList(); await new Promise(setImmediate);
+  const second = context.refreshHistoryList();
+  assert.equal(readers.length, 1, 'new invalidation shares the active read');
   const latest = [{ id: 'running-new', title: 'Latest title' }];
-  readers[1](latest); await second;
-  readers[0]([{ id: 'old-only' }]); await first;
+  readers[0]([{ id: 'old-only' }]); await new Promise(setImmediate);
+  assert.equal(rendered.length, 0, 'obsolete grouping never reaches the sidebar');
+  readers[1](latest); await Promise.all([first, second]);
   assert.deepEqual(rendered, [latest]);
 });
 
@@ -258,14 +261,17 @@ test('a history refresh waits for its project catalog and stale paired responses
       RelaySidebarHistory: { reconcile: (_container, items, options) => rendered.push({ items, projects: options.projects, header: options.projectHeader }) } },
     getProjectComposer: () => composer, isConvRunning: () => false, historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
   });
-  vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
-  const first = context.refreshHistoryList(), second = context.refreshHistoryList();
+  vm.runInContext('let historyRefreshRevision = 0, historyRefreshPromise = null;\n' + source.slice(start, end), context);
+  const first = context.refreshHistoryList(); await new Promise(setImmediate);
+  const second = context.refreshHistoryList();
+  assert.equal(historyReads.length, 1); assert.equal(projectReads.length, 1);
+  projectReads[0]([{ id: 'old-project', name: 'Old project' }]); historyReads[0]([{ id: 'old-run', projectId: 'old-project' }]);
+  await new Promise(setImmediate); assert.equal(rendered.length, 0);
   const latestItems = [{ id: 'new-run', projectId: 'new-project' }], latestProjects = [{ id: 'new-project', name: 'Current project' }];
-  historyReads[1](latestItems);await Promise.resolve();assert.equal(rendered.length, 0);
-  projectReads[1](latestProjects);await second;
-  assert.equal(rendered.length, 1);assert.equal(rendered[0].items, latestItems);assert.equal(rendered[0].projects, latestProjects);assert.equal(rendered[0].header, header);
-  projectReads[0]([{ id: 'old-project', name: 'Old project' }]);historyReads[0]([{ id: 'old-run', projectId: 'old-project' }]);await first;
-  assert.equal(rendered.length, 1);assert.equal(rendered[0].items[0].id, 'new-run');
+  historyReads[1](latestItems); await new Promise(setImmediate); assert.equal(rendered.length, 0);
+  projectReads[1](latestProjects); await Promise.all([first, second]);
+  assert.equal(rendered.length, 1); assert.equal(rendered[0].items, latestItems); assert.equal(rendered[0].projects, latestProjects); assert.equal(rendered[0].header, header);
+  assert.equal(rendered[0].items[0].id, 'new-run');
 });
 
 
@@ -378,20 +384,20 @@ test('history refresh passes the live running predicate after asynchronous histo
     getProjectComposer: () => composer, isConvRunning,
     historyEl: {}, ensureHistoryDelegation() {}, buildHistoryRow() {}, updateHistoryRow() {},
   });
-  vm.runInContext('let historyRefreshRevision = 0;\n' + source.slice(start, end), context);
+  vm.runInContext('let historyRefreshRevision = 0, historyRefreshPromise = null;\n' + source.slice(start, end), context);
   const items = freeze([
     { id: 'idle-pin', projectId: 'project', pinned: true, updatedAt: '2026-09-25' },
     { id: 'late-run', projectId: 'project', updatedAt: '2000-01-01' },
   ]);
   const projects = freeze([{ id: 'project', name: 'Project' }]);
-  const started = context.refreshHistoryList();
+  const started = context.refreshHistoryList(); await new Promise(setImmediate);
   historyReads[0](items); await Promise.resolve();
   assert.equal(rendered.length, 0);
   running.add('late-run');
   projectReads[0](projects); await started;
   assert.deepEqual(rendered, [['late-run', 'idle-pin']]);
 
-  const stopped = context.refreshHistoryList();
+  const stopped = context.refreshHistoryList(); await new Promise(setImmediate);
   projectReads[1](projects); await Promise.resolve();
   running.clear();
   historyReads[1](items); await stopped;

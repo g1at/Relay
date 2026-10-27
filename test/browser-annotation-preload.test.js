@@ -96,3 +96,24 @@ test('hiding or Escape during preparation cancels before readiness without leaki
     assert.equal(p.ready.length, 0); assert.equal(p.sent[0].payload.type, 'annotation-cancel'); assert.equal(p.sent[0].payload.reason, reason); p.dispose();
   }
 });
+
+test('fractional zoom preparation latches a stable measured viewport and still cancels a one-pixel resize', () => {
+  const p = picker(); p.view.innerWidth = 303; p.view.innerHeight = 485;
+  p.ipc.emit('relay:browser-annotation-start', {}, { mode: 'region', requestId: 'zoomed', revision: 2,
+    viewport: { width: 303, height: 484 }, viewportMax: { width: 304, height: 485 } });
+  p.flush(); p.flush(); assert.equal(p.ready.length, 0); p.flush();
+  assert.deepEqual(p.ready[0].payload.viewport, { width: 303, height: 485 });
+  p.view.innerHeight = 484; p.view.emit('resize');
+  assert.equal(p.sent[0].payload.reason, 'viewport-changed'); p.dispose();
+});
+test('fractional zoom preparation rejects invalid ranges and waits outside its native rounding interval', () => {
+  for (const maximum of [{ width: 900, height: 600 }, { width: 799, height: 600 }, { width: 800.5, height: 600 }]) {
+    const p = picker(); p.ipc.emit('relay:browser-annotation-start', {}, { mode: 'region', requestId: 'invalid', revision: 1,
+      viewport: { width: 800, height: 600 }, viewportMax: maximum });
+    p.flush(); p.flush(); p.flush(); assert.equal(p.ready.length, 0); assert.equal(p.doc.listenerCount('pointerup'), 0); p.dispose();
+  }
+  const p = picker(); p.view.innerWidth = 303; p.view.innerHeight = 486;
+  p.ipc.emit('relay:browser-annotation-start', {}, { mode: 'region', requestId: 'pending', revision: 1,
+    viewport: { width: 303, height: 484 }, viewportMax: { width: 304, height: 485 } });
+  p.flush(); p.flush(); p.flush(); assert.equal(p.ready.length, 0); p.dispose();
+});

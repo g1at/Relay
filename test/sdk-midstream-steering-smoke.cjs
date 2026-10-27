@@ -86,6 +86,7 @@ function harness(name) {
     touchIdleTimer() {}, refreshTrayMenu() {}, retryMissingOrchestrateAgents() { return false; },
     setTimeout() { return { unref() {} }; }, snapshotMcpChildren() {}, killLiveSession() { throw Error('Unexpected session recycle'); } };
   require('./helpers/conversation-permissions-fixture')(context);
+  context.withSessionDiagnostics = require('../src/main/sdk/sdk-session-diagnostic-event').withSessionDiagnostics;
   vm.runInNewContext(`${declaration('compactContextUsage')}\n${declaration('contextRuntimeKey')}\n${source.slice(finishStart, finishEnd)}\n${source.slice(onStart, onEnd)}\nglobalThis.ingest = onMessage;`, context);
   state.ingest = event => { state.raw.push(event); try { context.ingest(event); } catch (error) { state.fatal = error; throw error; } };
   return state;

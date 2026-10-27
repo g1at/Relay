@@ -7,6 +7,21 @@ const { appRoot } = require('./paths');
 const { isQuickChatEnabled, normalizeQuickChatPatch } = require('./mini-window-host');
 const { attachResponsivenessDiagnostics } = require('./responsiveness-diagnostics');
 
+// Native menus size themselves to the longest label. Budget wide graphemes
+// separately so CJK titles stay compact without splitting emoji or accents.
+function compactTrayText(value, limit = 28) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  const segments = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), item => item.segment);
+  const width = segment => /^[\x20-\x7e]+$/.test(segment) ? segment.length : Math.max(2, segment.length);
+  if (segments.reduce((total, segment) => total + width(segment), 0) <= limit) return text;
+  let result = '', used = 0;
+  for (const segment of segments) {
+    if (used + width(segment) > limit - 2) break;
+    result += segment; used += width(segment);
+  }
+  return result.trimEnd() + '…';
+}
+
 // This owner keeps all native window/tray state in one place. Runtime services
 // are callbacks, so constructing the owner never starts a task or an SDK session.
 function createApplicationWindows({
@@ -162,12 +177,17 @@ function createApplicationWindows({
         enabled: false,
       },
     );
-    if (nextHint) template.push({ label: `下一个定时任务:${nextHint.label}`, enabled: false });
+    if (nextHint) template.push({ label: compactTrayText(`下次：${nextHint.label}`), enabled: false });
     template.push({ type: 'separator' }, { label: '退出 Relay', click: () => quitApp() });
     tray.setContextMenu(Menu.buildFromTemplate(template));
-    tray.setToolTip(waitingCount > 0
+    const status = waitingCount > 0
       ? `Relay · ${waitingCount} 项等待处理`
-      : (n > 0 ? `Relay · ${n} 个任务运行中` : 'Relay'));
+      : (n > 0 ? `Relay · ${n} 个任务运行中` : 'Relay');
+    // Keep the scheduled time/name available on hover without widening the menu.
+    // Windows tray tooltips are limited to 128 characters.
+    tray.setToolTip(nextHint
+      ? `${status}\n${compactTrayText(`下次：${nextHint.label}`, 127 - status.length - 1)}`
+      : status);
   }
 
   // 创建托盘图标 + 右键菜单。幂等:已存在则不重复建。

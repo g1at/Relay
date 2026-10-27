@@ -29,7 +29,7 @@
 #btnExecutionMode svg:last-child{width:12px;height:12px;margin-left:2px}
 .composer-add-menu{position:fixed;z-index:3000;box-sizing:border-box;padding:6px;border:1px solid var(--line-subtle,var(--border));border-radius:16px;background:var(--surface-card,var(--bg-panel,var(--bg)));color:var(--text);box-shadow:var(--shadow-popover,0 12px 36px #10182818,0 2px 6px #10182808);overflow:auto;animation:composerMenuIn var(--motion-normal,180ms) var(--ease-out,cubic-bezier(.16,1,.3,1));transform-origin:bottom left}
 .composer-add-menu[data-variant="composer-add"],.composer-add-menu[data-variant="project-picker"]{display:flex;flex-direction:column;overflow:hidden}
-.composer-add-menu[data-variant="project-picker"]{--project-picker-row-height:32px}
+.composer-add-menu[data-variant="project-picker"]{--project-picker-row-height:30px;padding:5px}
 .composer-add-menu[data-variant="project-picker"]>.composer-menu-heading{display:none}
 .composer-add-menu[data-variant="composer-add"]>.composer-menu-heading{flex-shrink:0;padding-block:2px}
 .composer-menu-heading{padding:6px 9px 7px;color:var(--text-muted);font-size:11px}
@@ -57,10 +57,12 @@
 .project-picker-list .composer-menu-label>span.is-overflowing{mask-image:linear-gradient(to right,#000 calc(100% - 12px),transparent)}
 .project-picker-footer{flex:0 0 auto;border-top:1px solid var(--border);margin-top:5px;padding-top:5px}
 .project-picker-footer .composer-menu-item{height:33px;min-height:33px}
-.composer-add-menu[data-variant="project-picker"] .project-search{height:32px;padding-block:6px}
+.composer-add-menu[data-variant="project-picker"] .project-picker-search{margin-bottom:4px}
+.composer-add-menu[data-variant="project-picker"] .project-search{height:30px;padding-block:5px}
 .composer-add-menu[data-variant="project-picker"] .project-picker-list{min-height:var(--project-picker-row-height);max-height:calc(var(--project-picker-row-height) * 5)}
 .composer-add-menu[data-variant="project-picker"] .project-picker-list .composer-menu-item{height:var(--project-picker-row-height);min-height:var(--project-picker-row-height);padding-block:5px}
-.composer-add-menu[data-variant="project-picker"] .project-picker-footer .composer-menu-item{height:31px;min-height:31px;padding-block:6px}
+.composer-add-menu[data-variant="project-picker"] .project-picker-footer{margin-top:4px;padding-top:4px}
+.composer-add-menu[data-variant="project-picker"] .project-picker-footer .composer-menu-item{height:30px;min-height:30px;padding-block:6px}
 .composer-add-home{display:flex;flex-direction:column;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .composer-add-home[hidden]{display:none}
 .composer-projects-page{display:flex;flex-direction:column;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;animation:composerPageIn .16s cubic-bezier(.2,.8,.2,1)}

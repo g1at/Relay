@@ -98,3 +98,34 @@ test('rapid detail navigation runs at most two native history readers concurrent
   releases.splice(0).forEach(resolve => resolve()); await new Promise(resolve => setImmediate(resolve));
   releases.splice(0).forEach(resolve => resolve()); await Promise.all(requests); assert.equal(maximum, 2);
 });
+
+for (const [name, diagnostic, missingNode] of [
+  ['missing Node executable', 'wsl: execvpe(node) failed: No such file or directory', true],
+  ['worker file I/O failure', "Error: EIO: i/o error, open '/mnt/d/private-fixture/sdk-session-history-worker.cjs'", false],
+  ['SDK module read failure', "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/mnt/d/private-fixture/sdk.mjs'", false],
+]) test('WSL history distinguishes ' + name + ' without exposing raw diagnostics', async () => {
+  let killed = 0;
+  const spawn = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.stdin = new EventEmitter();
+    child.kill = () => { killed++; };
+    child.stdin.end = () => setImmediate(() => {
+      child.stderr.emit('data', Buffer.from('fixture-secret-not-for-ui'.repeat(500)));
+      child.stderr.emit('data', Buffer.from(diagnostic));
+      child.emit('close', 1);
+    });
+    return child;
+  };
+  const wsl = { ...scope, agentEnvironment: 'wsl', wslDistribution: 'Fixture Linux' };
+  await assert.rejects(executeSessionOperation(wsl, 'listSubagents', {}, { platform: 'win32', spawn }), error => {
+    assert.equal(error.code, 'SESSION_ENVIRONMENT_UNAVAILABLE');
+    if (missingNode) assert.match(error.message, /未找到 Node\.js.*18\.18/);
+    else {
+      assert.match(error.message, /WSL 历史读取进程.*文件.*目录/);
+      assert.doesNotMatch(error.message, /18\.18|未找到 Node/);
+    }
+    assert.doesNotMatch(error.message, /private-fixture|fixture-secret|ERR_MODULE|EIO:/);
+    return true;
+  });
+  assert.equal(killed, 1);
+});

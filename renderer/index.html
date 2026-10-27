@@ -36,6 +36,7 @@
   <link rel="stylesheet" href="subagent-history.css" />
   <link rel="stylesheet" href="session-actions.css" />
   <link rel="stylesheet" href="workspace-panel.css" />
+  <link rel="stylesheet" href="browser-chrome.css" />
   <link rel="stylesheet" href="workspace-review.css" />
   <link rel="stylesheet" href="workspace-file-layout.css" />
   <link rel="stylesheet" href="workspace-file-types.css" />
@@ -50,6 +51,8 @@
   <script src="vendor/marked.umd.js"></script>
   <script src="vendor/highlight.min.js"></script>
   <script src="vendor/agent-avatar.js"></script>
+  <link rel="stylesheet" href="media-ui.css">
+  <link rel="stylesheet" href="media-parameters.css">
 </head>
 <body>
   <header id="windowChrome" class="window-chrome" aria-label="窗口标题栏">
@@ -272,11 +275,11 @@
       <div class="input-area">
         <div class="input-card" id="cvInputCard">
           <div class="attachments hidden" id="cvAttachments"></div>
-          <textarea id="cvPrompt" placeholder="描述你想要的图片…（英文描述效果通常更佳）" rows="1"></textarea>
+          <textarea id="cvPrompt" placeholder="描述你想要的图片或视频…" rows="1"></textarea>
           <div class="input-bottom">
             <div class="ib-left">
               <!-- 上传参考图(图生图):与新对话的 + 同款。仅豆包支持,带图后 GPT 自动置灰 -->
-              <button class="btn-attach" id="cvBtnAttach" title="上传参考图(豆包支持图生图)">
+              <button class="btn-attach" id="cvBtnAttach" title="上传参考图">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="12" y1="5" x2="12" y2="19"/>
                   <line x1="5" y1="12" x2="19" y2="12"/>
@@ -290,6 +293,7 @@
                   <svg class="ms-caret" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 6l3-3 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </button>
               </div>
+              <div class="media-parameters" id="cvMediaParameters"></div>
               <!-- 画质:豆包切分辨率档(2K/3K/4K),GPT 切清晰度(标准/高清) -->
               <div class="model-switch" id="cvQualitySwitch">
                 <button class="ms-trigger" id="cvQualityTrigger" type="button" title="选择画质">
@@ -307,11 +311,13 @@
               </div>
               <!-- 组图不再用手动按钮:由提示词自动判断(命中"组图/分N步/N张/系列"等词即开,仅豆包) -->
             </div>
-            <button id="btnGenerate" title="生成 (Enter)">
+            <button id="btnGenerate" type="button" title="生成 (Enter)" aria-label="生成 (Enter)" data-action="generate">
               <svg class="ico-send" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="12" y1="19" x2="12" y2="5"></line>
                 <polyline points="5 12 12 5 19 12"></polyline>
               </svg>
+              <svg class="ico-resume" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+              <svg class="ico-stop" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" rx="1.5" fill="currentColor"/></svg>
             </button>
           </div>
         </div>
@@ -412,7 +418,7 @@
       <header class="workspace-panel-header">
         <div id="workspaceTabs" class="workspace-tabs" role="tablist" hidden aria-label="工作区标签页"></div>
         <button id="workspaceAdd" class="workspace-icon-button" type="button" hidden title="添加标签页" aria-label="添加标签页" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-        <div class="workspace-header-actions"><button id="workspaceMaximize" class="workspace-icon-button" type="button" title="放大阅读区域" aria-label="放大阅读区域" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button><button id="workspaceTreeToggle" class="workspace-icon-button" type="button" hidden title="显示文件树" aria-label="显示文件树" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="workspaceClose" class="workspace-icon-button" type="button" title="收起右侧栏" aria-label="收起右侧栏" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
+        <div class="workspace-header-actions"><button id="workspaceMaximize" class="workspace-icon-button" type="button" title="放大阅读区域" aria-label="放大阅读区域" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg></button><button id="workspaceTreeToggle" class="workspace-icon-button" type="button" hidden title="显示文件树" aria-label="显示文件树" aria-pressed="false"><svg data-tree-icon="closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg><svg data-tree-icon="open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10V6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v1"/><path d="M3 10h17a1 1 0 0 1 .94 1.34l-2.5 7A1 1 0 0 1 17.5 19H4a2 2 0 0 1-2-2V10Z"/></svg></button><button id="workspaceClose" class="workspace-icon-button" type="button" title="收起右侧栏" aria-label="收起右侧栏" ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></div>
       </header>
       <div id="workspaceNotice" class="workspace-notice" role="status"></div>
       <section id="workspaceFiles" class="workspace-content" hidden data-workspace-content="files" role="tabpanel" aria-label="文件">
@@ -442,7 +448,14 @@
           <button id="workspaceBrowserAnnotate" type="button" aria-haspopup="menu" title="选择页面元素或区域，添加反馈">指出问题</button>
         </div>
         <div id="workspaceBrowserNotice" class="workspace-notice" role="status"></div>
-        <div id="workspaceBrowserViewport" class="workspace-browser-viewport"><div id="workspaceBrowserEmpty" class="workspace-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg><strong>开始浏览</strong><p>在上方输入网址，在这里查看网页。</p></div><div id="workspaceBrowserCover" class="workspace-browser-cover" aria-hidden="true" hidden></div></div>
+        <div id="workspaceBrowserViewport" class="workspace-browser-viewport" data-state="empty">
+          <div id="workspaceBrowserEmpty" class="workspace-empty"><div class="workspace-browser-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg></div><strong>开始浏览</strong><p>输入网址或关键词，<br>在这里打开你想看的页面。</p><div class="workspace-browser-shortcut" aria-label="Ctrl L 聚焦地址栏"><kbd>Ctrl</kbd><kbd>L</kbd><span>前往网址</span></div></div>
+          <div id="workspaceBrowserError" class="workspace-browser-error" role="group" aria-label="网页连接提示" hidden>
+            <div id="workspaceBrowserErrorIcon" class="workspace-browser-empty-icon" aria-hidden="true"></div><p id="workspaceBrowserErrorOrigin" class="workspace-browser-error-origin"></p>
+            <h2 id="workspaceBrowserErrorTitle"></h2><p id="workspaceBrowserErrorDescription"></p><p id="workspaceBrowserErrorConsent" class="workspace-browser-error-consent" hidden>确认这是你信任的网站后，可在本次浏览会话中临时允许其当前证书。此设置也用于同一站点的其他标签页，退出 Relay 后失效。</p><p id="workspaceBrowserErrorCode" class="workspace-browser-error-code"></p>
+            <div class="workspace-browser-error-actions"><button id="workspaceBrowserErrorReload" class="is-primary" type="button">重新加载</button><button id="workspaceBrowserCertificateContinue" type="button" hidden>继续访问此网站</button><button id="workspaceBrowserUseHttp" type="button" hidden>改用 HTTP（未加密）</button></div>
+          </div><div id="workspaceBrowserCover" class="workspace-browser-cover" aria-hidden="true" hidden></div>
+        </div>
       </section>
       <section id="workspaceTerminal" class="workspace-content" data-workspace-content="terminal" role="tabpanel" aria-label="终端" hidden>
         <div id="workspaceTerminalError" class="workspace-notice" role="status"></div>
@@ -470,6 +483,7 @@
   <script src="conversation-context.js"></script>
   <script src="conversation-errors.js"></script>
   <script src="supplement-timeline.js"></script>
+  <script src="history-search-text.js"></script>
   <script src="browser-activity.js"></script>
   <script src="browser-feedback.js"></script>
   <script src="activity-stream.js"></script>
@@ -478,6 +492,7 @@
   <script src="sidebar-layout.js"></script>
   <script src="window-chrome.js"></script>
   <script src="sidebar-history.js"></script>
+<script src="history-completion.js"></script>
   <script src="sidebar-explore.js"></script>
   <script src="plugins-page.js"></script>
   <script src="keyboard-shortcuts.js"></script>
@@ -490,6 +505,7 @@
 <script src="general-preferences-page.js"></script>
   <script src="browser-settings-page.js"></script>
   <script src="browser-internal-pages.js"></script>
+  <script src="browser-connection.js"></script>
   <script src="browser-form-manager.js"></script>
   <script src="permission-controls.js"></script>
   <script src="mcp-permission-controls.js"></script>
@@ -502,6 +518,10 @@
   <script src="code-blocks.js"></script>
   <script src="personalization-guidance.js"></script>
   <script src="composer-prewarm.js"></script>
+  <script src="memory-overview.js"></script>
+  <script src="media-parameters.js"></script>
+  <script src="media-template-matching.js"></script>
+  <script src="media-ui.js"></script>
   <script src="app.js"></script>
   <script src="read-only-markdown.js"></script>
   <script src="subagent-history.js"></script>

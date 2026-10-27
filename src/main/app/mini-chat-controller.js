@@ -17,7 +17,7 @@ const MODELS = new Set(['haiku', 'sonnet', 'opus']);
 function createMiniChatController({
   run, pause: pauseRun, steer, loadConversation, saveConversation, generateTitle,
   getDefaultModel = () => 'sonnet', getSessionRoute = null, getPermissions = null, setPermissions = null,
-  onState = () => {}, onHistoryChanged = () => {},
+  onState = () => {}, onHistoryChanged = () => {}, onFinishedSaved = () => {},
   idFactory = randomUUID, now = () => new Date().toISOString(),
 } = {}) {
   if (typeof run !== 'function' || typeof loadConversation !== 'function' || typeof saveConversation !== 'function') {
@@ -212,9 +212,20 @@ function createMiniChatController({
     }
     const saved = await saveConversation(record);
     if (forgotten(task)) return false;
+    if (saved === false || saved?.ok === false) throw Error(saved?.error || '对话记录未能保存');
     if (saved && saved.error) throw Error(saved.error);
     if (conversation && conversation.id === record.id) conversation = clone(saved && Array.isArray(saved.turns) ? saved : record);
     delete task.turn.saveError;
+    // The ledger can reach its terminal state before this async save finishes.
+    // Publish its history reminder only once the exact final turn is durable;
+    // a failed save retries through this same path without acknowledging a
+    // placeholder as read. Deletion checks above suppress late notifications.
+    if (!task.finishedSavedNotified) {
+      task.finishedSavedNotified = true;
+      try { onFinishedSaved({ conversationId: record.id, runId: task.id }); } catch (_) {}
+    }
+    // Install the completion token before a history-change listener starts its
+    // reload, so that reload can acknowledge the final body it actually reads.
     changed(record.id);
     requestTitle(task, record);
     return true;

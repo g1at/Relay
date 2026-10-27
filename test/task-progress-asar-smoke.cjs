@@ -29,7 +29,7 @@ app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const entries = ['src/main/tasks/task-progress-client.js', 'src/main/tasks/task-progress-worker.js', 'src/main/tasks/task-progress-store.js', 'src/main/tasks/task-protocol.js',
-    'renderer/activity-stream.js', 'renderer/assistant-output.js', 'renderer/task-continuity.js', 'src/main/app/paths.js'];
+    'renderer/activity-stream.js', 'renderer/browser-activity.js', 'renderer/assistant-output.js', 'renderer/task-continuity.js', 'src/main/app/paths.js'];
   const packagedPatterns = manifest.build.files.filter(value => typeof value === 'string');
   const unpackedPatterns = manifest.build.asarUnpack;
   const included = file => packagedPatterns.some(pattern => !pattern.startsWith('!') && matches(file, pattern))
@@ -66,6 +66,8 @@ app.whenReady().then(async () => {
     { type: 'assistant', uuid: 'packaged-stage', message: { id: 'packaged-message', content: [{ type: 'text', text: '合成阶段输出：正在校验快照。' }] } },
     { type: 'assistant', uuid: 'packaged-tool', message: { id: 'packaged-message', stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'packaged-read', name: 'Read', input: { file_path: 'synthetic/report.md' } }] } },
     { type: 'user', uuid: 'packaged-tool-result', message: { content: [{ type: 'tool_result', tool_use_id: 'packaged-read', content: '合成结果：快照校验数据。' }] } },
+    { type: 'assistant', uuid: 'packaged-browser-tool', message: { id: 'packaged-browser-message', content: [{ type: 'tool_use', id: 'packaged-browser-verify', name: 'mcp__relay-browser__verify', input: { tabId: 'synthetic-page' } }] } },
+    { type: 'user', uuid: 'packaged-browser-result', message: { content: [{ type: 'tool_result', tool_use_id: 'packaged-browser-verify', content: JSON.stringify({ ok: true, verified: false }) }] } },
   ];
   const envelope = (event, seq) => ({ type: 'claude.event', runId, epoch, seq,
     emittedAt: new Date(1800000000000 + seq * 1000).toISOString(), payload: { event: { ...event, jobId: runId } } });
@@ -78,21 +80,26 @@ app.whenReady().then(async () => {
   const bytesBefore = fs.readFileSync(snapshotFile);
   client = create();
   const saved = await client.load(runId);
-  check('NewPackagedClientReadsThePreviousWorkerCheckpoint', saved?.runId === runId && saved.epoch === epoch && saved.seq === 4);
+  check('NewPackagedClientReadsThePreviousWorkerCheckpoint', saved?.runId === runId && saved.epoch === epoch && saved.seq === events.length);
   check('PackagedWorkerPreservesThinkingAndToolResult', saved.activity.items.some(item => item.type === 'thinking'
     && item.title === '合成思考：验证打包后仍能保存任务过程。') && saved.activity.items.some(item => item.toolUseId === 'packaged-read'
       && item.status === 'success' && item.resultConfirmed && item.result === '合成结果：快照校验数据。'));
+  check('PackagedWorkerRestoresBrowserVerificationReceipt', saved.activity.items.some(item => item.toolUseId === 'packaged-browser-verify'
+    && item.title === '核验网页结果' && item.resultConfirmed && item.status === 'error'
+    && item.browser?.action === 'verify' && item.browser.tone === 'error' && item.browser.label === '页面结果未通过核验'));
   check('StageTextIsStoredWithoutInventingAFinalAnswer', saved.output.messages.some(message => message.blocks.some(block => block.text === '合成阶段输出：正在校验快照。'))
     && saved.output.final === '' && saved.output.answers.length === 0 && saved.displayOnly === true && saved.terminal === false);
   check('ReadingTheCheckpointDoesNotRewriteIt', fs.readFileSync(snapshotFile).equals(bytesBefore));
-  client.observe([envelope({ type: 'job-done', exitCode: -1, error: '合成任务意外中断' }, 5)]);
+  client.observe([envelope({ type: 'job-done', exitCode: -1, error: '合成任务意外中断' }, events.length + 1)]);
   await client.close(); client = null;
   client = create();
   const terminal = await client.load(runId);
-  check('PackagedWorkerCloseFlushesTheInterruptedTerminalState', terminal.seq === 5 && terminal.terminal === true
+  check('PackagedWorkerCloseFlushesTheInterruptedTerminalState', terminal.seq === events.length + 1 && terminal.terminal === true
     && terminal.activity.phase === 'error' && terminal.activity.error === '合成任务意外中断' && terminal.output.final === '');
   check('TerminalPersistenceRetainsTheEarlierProcess', terminal.activity.items.filter(item => item.type === 'thinking').length === 1
-    && terminal.activity.items.filter(item => item.type === 'tool').length === 1);
+    && terminal.activity.items.filter(item => item.type === 'tool').length === 2
+    && terminal.activity.items.some(item => item.toolUseId === 'packaged-browser-verify' && item.status === 'error'
+      && item.browser?.label === '页面结果未通过核验'));
   await client.close(); client = null;
   check('WorkersExitCleanlyWithoutPersistenceWarnings', warnings.length === 0, warnings);
   check('FixtureNeverLoadsSdkOrRelayMain', !Object.keys(require.cache).some(file => /[\\/]@anthropic-ai[\\/]|[\\/]claude-sdk\.js$/.test(file))

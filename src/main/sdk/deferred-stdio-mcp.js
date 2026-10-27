@@ -1,6 +1,6 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { McpToolCatalog } = require('./mcp-tool-catalog');
 const hasId = message => message && message.id !== undefined && message.id !== null;
 const request = message => hasId(message) && typeof message.method === 'string';
@@ -15,7 +15,10 @@ function createDeferredHostServerClass(BaseHostClass) {
   return class DeferredHostStdioMcpServer extends BaseHostClass {
     constructor(name, config, options = {}) {
       super(name, config, options);
-      this.discoveryName = 'relay_search_tools_' + randomUUID().replace(/-/g, '');
+      // A resumed Query retains historical tool calls. Keep this local entry
+      // stable across bridge/process recreation without retaining any selected
+      // business schemas. The upstream collision check below still fails closed.
+      this.discoveryName = 'relay_search_tools_' + createHash('sha256').update(String(name)).digest('hex').slice(0, 32);
       const stableName = this.discoveryName;
       this.toolCatalog = new class extends McpToolCatalog {
         constructor() { super({ serverName: name, lazyToolBytes: 1 }); }

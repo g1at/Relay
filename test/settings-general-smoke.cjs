@@ -97,7 +97,7 @@ app.whenReady().then(async () => {
   await check('themePreviewsWhileAppearanceAndBehaviorChangesRemainDrafts', "document.documentElement.dataset.theme==='dark'&&generalFixture.saved.app.theme==='light'&&generalFixture.saved.claude.alwaysThinking===true&&generalFixture.writes.length===0&&document.getElementById('settingsHint').textContent.includes('未保存')");
   await click('.set-nav-item[data-cat=shortcuts]');
   await waitFor("document.querySelector('[data-shortcut-global=miniWindow]')?.dataset.shortcutState==='disabled'");
-  await check('shortcutHelpPointsToGeneral', "document.querySelector('[data-shortcut-global=miniWindow]').textContent.includes('设置 → 常规')&&!document.querySelector('[data-shortcut-global=miniWindow]').textContent.includes('设置 → 行为')");
+  await check('shortcutHelpPointsToGeneral', "document.querySelector('[data-shortcut-global=miniWindow]').textContent.includes('常规')&&document.querySelector('[data-shortcut-global=miniWindow]').textContent.includes('开启')&&!document.querySelector('[data-shortcut-global=miniWindow]').textContent.includes('设置 → 行为')");
   for (const alias of ['personalize','behavior']) {
     await evaluate(`openSettings(${JSON.stringify(alias)})`);
     await check('legacyOpenSettingsAlias_' + alias, "generalFixture.general().classList.contains('active')&&lastSettingsCat==='general'&&generalFixture.sameControls()&&document.getElementById('set-theme').dataset.value==='dark'&&!document.getElementById('sw-quickChat').classList.contains('on')&&generalFixture.writes.length===0");

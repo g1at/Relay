@@ -24,7 +24,7 @@ function createHistorySearchDispatcher({ core, send }) {
         if (!job) continue;
         waiting.delete(clientId); active = job;
         try {
-          const result = await core.search({ query: job.query, limit: job.limit, isCanceled: () => job.canceled });
+          const result = await core.search({ query: job.query, limit: job.limit, offset: job.offset, isCanceled: () => job.canceled });
           reply(job, job.canceled ? { ok: true, items: [], canceled: true } : result);
         } catch (_) { reply(job, { ok: false, items: [], code: 'HISTORY_SEARCH_FAILED', error: '历史搜索暂时失败，请重试。' }); }
         active = null;
@@ -43,7 +43,7 @@ function createHistorySearchDispatcher({ core, send }) {
       return;
     }
     if (!previous) queue.push(clientId);
-    waiting.set(clientId, { requestId: message.requestId, clientId, query: message.query, limit: message.limit, canceled: false, replied: false });
+    waiting.set(clientId, { requestId: message.requestId, clientId, query: message.query, limit: message.limit, offset: message.offset, canceled: false, replied: false });
     void drain();
   }
   return { handle };

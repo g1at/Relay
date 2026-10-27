@@ -24,6 +24,7 @@ function restoreHarness(turns, recoverTurn) {
     bufferedClaudeEvents: [], bufferedTaskLifecycleEvents: [],
     TERMINAL_LEDGER_STATES: new Set(['succeeded', 'failed', 'canceled', 'interrupted']),
     handleTaskLifecycleEvent: async () => {}, reconcileRestoredChatTask: async () => {},
+    historyTaskEventRevision: 0, syncHistoryTaskDeletionSnapshot() {},
     loadConversation: async () => { throw Error('Recovery must preserve current navigation'); },
     console: { ...console, warn() {} },
   });
@@ -33,7 +34,8 @@ function restoreHarness(turns, recoverTurn) {
     replayStream: async () => ({ ok: true, events: [], hasMore: false }),
   };
   for (const name of ['claudeEventFingerprint', 'taskIsTerminal', 'taskIsCreation', 'taskCanRestoreChat',
-    'taskTurnHasPersistedOutcome', 'taskHasEmptyInterruptedProgress', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
+    'taskTurnHasPersistedOutcome', 'taskIsAppInterrupted', 'taskCanRepairInterruption', 'recoveryTime',
+    'recoveredRunFinishedAt', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
   return h;
 }
 

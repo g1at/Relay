@@ -6,6 +6,7 @@ const { createConversationPermissions } = require('../../src/main/projects/conve
 module.exports = function installPermissions(context) {
   require('./conversation-lifecycle-fixture')(context);
   require('./sdk-provenance-fixture')(context);
+  require('./turn-delivery-fixture')(context);
   context.protectGoalRecovery = require('../../src/main/projects/conversation-goals').protectGoalRecovery;
   context.goalConditionValue = require('../../src/main/projects/conversation-goals').condition;
   let settings = { permissionMode: 'default', ...(context.readAppSettings ? context.readAppSettings() : {}) };

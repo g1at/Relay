@@ -118,7 +118,8 @@ test('history uses output.final only for a confirmed complete output and keeps p
     assert.equal(h.context.savedAssistantDisplay({ output: { status, final: 'unconfirmed' } }).text, '');
   }
   assert.equal(h.context.savedAssistantDisplay({ output: { status: 'complete', final: 'confirmed\n' } }).text, 'confirmed\n');
-  assert.equal(h.context.savedAssistantDisplay({ assistant: 'saved answer', output: { status: 'complete', final: 'other' } }).text, 'saved answer');
+  assert.equal(h.context.savedAssistantDisplay({ assistant: 'saved answer', output: { status: 'complete', final: 'other' } }).text,
+    'other', 'the confirmed structured answer is authoritative, consistently with history search');
   const text = '<tool_call><function=Read>example</function></tool_call>';
   const turn = { assistant: text, chat: [{ role: 'pm', text }] };
   const state = h.context.activityStateForTurn(turn);
@@ -136,6 +137,7 @@ function installReplay(h, task, events) {
     bufferedClaudeEvents: [], bufferedTaskLifecycleEvents: [],
     TERMINAL_LEDGER_STATES: new Set(['completed', 'failed', 'cancelled']),
     handleTaskLifecycleEvent: async () => {},
+    historyTaskEventRevision: 0, syncHistoryTaskDeletionSnapshot() {},
     registerCreationTask() { throw new Error('synthetic chat cannot be registered as image work'); },
     reconcileRestoredChatTask: async () => {},
     loadConversation: async () => { throw new Error('hidden chat must not steal settings navigation'); },
@@ -145,7 +147,9 @@ function installReplay(h, task, events) {
     replayStream: async () => ({ ok: true, events: events.map((event, index) => ({ seq: index + 1, runId: 'job', payload: { event: { jobId: 'job', ...event } } })), hasMore: false }),
     ack: async (value) => { acknowledgements.push(value); },
   };
-  for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation', 'taskCanRestoreChat', 'taskTurnHasPersistedOutcome', 'taskHasEmptyInterruptedProgress', 'taskTurnLocation', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
+  for (const name of ['claudeEventFingerprint', 'taskSource', 'taskIsTerminal', 'taskIsCreation', 'taskCanRestoreChat',
+    'taskTurnHasPersistedOutcome', 'taskIsAppInterrupted', 'taskCanRepairInterruption', 'recoveryTime',
+    'recoveredRunFinishedAt', 'taskTurnLocation', 'restoreActiveRunsFromLedger']) h.loadFunction(name);
   return acknowledgements;
 }
 

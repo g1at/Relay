@@ -2,260 +2,337 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-
 const { createCronMcpServer, CRON_MCP_TOOL_TIMEOUT_MS, _execTool } = require('../src/main/scheduling/cron-mcp');
 
-function schedulesFile(t) {
-  const tempRoot = process.platform === 'win32' ? os.tmpdir() : '/tmp';
-  const root = fs.mkdtempSync(path.join(tempRoot, 'relay-cron-mcp-test-'));
-  const file = path.join(root, 'schedules.json');
-  fs.writeFileSync(file, JSON.stringify({ version: 1, tasks: [], runs: [] }));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return file;
+// The adapter receives the same service as IPC. This fake intentionally returns live
+// objects, so failed MCP validation cannot hide accidental in-place mutation.
+function schedulerService() {
+  const state = { tasks: [], runs: [] };
+  const calls = [];
+  let sequence = 0;
+  const service = {
+    list() { calls.push(['list']); return state.tasks; },
+    create(input) {
+      calls.push(['create', structuredClone(input)]);
+      const task = { ...structuredClone(input), id: `task-${++sequence}`, nextRunAt: '2030-01-01T00:00:00.000Z', runCount: 0 };
+      state.tasks.push(task);
+      return { ok: true, id: task.id, task };
+    },
+    update(id, patch) {
+      calls.push(['update', id, structuredClone(patch)]);
+      const index = state.tasks.findIndex((task) => task.id === id);
+      if (index < 0) return { ok: false, code: 'TASK_NOT_FOUND', error: '任务不存在' };
+      const task = state.tasks[index];
+      const merged = {
+        ...task, ...structuredClone(patch),
+        schedule: { ...task.schedule, ...patch.schedule },
+        action: { ...task.action, ...patch.action },
+      };
+      state.tasks[index] = merged;
+      return { ok: true, task: merged };
+    },
+    remove(id) { calls.push(['remove', id]); state.tasks = state.tasks.filter((task) => task.id !== id); return { ok: true }; },
+    toggle(id, enabled) { calls.push(['toggle', id, enabled]); state.tasks.find((task) => task.id === id).enabled = enabled; return { ok: true }; },
+    runs(id) { calls.push(['runs', id]); return state.runs.filter((run) => run.taskId === id); },
+    runNow(id) { calls.push(['runNow', id]); return { ok: true, status: 'accepted', code: 'TASK_STARTED', taskId: id, runId: 'run-1' }; },
+  };
+  return { service, state, calls };
+}
+function responseText(result) { return result.content.map((item) => item.text || '').join('\n'); }
+async function successful(service, name, args) {
+  const result = await _execTool(service, name, args);
+  assert.notEqual(result.isError, true, responseText(result));
+  return result;
+}
+async function rejected(service, name, args, expected) {
+  const result = await _execTool(service, name, args);
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.ok, false);
+  assert.match(responseText(result), expected);
+  return result;
+}
+async function add(service, args = {}) {
+  return successful(service, 'cron_add', { name: 'daily report', prompt: 'write report', everyMs: 60000, ...args });
+}
+function serverFor(service) {
+  const schema = () => ({ optional() { return this; }, describe() { return this; } });
+  return createCronMcpServer({
+    createSdkMcpServer: (options) => options,
+    tool: (name, description, shape, handler) => ({ name, description, shape, handler }),
+    z: { string: schema, number: schema, boolean: schema, object: schema, array: schema, record: schema, union: schema }, scheduler: service,
+  });
 }
 
-test('cron MCP persists explicit catchUp=false and scheduled Agent configuration', (t) => {
-  const file = schedulesFile(t);
-  const text = _execTool(file, 'cron_add', {
-    name: 'Agent report',
-    prompt: 'write report',
-    cron: '0 9 * * *',
-    type: 'chat',
-    catchUp: false,
-    mode: 'agent',
-    agentName: 'writer',
-  });
+test('cron_media_models is registered and discovers exact routes and capabilities without generating or exposing credentials', async () => {
+  const { service, calls } = schedulerService();
+  service.listMediaModels = async options => {
+    calls.push(['listMediaModels', options]);
+    return [
+      { routeId: 'gateway::media::video', modelId: 'new-video-version', modality: 'video', protocol: 'dashscope-video', enabled: true, available: true,
+        apiKey: 'do-not-expose', credentialRef: 'private-ref', routeHeaders: { token: 'private' },
+        capabilities: { operations: ['image_to_video'], parameters: { duration: { min: 2, max: 2, integer: true } }, references: { required: true, max: 1, roles: ['first_frame'] } } },
+      { routeId: 'gateway::media::image', modality: 'image', enabled: true, available: true, capabilities: {} },
+      { routeId: 'disabled::media::video', modality: 'video', enabled: false, available: true, capabilities: {} },
+    ];
+  };
+  const tool = serverFor(service).tools.find(item => item.name === 'cron_media_models');
+  assert.ok(tool);
+  const result = await tool.handler({ modality: 'video' });
+  assert.notEqual(result.isError, true);
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.models.length, 1);
+  const model = result.structuredContent.models[0];
+  assert.equal(model.routeId, 'gateway::media::video');
+  assert.deepEqual(model.capabilities.references, { required: true, max: 1, roles: ['first_frame'] });
+  assert.doesNotMatch(JSON.stringify(result), /do-not-expose|private|credentialRef|routeHeaders/);
+  assert.deepEqual(calls, [['listMediaModels', { modality: 'video', includeUnavailable: false }]]);
+  const all = await successful(service, 'cron_media_models', { includeUnavailable: true });
+  assert.equal(all.structuredContent.models.length, 3);
+});
 
-  assert.match(text, /已创建/);
-  const task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.equal(task.catchUp, false);
-  assert.equal(task.action.mode, 'agent');
-  assert.equal(task.action.agentName, 'writer');
+test('cron_media_models distinguishes empty configured models from unavailable or invalid catalog requests', async () => {
+  const { service, calls } = schedulerService();
+  assert.equal((await rejected(service, 'cron_media_models', {}, /尚未就绪/)).structuredContent.code, 'MEDIA_CATALOG_UNAVAILABLE');
+  service.listMediaModels = () => [];
+  assert.deepEqual((await successful(service, 'cron_media_models', {})).structuredContent, { ok: true, models: [] });
+  await rejected(service, 'cron_media_models', { modality: 'audio' }, /image 或 video/);
+  await rejected(service, 'cron_media_models', { includeUnavailable: 'yes' }, /布尔值/);
+  service.listMediaModels = () => null;
+  assert.equal((await rejected(service, 'cron_media_models', {}, /格式无效/)).structuredContent.code, 'MEDIA_CATALOG_UNAVAILABLE');
+  assert.equal(calls.length, 0);
+});
 
-  const view = JSON.parse(_execTool(file, 'cron_get', { query: 'Agent report' }));
+test('cron MCP creates through scheduler and preserves catchUp and Agent configuration', async () => {
+  const { service, state, calls } = schedulerService();
+  const result = await add(service, { catchUp: false, mode: 'agent', agentName: 'writer' });
+  assert.match(responseText(result), /已创建/);
+  assert.equal(calls.filter(([method]) => method === 'create').length, 1);
+  assert.equal(state.tasks[0].catchUp, false);
+  assert.equal(state.tasks[0].action.mode, 'agent');
+  assert.equal(state.tasks[0].action.agentName, 'writer');
+  assert.equal(result.structuredContent.task.id, state.tasks[0].id);
+  assert.equal(result.structuredContent.task.nextRunAt, state.tasks[0].nextRunAt);
+  const view = JSON.parse(responseText(await successful(service, 'cron_get', { query: 'daily report' })));
   assert.equal(view.catchUp, false);
   assert.equal(view.mode, 'agent');
   assert.equal(view.agentName, 'writer');
 });
 
-test('cron MCP defaults catchUp=true, updates it, and refuses Agent mode without agentName', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'plain report', prompt: 'write', everyMs: 60000,
-  }), /已创建/);
-
-  let task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.equal(task.catchUp, true);
-  assert.match(_execTool(file, 'cron_update', { query: task.id, catchUp: false }), /已修改/);
-  task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.equal(task.catchUp, false);
-
-  const rejected = _execTool(file, 'cron_update', { query: task.id, mode: 'agent' });
-  assert.match(rejected, /agentName/);
-  task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.notEqual(task.action.mode, 'agent', '失败的修改不应落盘');
+test('cron MCP defaults catchUp=true and rejected Agent edits leave returned objects unchanged', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service);
+  assert.equal(state.tasks[0].catchUp, true);
+  await successful(service, 'cron_update', { query: 'daily report', catchUp: false });
+  assert.equal(state.tasks[0].catchUp, false);
+  const before = structuredClone(state);
+  const callCount = calls.filter(([method]) => method === 'update').length;
+  await rejected(service, 'cron_update', { query: 'daily report', name: 'must not persist', mode: 'agent' }, /agentName/);
+  assert.deepEqual(state, before);
+  assert.equal(calls.filter(([method]) => method === 'update').length, callCount);
 });
 
-test('cron MCP rejects schedules that would create enabled but never-running tasks', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'invalid cron', prompt: 'x', cron: '99 9 * * *',
-  }), /调度无效/);
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.length, 0);
-
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'valid task', prompt: 'x', everyMs: 60000,
-  }), /已创建/);
-  const task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.match(_execTool(file, 'cron_update', {
-    query: task.id, everyMs: 500,
-  }), /调度无效/);
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].schedule.everyMs, 60000);
+test('cron MCP rejects invalid cron or too-short intervals before calling scheduler', async () => {
+  const { service, state, calls } = schedulerService();
+  await rejected(service, 'cron_add', { name: 'invalid', prompt: 'x', cron: '99 9 * * *' }, /调度无效/);
+  assert.equal(state.tasks.length, 0);
+  assert.equal(calls.some(([method]) => method === 'create'), false);
+  await add(service);
+  await rejected(service, 'cron_update', { query: 'daily report', everyMs: 500 }, /调度无效/);
+  assert.equal(state.tasks[0].schedule.everyMs, 60000);
 });
 
-test('cron MCP creates a real command task with a working directory', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'empty command', everyMs: 60000, type: 'command',
-  }), /缺少命令脚本/);
-  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.length, 0);
-
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'nightly command',
-    prompt: 'Write-Output "done"',
-    cron: '0 2 * * *',
-    type: 'command',
-    workingDir: 'C:\\Automation',
-  }), /已创建/);
-
-  const task = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.equal(task.action.type, 'command');
-  assert.equal(task.action.command, 'Write-Output "done"');
-  assert.equal(task.action.workingDir, 'C:\\Automation');
-  assert.equal(Object.hasOwn(task.action, 'prompt'), false);
-
-  const view = JSON.parse(_execTool(file, 'cron_get', { query: task.id }));
+test('cron MCP creates command tasks explicitly or by inference and keeps working directory', async () => {
+  const { service, state } = schedulerService();
+  await rejected(service, 'cron_add', { name: 'empty', everyMs: 60000, type: 'command' }, /缺少命令脚本/);
+  await add(service, { type: ' CoMmAnD ', prompt: 'Write-Output 1', workingDir: 'C:\\Automation' });
+  assert.equal(state.tasks[0].action.type, 'command');
+  assert.equal(state.tasks[0].action.command, 'Write-Output 1');
+  assert.equal(state.tasks[0].action.workingDir, 'C:\\Automation');
+  assert.equal(Object.hasOwn(state.tasks[0].action, 'prompt'), false);
+  await add(service, { name: 'inferred', command: 'Write-Output 2' });
+  assert.equal(state.tasks[1].action.type, 'command');
+  assert.equal(state.tasks[1].action.command, 'Write-Output 2');
+  const view = JSON.parse(responseText(await successful(service, 'cron_get', { query: state.tasks[0].id })));
   assert.equal(view.type, 'command');
-  assert.equal(view.prompt, 'Write-Output "done"');
-  assert.equal(view.command, 'Write-Output "done"');
-  assert.equal(view.workingDir, 'C:\\Automation');
+  assert.equal(view.prompt, 'Write-Output 1');
+  assert.equal(view.command, 'Write-Output 1');
 });
 
-test('cron MCP infers command when type is omitted and rejects unknown or conflicting types atomically', (t) => {
-  const file = schedulesFile(t);
-  const initial = fs.readFileSync(file, 'utf8');
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'unknown type', command: 'Write-Output 0', everyMs: 60000, type: 'shell',
-  }), /未知任务类型/);
-  assert.equal(fs.readFileSync(file, 'utf8'), initial);
-
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'conflicting type', command: 'Write-Output 0', everyMs: 60000, type: ' CHAT ',
-  }), /command 字段只能用于/);
-  assert.equal(fs.readFileSync(file, 'utf8'), initial);
-
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'inferred command', command: 'Write-Output 1', everyMs: 60000,
-  }), /已创建/);
-  const inferred = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0];
-  assert.equal(inferred.action.type, 'command');
-  assert.equal(inferred.action.command, 'Write-Output 1');
-  assert.equal(Object.hasOwn(inferred.action, 'prompt'), false);
-
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'normalized command', prompt: 'Write-Output 2', everyMs: 60000, type: ' CoMmAnD ',
-  }), /已创建/);
-  const normalized = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[1];
-  assert.equal(normalized.action.type, 'command');
-  assert.equal(normalized.action.command, 'Write-Output 2');
+test('cron MCP rejects unknown or conflicting types without submitting a write', async () => {
+  const { service, state, calls } = schedulerService();
+  await rejected(service, 'cron_add', { name: 'bad', command: 'Write-Output 0', everyMs: 60000, type: 'shell' }, /未知任务类型/);
+  await rejected(service, 'cron_add', { name: 'bad', command: 'Write-Output 0', everyMs: 60000, type: ' CHAT ' }, /command 字段只能用于/);
+  assert.equal(state.tasks.length, 0);
+  assert.equal(calls.some(([method]) => method === 'create'), false);
 });
 
-test('cron MCP updates command content through prompt or command without changing its type', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'command update', command: 'Write-Output 1', everyMs: 60000, type: 'command',
-  }), /已创建/);
-  const id = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].id;
-
-  assert.match(_execTool(file, 'cron_update', {
-    query: id, prompt: 'Write-Output 2', workingDir: 'D:\\Jobs',
-  }), /已修改/);
-  let action = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].action;
-  assert.equal(action.type, 'command');
-  assert.equal(action.command, 'Write-Output 2');
-  assert.equal(action.workingDir, 'D:\\Jobs');
-  assert.equal(Object.hasOwn(action, 'prompt'), false);
-
-  assert.match(_execTool(file, 'cron_update', {
-    query: id, command: 'Write-Output 3', workingDir: '',
-  }), /已修改/);
-  action = JSON.parse(fs.readFileSync(file, 'utf8')).tasks[0].action;
-  assert.equal(action.type, 'command');
-  assert.equal(action.command, 'Write-Output 3');
-  assert.equal(action.workingDir, null);
-});
-
-test('cron MCP atomically converts legacy chat or image tasks to command', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'legacy chat', prompt: 'Write-Output legacy', everyMs: 60000, type: 'chat', workingDir: 'C:\\Legacy',
-  }), /已创建/);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'legacy image', prompt: 'old image prompt', everyMs: 60000, type: 'image',
-  }), /已创建/);
-
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'legacy chat', type: ' COMMAND ',
-  }), /已修改/);
-  let tasks = JSON.parse(fs.readFileSync(file, 'utf8')).tasks;
-  assert.deepEqual(tasks[0].action, {
-    type: 'command', command: 'Write-Output legacy', workingDir: 'C:\\Legacy',
+test('cron MCP updates command content via prompt or command using only a sparse scheduler patch', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service, { type: 'command', command: 'Write-Output 1' });
+  const id = state.tasks[0].id;
+  state.tasks[0].lastStatus = 'running';
+  state.tasks[0].runCount = 9;
+  await successful(service, 'cron_update', { query: id, prompt: 'Write-Output 2', workingDir: 'D:\\Jobs' });
+  assert.deepEqual(calls.find(([method]) => method === 'update')[2], {
+    action: { command: 'Write-Output 2', workingDir: 'D:\\Jobs' },
   });
-
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'legacy image', type: 'command', prompt: 'Write-Output prompt', command: 'Write-Output command',
-  }), /已修改/);
-  tasks = JSON.parse(fs.readFileSync(file, 'utf8')).tasks;
-  assert.deepEqual(tasks[1].action, { type: 'command', command: 'Write-Output command' });
+  assert.equal(state.tasks[0].action.command, 'Write-Output 2');
+  assert.equal(state.tasks[0].action.type, 'command');
+  await successful(service, 'cron_update', { query: id, command: 'Write-Output 3', workingDir: '' });
+  assert.equal(state.tasks[0].action.command, 'Write-Output 3');
+  assert.equal(state.tasks[0].action.workingDir, null);
+  assert.equal(state.tasks[0].runCount, 9);
+  assert.equal(state.tasks[0].lastStatus, 'running');
 });
 
-test('cron MCP rejects invalid command conversions without partial writes', (t) => {
-  const file = schedulesFile(t);
-  const store = JSON.parse(fs.readFileSync(file, 'utf8'));
-  store.tasks.push({
-    id: 'empty-chat', name: 'empty legacy chat', enabled: true, catchUp: true,
-    schedule: { kind: 'every', everyMs: 60000 },
-    action: { type: 'chat', prompt: '' },
+test('cron MCP can explicitly convert legacy chat and image tasks to command', async () => {
+  const { service, state } = schedulerService();
+  await add(service, { prompt: 'Write-Output legacy', workingDir: 'C:\\Legacy' });
+  await add(service, { name: 'image task', type: 'image', prompt: 'draw image' });
+  await successful(service, 'cron_update', { query: 'daily report', type: ' COMMAND ' });
+  assert.equal(state.tasks[0].action.type, 'command');
+  assert.equal(state.tasks[0].action.command, 'Write-Output legacy');
+  assert.equal(state.tasks[0].action.workingDir, 'C:\\Legacy');
+  assert.equal(state.tasks[0].action.prompt, '');
+  assert.equal(state.tasks[0].action.sessionRef, null);
+  await successful(service, 'cron_update', { query: 'image task', type: 'command', prompt: 'Write-Output prompt', command: 'Write-Output command' });
+  assert.equal(state.tasks[1].action.type, 'command');
+  assert.equal(state.tasks[1].action.command, 'Write-Output command');
+});
+
+test('cron MCP rejects invalid conversions and does not mutate objects supplied by scheduler', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service);
+  state.tasks[0].action.prompt = '';
+  const before = structuredClone(state);
+  await rejected(service, 'cron_update', { query: 'daily report', name: 'must not persist', type: 'command' }, /缺少命令脚本/);
+  await rejected(service, 'cron_update', { query: 'daily report', name: 'must not persist', type: 'shell' }, /未知任务类型/);
+  await rejected(service, 'cron_update', { query: 'daily report', command: 'Write-Output blocked' }, /同时指定 type=command/);
+  assert.deepEqual(state, before);
+  assert.equal(calls.some(([method]) => method === 'update'), false);
+});
+
+test('cron MCP preserves chat and image content updates and original timezone', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service, { cron: '0 9 * * *', tz: 'America/New_York' });
+  await add(service, { name: 'image task', type: 'image', prompt: 'old image' });
+  await successful(service, 'cron_update', { query: 'daily report', prompt: 'new chat', workingDir: 'C:\\Chat', cron: '0 10 * * *' });
+  await successful(service, 'cron_update', { query: 'image task', prompt: 'new image' });
+  assert.equal(state.tasks[0].action.prompt, 'new chat');
+  assert.equal(state.tasks[0].action.workingDir, 'C:\\Chat');
+  assert.equal(state.tasks[0].schedule.tz, 'America/New_York');
+  assert.deepEqual(calls.find(([method]) => method === 'update')[2].schedule, { kind: 'cron', cron: '0 10 * * *' });
+  assert.equal(state.tasks[1].action.prompt, 'new image');
+  const before = structuredClone(state);
+  await rejected(service, 'cron_update', { query: 'image task', name: 'must not persist', command: 'Write-Output wrong' }, /只有命令任务/);
+  assert.deepEqual(state, before);
+});
+
+test('cron MCP forwards timezone-only edits without replacing schedule or runtime metadata', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service, { cron: '0 9 * * *', tz: 'UTC' });
+  const nextRunAt = state.tasks[0].nextRunAt;
+  await successful(service, 'cron_update', { query: 'daily report', tz: 'Asia/Shanghai' });
+  assert.deepEqual(calls.find(([method]) => method === 'update')[2], { schedule: { tz: 'Asia/Shanghai' } });
+  assert.equal(state.tasks[0].schedule.cron, '0 9 * * *');
+  assert.equal(state.tasks[0].nextRunAt, nextRunAt, 'scheduler owns rescheduling; the MCP adapter must not overwrite it');
+});
+
+test('cron MCP list, toggle, remove, and history all use scheduler service', async () => {
+  const { service, state, calls } = schedulerService();
+  await add(service);
+  const id = state.tasks[0].id;
+  await successful(service, 'cron_toggle', { query: id, enabled: false });
+  const list = await successful(service, 'cron_list', { includeDisabled: false });
+  assert.match(responseText(list), /没有任何/);
+  state.runs.push({ id: 'run-7', taskId: id, at: '2030-01-01T00:00:00.000Z', status: 'skipped', scheduledFor: '2030-01-01T00:00:00.000Z', reason: 'already_running', trigger: 'scheduled', summary: 'previous run still running' });
+  const runs = JSON.parse(responseText(await successful(service, 'cron_runs', { query: id })));
+  assert.equal(runs[0].id, 'run-7');
+  assert.equal(runs[0].reason, 'already_running');
+  assert.equal(runs[0].scheduledFor, state.runs[0].scheduledFor);
+  assert.equal(runs[0].trigger, 'scheduled');
+  await successful(service, 'cron_remove', { query: id });
+  assert.equal(state.tasks.length, 0);
+  assert.ok(calls.some(([method, taskId, enabled]) => method === 'toggle' && taskId === id && enabled === false));
+  assert.ok(calls.some(([method, taskId]) => method === 'runs' && taskId === id));
+  assert.ok(calls.some(([method, taskId]) => method === 'remove' && taskId === id));
+});
+
+for (const status of ['accepted', 'queued', 'already_running', 'failed']) {
+  test(`cron MCP returns truthful ${status} receipt with runId and MCP error status`, async () => {
+    const { service, state } = schedulerService();
+    await add(service);
+    const id = state.tasks[0].id;
+    const receipt = {
+      ok: ['accepted', 'queued'].includes(status), status,
+      code: status === 'already_running' ? 'TASK_RUNNING' : status === 'failed' ? 'TASK_START_FAILED' : 'TASK_STARTED',
+      taskId: id, ...(status === 'failed' ? { error: 'execution unavailable' } : { runId: 'run-receipt' }),
+    };
+    service.runNow = async (taskId) => { assert.equal(taskId, id); return receipt; };
+    const before = structuredClone(state);
+    const result = await _execTool(service, 'cron_run', { query: id });
+    assert.deepEqual(result.structuredContent, receipt);
+    assert.deepEqual(JSON.parse(responseText(result)), receipt);
+    assert.equal(result.isError === true, !receipt.ok);
+    assert.deepEqual(state, before, 'run requests must never write a runNowAt marker');
+    assert.doesNotMatch(responseText(result), /已触发|执行成功|已完成/);
   });
-  fs.writeFileSync(file, JSON.stringify(store, null, 2));
-  const beforeMissingContent = fs.readFileSync(file, 'utf8');
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'empty-chat', name: 'must not persist', type: 'command',
-  }), /缺少命令脚本/);
-  assert.equal(fs.readFileSync(file, 'utf8'), beforeMissingContent);
+}
 
-  const beforeUnknownType = fs.readFileSync(file, 'utf8');
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'empty-chat', name: 'must not persist', type: 'shell',
-  }), /未知任务类型/);
-  assert.equal(fs.readFileSync(file, 'utf8'), beforeUnknownType);
-
-  const beforeImplicitCommand = fs.readFileSync(file, 'utf8');
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'empty-chat', command: 'Write-Output blocked',
-  }), /同时指定 type=command/);
-  assert.equal(fs.readFileSync(file, 'utf8'), beforeImplicitCommand);
+test('cron MCP reports unavailable, rejected, thrown, and invalid receipt errors to the caller', async () => {
+  const { service } = schedulerService();
+  const unavailable = await rejected(null, 'cron_list', {}, /尚未就绪/);
+  assert.equal(unavailable.structuredContent.code, 'SCHEDULER_UNAVAILABLE');
+  service.create = () => ({ ok: false, code: 'STORE_READ_FAILED', error: '读取定时任务失败' });
+  const createFailure = await rejected(service, 'cron_add', { name: 'task', prompt: 'x', everyMs: 60000 }, /读取定时任务失败/);
+  assert.equal(createFailure.structuredContent.code, 'STORE_READ_FAILED');
+  service.list = () => { throw Object.assign(new Error('disk unavailable'), { code: 'EIO' }); };
+  const thrown = await rejected(service, 'cron_list', {}, /disk unavailable/);
+  assert.equal(thrown.structuredContent.code, 'EIO');
+  service.list = () => [{ id: 'task', name: 'task', schedule: {}, action: {} }];
+  service.runNow = async () => ({ ok: true });
+  const receiptFailure = await rejected(service, 'cron_run', { query: 'task' }, /有效的执行回执/);
+  assert.equal(receiptFailure.structuredContent.code, 'INVALID_RUN_RECEIPT');
+  assert.equal(receiptFailure.structuredContent.status, 'failed');
+  service.runNow = async () => ({ ok: true, status: 'failed', error: 'contradictory receipt' });
+  await rejected(service, 'cron_run', { query: 'task' }, /有效的执行回执/);
 });
 
-test('cron MCP keeps chat and image prompt updates compatible', (t) => {
-  const file = schedulesFile(t);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'chat task', prompt: 'old chat', everyMs: 60000, type: 'chat',
-  }), /已创建/);
-  assert.match(_execTool(file, 'cron_add', {
-    name: 'image task', prompt: 'old image', everyMs: 60000, type: 'image',
-  }), /已创建/);
-
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'chat task', prompt: 'new chat', workingDir: 'C:\\Chat',
-  }), /已修改/);
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'image task', prompt: 'new image',
-  }), /已修改/);
-
-  const tasks = JSON.parse(fs.readFileSync(file, 'utf8')).tasks;
-  assert.equal(tasks[0].action.type, 'chat');
-  assert.equal(tasks[0].action.prompt, 'new chat');
-  assert.equal(tasks[0].action.workingDir, 'C:\\Chat');
-  assert.equal(tasks[1].action.type, 'image');
-  assert.equal(tasks[1].action.prompt, 'new image');
-
-  const beforeRejectedUpdate = fs.readFileSync(file, 'utf8');
-  assert.match(_execTool(file, 'cron_update', {
-    query: 'image task', command: 'Write-Output "wrong type"',
-  }), /只有命令任务/);
-  assert.equal(fs.readFileSync(file, 'utf8'), beforeRejectedUpdate, '拒绝的命令字段不应部分改写任务');
+test('cron MCP refuses ambiguous target selection before running or deleting', async () => {
+  const { service, calls } = schedulerService();
+  await add(service, { name: 'report first' });
+  await add(service, { name: 'report second' });
+  const result = await rejected(service, 'cron_run', { query: 'report' }, /匹配到多个/);
+  assert.equal(result.structuredContent.code, 'AMBIGUOUS_TASK');
+  await rejected(service, 'cron_remove', { query: 'missing task' }, /没找到/);
+  await add(service, { name: 'report first' });
+  const duplicate = await rejected(service, 'cron_remove', { query: 'report first' }, /匹配到多个/);
+  assert.equal(duplicate.structuredContent.code, 'AMBIGUOUS_TASK');
+  assert.equal(calls.some(([method]) => ['runNow', 'remove'].includes(method)), false);
 });
 
-test('进程内 cron MCP 使用 SDK 服务器级硬超时', () => {
-  const schema = () => ({ optional() { return this; }, describe() { return this; } });
-  const server = createCronMcpServer({
-    createSdkMcpServer: (options) => options,
-    tool: (name, description, shape, handler) => ({ name, description, shape, handler }),
-    z: { string: schema, number: schema, boolean: schema },
-    userDataDir: '',
-  });
+test('registered MCP aliases await receipts and propagate errors with the SDK timeout', async () => {
+  const { service } = schedulerService();
+  await add(service);
+  const server = serverFor(service);
   assert.equal(server.timeout, CRON_MCP_TOOL_TIMEOUT_MS);
   assert.equal(server.timeout, 30000);
   assert.ok(server.tools.length > 8);
-  const add = server.tools.find((item) => item.name === 'cron_add');
-  const update = server.tools.find((item) => item.name === 'cron_update');
-  assert.ok(add.shape.command);
-  assert.ok(add.shape.workingDir);
-  assert.ok(update.shape.type);
-  assert.ok(update.shape.command);
-  assert.ok(update.shape.workingDir);
+  for (const name of ['cron_add', 'cron_update']) {
+    const { shape } = server.tools.find((item) => item.name === name);
+    assert.ok(shape.command);
+    assert.ok(shape.workingDir);
+    assert.ok(shape.tz);
+  }
+  let resolveReceipt;
+  service.runNow = () => new Promise((resolve) => { resolveReceipt = resolve; });
+  const alias = server.tools.find((item) => item.name === 'cron_run_now');
+  const pending = alias.handler({ query: 'daily report' });
+  await new Promise((resolve) => setImmediate(resolve));
+  resolveReceipt({ ok: false, status: 'already_running', code: 'TASK_RUNNING', runId: 'active-run' });
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.status, 'already_running');
+  assert.equal(result.structuredContent.runId, 'active-run');
+  assert.equal(result.structuredContent.taskId, 'task-1');
 });

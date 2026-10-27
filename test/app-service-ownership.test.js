@@ -148,4 +148,8 @@ test('quit drains late-created services once in order before releasing the exist
   assert.equal(liveSessions.size, 0);
   assert.equal(resourceLeases.size, 0);
   assert.ok(events.indexOf('lease-released') > events.indexOf('progress'));
+  assert.ok(events.indexOf('runs-interrupted') > events.indexOf('progress'), 'durable progress drains before interruption');
+  for (const teardown of ['interactions-closed', 'scheduler-stopped', 'lease-released', 'job-killed', 'session-killed']) {
+    assert.ok(events.indexOf('runs-interrupted') < events.indexOf(teardown), `${teardown} cannot replace APP_EXIT with canceled`);
+  }
 });

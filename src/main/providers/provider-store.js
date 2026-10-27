@@ -3,6 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const {
+  MEDIA_SCHEMA_VERSION, mediaRouteId, normalizeMediaConnection, normalizeMediaModels, normalizeMediaCatalogMetadata,
+  migrateLegacyMediaModels, mediaRuntimeBinding, getMediaProtocolPresets,
+} = require('./provider-media');
 
 const PROVIDER_SCHEMA_VERSION = 5;
 const SECRET_SCHEMA_VERSION = 1;
@@ -62,6 +66,11 @@ function hasAnyChatModel(profileOrModels) {
   return !!(models && MODEL_TIER_IDS.some((tier) => cleanText(models[tier])));
 }
 
+function isAnonymousMediaOnly({ models, imageModels, mediaConnection, mediaModels }) {
+  return !hasAnyChatModel(models) && !imageModels.length && mediaModels.length > 0
+    && mediaModels.every(binding => (binding.auth?.mode || mediaConnection.authMode) === 'none');
+}
+
 function normalizeImageModels(value) {
   const source = Array.isArray(value) ? value : [];
   const seen = new Set();
@@ -104,19 +113,44 @@ function safeJsonRead(file) {
   }
 }
 
-function atomicWriteJson(file, value) {
-  const dir = path.dirname(file);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
-  if (fs.existsSync(file)) {
-    try { fs.copyFileSync(file, `${file}.bak`); } catch (_) {}
-  }
+const RETRYABLE_WRITE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+function atomicWriteJson(file, value, logger = console) {
+  // Serialize before touching disk; invalid data must not trigger a retry.
+  const serialized = JSON.stringify(value, null, 2);
+  const tmp = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  const backupTmp = `${tmp}.bak`;
+  let ownsTemp = false;
   try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const descriptor = fs.openSync(tmp, 'wx', 0o600);
+    ownsTemp = true;
+    try { fs.writeFileSync(descriptor, serialized, { encoding: 'utf8' }); }
+    finally { fs.closeSync(descriptor); }
+
+    // Preserve the recovery copy when the primary is corrupt. Stage the backup
+    // as well, so a failed copy cannot truncate the existing recovery file.
+    if (safeJsonRead(file)) {
+      try {
+        fs.copyFileSync(file, backupTmp, fs.constants.COPYFILE_EXCL);
+        fs.renameSync(backupTmp, `${file}.bak`);
+      } catch (_) {
+        // Backup is best effort; the primary is untouched until rename.
+      } finally {
+        try { fs.unlinkSync(backupTmp); } catch (_) {}
+      }
+    }
+    // Never unlink the destination or overwrite it in place on rename failure.
     fs.renameSync(tmp, file);
-  } catch (error) {
-    try { fs.unlinkSync(tmp); } catch (_) {}
+  } catch (cause) {
+    const error = new Error('服务商配置写入失败', { cause });
+    error.code = 'PROVIDER_STORAGE_WRITE_FAILED';
+    error.storageCode = typeof cause.code === 'string' ? cause.code : 'UNKNOWN';
+    error.retryable = RETRYABLE_WRITE_CODES.has(error.storageCode);
+    try { logger.warn('[provider] 配置写入失败 file=%s code=%s: %s', file, error.storageCode, cause.message); } catch (_) {}
     throw error;
+  } finally {
+    if (ownsTemp) { try { fs.unlinkSync(tmp); } catch (_) {} }
   }
 }
 
@@ -159,7 +193,7 @@ class SecretVault {
     atomicWriteJson(this.file, {
       schemaVersion: SECRET_SCHEMA_VERSION,
       records: state && state.records && typeof state.records === 'object' ? state.records : {},
-    });
+    }, this.logger);
   }
 
   set(name, secret) {
@@ -232,6 +266,11 @@ function normalizeProfile(raw) {
     },
     imageModels: normalizeImageModels(raw.imageModels),
     imageDiscovery: normalizeImageDiscovery(raw.imageDiscovery),
+    mediaSchemaVersion: Number(raw.mediaSchemaVersion) || 0,
+    mediaRevision: Math.max(1, Number(raw.mediaRevision) || 1),
+    mediaConnection: normalizeMediaConnection(raw.mediaConnection),
+    mediaModels: normalizeMediaModels(raw.mediaModels, { catalog: normalizeMediaCatalog(raw.mediaCatalog) }),
+    mediaCatalog: normalizeMediaCatalog(raw.mediaCatalog),
     // 旧字段仅供旧版迁移和连接探测兼容；新对话统一使用 state.defaultModel。
     defaultModel: MODEL_TIERS.has(raw.defaultModel) ? raw.defaultModel : 'haiku',
     enabled: raw.enabled !== false,
@@ -240,6 +279,21 @@ function normalizeProfile(raw) {
     updatedAt: cleanText(raw.updatedAt, new Date().toISOString()),
     importedFrom: raw.importedFrom === 'claude-user-settings' ? raw.importedFrom : undefined,
   };
+}
+
+function normalizeMediaCatalog(value) {
+  const seen = new Set();
+  return (Array.isArray(value) ? value : []).filter(item => item && cleanText(item.id || item.modelId || item.rawId)).map(item => ({
+    id: cleanText(item.id || item.modelId || item.rawId),
+    ownedBy: cleanText(item.ownedBy || item.owned_by),
+    modelType: '', modality: '',
+    ...normalizeMediaCatalogMetadata(item),
+  })).filter(item => {
+    const key = JSON.stringify([item.id, item.ownedBy]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 5000);
 }
 
 function normalizedChatRoutes(rawRoutes, profiles, legacyActiveProviderId = null) {
@@ -322,6 +376,14 @@ function publicProfile(profile, vault, state = null) {
     models: { ...profile.models },
     imageModels: profile.imageModels.map((item) => ({ ...item })),
     imageDiscovery: { ...profile.imageDiscovery },
+    mediaSchemaVersion: profile.mediaSchemaVersion,
+    mediaRevision: profile.mediaRevision,
+    mediaConnection: JSON.parse(JSON.stringify(profile.mediaConnection)),
+    mediaModels: JSON.parse(JSON.stringify(profile.mediaModels)),
+    mediaCatalog: JSON.parse(JSON.stringify(profile.mediaCatalog)),
+    mediaReady: !!(profile.enabled && profile.mediaModels.some(binding => binding.enabled
+      && (binding.baseUrl || profile.mediaConnection.baseUrl || profile.baseUrl)
+      && ((binding.auth || {}).mode === 'none' || (!binding.auth && profile.mediaConnection.authMode === 'none') || secret))),
     defaultModel: profile.defaultModel,
     enabled: profile.enabled,
     revision: profile.revision,
@@ -377,7 +439,18 @@ class ProviderStore {
     const parsed = fs.existsSync(this.file) ? safeJsonRead(this.file) : null;
     const recovered = parsed || (fs.existsSync(fallback) ? safeJsonRead(fallback) : null);
     const state = recovered || this.defaultState();
-    const profiles = (Array.isArray(state.profiles) ? state.profiles : []).map(normalizeProfile).filter(Boolean);
+    const rawProfiles = Array.isArray(state.profiles) ? state.profiles : [];
+    const profiles = rawProfiles.map(normalizeProfile).filter(Boolean);
+    let mediaTemplatesRepaired = false;
+    for (const profile of profiles) {
+      const previous = rawProfiles.find(item => item.id === profile.id);
+      const repaired = profile.mediaModels.some(model => {
+        const old = previous?.mediaModels?.find(item => item.id === model.id);
+        return old && model.setup && (model.setup.source === 'legacy-template' && !old.setup
+          || old.setup && model.setup.version > (old.setup.version || 0));
+      });
+      if (repaired) { profile.mediaRevision += 1; mediaTemplatesRepaired = true; }
+    }
     // v5 开始由 Relay 独占 SDK 的服务商配置。旧 session 只记录了预期路由，实际
     // 可能被外部 Claude 设置覆盖；提升一次运行版本，让既有续接保护重建这些 session。
     // 不改配置时间、路由或密钥，也不重写历史；ensureInitialized 原子落盘后才使用新版本。
@@ -388,6 +461,13 @@ class ProviderStore {
     const imageRoutes = normalizedImageRoutes(
       state.imageRoutes, profiles, state.activeProviderId, (Number(state.schemaVersion) || 0) < 4,
     );
+    let mediaMigrated = false;
+    for (const profile of profiles) {
+      if (profile.mediaSchemaVersion >= MEDIA_SCHEMA_VERSION) continue;
+      profile.mediaModels = migrateLegacyMediaModels(profile, imageRoutes);
+      profile.mediaSchemaVersion = MEDIA_SCHEMA_VERSION;
+      mediaMigrated = true;
+    }
     const preferredDefault = MODEL_TIERS.has(state.defaultModel)
       ? state.defaultModel
       : ((profiles.find((item) => item.id === state.activeProviderId) || {}).defaultModel || 'haiku');
@@ -412,6 +492,8 @@ class ProviderStore {
     };
     Object.defineProperty(normalized, '_needsWrite', {
       value: Number(state.schemaVersion) !== PROVIDER_SCHEMA_VERSION
+        || mediaMigrated
+        || mediaTemplatesRepaired
         || !state.chatRoutes || !state.imageRoutes || !state.defaultModel
         || state.defaultModel !== defaultModel || state.activeProviderId !== activeProviderId,
       enumerable: false,
@@ -420,7 +502,7 @@ class ProviderStore {
   }
 
   writeState(state) {
-    atomicWriteJson(this.file, state);
+    atomicWriteJson(this.file, state, this.logger);
   }
 
   ensureInitialized() {
@@ -520,7 +602,8 @@ class ProviderStore {
         remoteModelId: route.remoteModelId,
       };
     }).filter(Boolean);
-    return { defaultModel: state.defaultModel, chatRoutes, imageRoutes };
+    return { defaultModel: state.defaultModel, chatRoutes, imageRoutes,
+      mediaModels: this.mediaModelsFromState(state) };
   }
 
   listProfiles() {
@@ -658,10 +741,6 @@ class ProviderStore {
     const requested = cleanText(selection);
     let route = routes.find((item) => item.routeId === requested)
       || routes.find((item) => item.remoteModelId === requested);
-    if (!route && requested) {
-      const lowered = requested.toLocaleLowerCase();
-      route = routes.find((item) => lowered.includes(item.adapterId));
-    }
     if (requested && !route) return null;
     route = route || routes[0];
     const connection = this.getConnectionRuntime(route.providerId);
@@ -672,6 +751,86 @@ class ProviderStore {
       apiKey: connection.env.ANTHROPIC_API_KEY || connection.env.ANTHROPIC_AUTH_TOKEN,
       authMode: connection.authMode,
     };
+  }
+
+  mediaModelsFromState(state, { modality } = {}) {
+    const routes = [];
+    for (const profile of state.profiles) {
+      for (const binding of profile.mediaModels) {
+        if (modality && binding.modality !== modality) continue;
+        const runtime = mediaRuntimeBinding(profile, binding);
+        const available = !!(profile.enabled && binding.enabled && runtime.baseUrl
+          && (runtime.auth.mode === 'none' || this.vault.get(profile.credentialRef)));
+        // Public routes deliberately omit credentials and custom request headers.
+        routes.push({
+          routeId: runtime.routeId, bindingId: binding.id, providerId: profile.id,
+          providerName: profile.name, providerRevision: profile.revision,
+          mediaRevision: profile.mediaRevision, modelId: binding.modelId,
+          label: binding.label, modality: binding.modality, protocol: binding.protocol,
+          enabled: binding.enabled, available,
+          aliases: (binding.aliases || []).filter(alias => alias.startsWith(`${profile.id}::`)),
+          capabilities: JSON.parse(JSON.stringify(binding.capabilities)),
+        });
+      }
+    }
+    return routes;
+  }
+
+  listMediaModels(options = {}) {
+    return this.mediaModelsFromState(this.ensureInitialized(), options);
+  }
+
+  getMediaProtocolPresets() { return getMediaProtocolPresets(); }
+
+  getMediaRuntime(selection = '') {
+    const requested = cleanText(typeof selection === 'string' ? selection : selection && selection.routeId);
+    if (!requested) return null;
+    const state = this.ensureInitialized();
+    const candidates = state.profiles.flatMap(profile => profile.mediaModels.map(binding => ({ profile, binding })));
+    const canonical = candidates.filter(({ profile, binding }) => mediaRouteId(profile.id, binding.id) === requested);
+    const matched = canonical.length ? canonical : candidates.filter(({ profile, binding }) => (binding.aliases || []).includes(requested)
+      && (!requested.includes('::') || requested.startsWith(`${profile.id}::`)));
+    if (matched.length !== 1) return null;
+    // Bare aliases exist only for legacy saved jobs. A second exact model ID
+    // makes that old selection ambiguous; never silently choose a gateway.
+    if (!canonical.length && !requested.includes('::')
+      && candidates.filter(({ binding }) => binding.modelId === requested || (binding.aliases || []).includes(requested)).length !== 1) return null;
+    for (const { profile, binding } of matched) {
+      if (!profile.enabled) continue;
+      if (!binding || !binding.enabled) continue;
+      const runtime = mediaRuntimeBinding(profile, binding);
+      if (!runtime.baseUrl) return null;
+      const apiKey = runtime.auth.mode === 'none' ? '' : this.vault.get(profile.credentialRef).replace(/^Bearer\s+/i, '').trim();
+      if (runtime.auth.mode !== 'none' && !apiKey) return null;
+      return { ...runtime, apiKey };
+    }
+    return null;
+  }
+
+  resolveMediaCredential(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object' || !snapshot.routeId
+      || (!snapshot.version && !snapshot.credentialVersion)) throw new Error('媒体任务缺少有效的凭据快照');
+    const current = this.getMediaRuntime(snapshot.routeId);
+    if (!current) throw new Error('媒体任务的服务商或模型绑定已不可用');
+    for (const field of ['providerId', 'bindingId', 'providerRevision', 'mediaRevision', 'credentialRef', 'credentialVersion', 'version']) {
+      if (Object.prototype.hasOwnProperty.call(snapshot, field) && snapshot[field] !== current[field]) {
+        throw new Error('媒体任务的服务商配置或密钥已变更，请重新提交任务');
+      }
+    }
+    return current.apiKey;
+  }
+
+  setMediaCatalog(id, modelCatalog) {
+    const state = this.ensureInitialized();
+    const profile = state.profiles.find(item => item.id === cleanText(id));
+    if (!profile) throw new Error('服务商不存在');
+    const next = normalizeMediaCatalog(modelCatalog);
+    const changed = JSON.stringify(next) !== JSON.stringify(profile.mediaCatalog);
+    if (changed) {
+      profile.mediaCatalog = next;
+      this.writeState(state);
+    }
+    return { changed, profile: publicProfile(profile, this.vault, state) };
   }
 
   uniqueName(state, preferred, excludedId = '') {
@@ -796,12 +955,15 @@ class ProviderStore {
     const now = this.now().toISOString();
     const id = `provider-${this.randomId()}`;
     const apiKey = cleanText(input.apiKey);
-    if (!apiKey) throw new Error('请先填写 API Key');
     const baseUrl = validatedBaseUrl(input.baseUrl);
     const models = validatedModels(input.models);
     const imageModels = normalizeImageModels(input.imageModels);
-    const credentialRef = `provider:${id}:${this.randomId()}`;
-    this.vault.set(credentialRef, apiKey);
+    const mediaConnection = normalizeMediaConnection(input.mediaConnection);
+    const mediaModels = normalizeMediaModels(input.mediaModels, { strict: true, catalog: normalizeMediaCatalog(input.mediaCatalog) });
+    const anonymousMediaOnly = isAnonymousMediaOnly({ models, imageModels, mediaConnection, mediaModels });
+    if (!apiKey && !anonymousMediaOnly) throw new Error('请先填写 API Key');
+    const credentialRef = apiKey ? `provider:${id}:${this.randomId()}` : '';
+    if (apiKey) this.vault.set(credentialRef, apiKey);
     const profile = normalizeProfile({
       id,
       name: this.uniqueName(state, input.name),
@@ -810,6 +972,11 @@ class ProviderStore {
       authMode: normalizeAuthMode(input.authMode),
       models,
       imageModels,
+      mediaSchemaVersion: MEDIA_SCHEMA_VERSION,
+      mediaRevision: 1,
+      mediaConnection,
+      mediaModels,
+      mediaCatalog: normalizeMediaCatalog(input.mediaCatalog),
       imageDiscovery: imageModels.length ? (input.imageDiscovery || {
         status: 'ready',
         checkedAt: now,
@@ -825,6 +992,7 @@ class ProviderStore {
     const claimUnassigned = input.claimUnassignedRoutes !== false;
     const chatRoutesChanged = this.applyChatRoutesForProfile(state, profile, input.routeTiers, { claimUnassigned });
     const imageRoutesChanged = this.applyImageRoutesForProfile(state, profile, input.imageRouteAdapters, { claimUnassigned });
+    if (!Object.prototype.hasOwnProperty.call(input, 'mediaModels')) profile.mediaModels = migrateLegacyMediaModels(profile, state.imageRoutes);
     try {
       this.writeState(state);
     } catch (error) {
@@ -873,14 +1041,31 @@ class ProviderStore {
       newCredentialRef = `provider:${profile.id}:${this.randomId()}`;
       this.vault.set(newCredentialRef, suppliedKey);
     }
-    if (!newCredentialRef || !this.vault.get(newCredentialRef)) {
-      if (keyChanged) this.vault.delete(newCredentialRef);
-      throw new Error('请先填写 API Key');
-    }
     const connectionChanged = nextBaseUrl !== profile.baseUrl || keyChanged;
     const nextAuthMode = Object.prototype.hasOwnProperty.call(input, 'authMode')
       ? normalizeAuthMode(input.authMode)
       : profile.authMode;
+    let nextMediaConnection;
+    let nextMediaModels;
+    try {
+      nextMediaConnection = Object.prototype.hasOwnProperty.call(input, 'mediaConnection')
+        ? normalizeMediaConnection(input.mediaConnection) : profile.mediaConnection;
+      nextMediaModels = Object.prototype.hasOwnProperty.call(input, 'mediaModels')
+        ? normalizeMediaModels(input.mediaModels, { strict: true, catalog: profile.mediaCatalog }) : profile.mediaModels;
+    } catch (error) {
+      if (keyChanged) { try { this.vault.delete(newCredentialRef); } catch (_) {} }
+      throw error;
+    }
+    const anonymousMediaOnly = isAnonymousMediaOnly({
+      models: nextModels,
+      imageModels: connectionChanged ? [] : profile.imageModels,
+      mediaConnection: nextMediaConnection,
+      mediaModels: nextMediaModels,
+    });
+    if ((!newCredentialRef || !this.vault.get(newCredentialRef)) && !anonymousMediaOnly) {
+      if (keyChanged) { try { this.vault.delete(newCredentialRef); } catch (_) {} }
+      throw new Error('请先填写 API Key');
+    }
     const next = normalizeProfile({
       ...profile,
       name: Object.prototype.hasOwnProperty.call(input, 'name')
@@ -890,6 +1075,9 @@ class ProviderStore {
       credentialRef: newCredentialRef,
       authMode: nextAuthMode,
       models: nextModels,
+      mediaSchemaVersion: MEDIA_SCHEMA_VERSION,
+      mediaConnection: nextMediaConnection,
+      mediaModels: nextMediaModels,
       imageModels: connectionChanged ? [] : profile.imageModels,
       imageDiscovery: connectionChanged ? {
         status: 'unknown',
@@ -908,6 +1096,8 @@ class ProviderStore {
       models: item.models,
       imageModels: item.imageModels,
       imageDiscovery: item.imageDiscovery,
+      mediaConnection: item.mediaConnection,
+      mediaModels: item.mediaModels,
       enabled: item.enabled,
     });
     const profileChanged = comparable(next) !== comparable(profile);
@@ -919,6 +1109,8 @@ class ProviderStore {
       enabled: item.enabled,
     });
     const runtimeChanged = runtimeComparable(next) !== runtimeComparable(profile);
+    const mediaChanged = JSON.stringify([next.mediaConnection, next.mediaModels]) !== JSON.stringify([profile.mediaConnection, profile.mediaModels]);
+    next.mediaRevision = mediaChanged ? profile.mediaRevision + 1 : profile.mediaRevision;
     next.revision = runtimeChanged ? profile.revision + 1 : profile.revision;
     next.createdAt = profile.createdAt;
     next.updatedAt = profileChanged ? now : profile.updatedAt;
@@ -953,6 +1145,7 @@ class ProviderStore {
       changed,
       profileChanged,
       runtimeChanged,
+      mediaChanged,
       routesChanged,
       chatRoutesChanged,
       imageRoutesChanged,
@@ -967,7 +1160,7 @@ class ProviderStore {
     const source = state.profiles.find((item) => item.id === key);
     if (!source) throw new Error('服务商不存在');
     const apiKey = source.credentialRef ? this.vault.get(source.credentialRef) : '';
-    if (!apiKey) throw new Error('原服务商没有可复制的 API Key');
+    if (!apiKey && !isAnonymousMediaOnly(source)) throw new Error('原服务商没有可复制的 API Key');
     return this.createProfile({
       name: `${source.name} 副本`,
       baseUrl: source.baseUrl,
@@ -976,6 +1169,8 @@ class ProviderStore {
       models: source.models,
       imageModels: source.imageModels,
       imageDiscovery: source.imageDiscovery,
+      mediaConnection: source.mediaConnection,
+      mediaModels: source.mediaModels.map(item => ({ ...item, aliases: [] })),
       enabled: source.enabled,
       claimUnassignedRoutes: false,
       routeTiers: [],
@@ -987,6 +1182,11 @@ class ProviderStore {
     if (!IMAGE_ADAPTER_IDS.has(adapterId)) throw new Error('图像模型不受支持');
     const state = this.ensureInitialized();
     const previous = state.imageRoutes[adapterId] || null;
+    if (previous && previous.providerId !== id) {
+      const oldProfile = state.profiles.find(item => item.id === previous.providerId);
+      const oldBinding = oldProfile && oldProfile.mediaModels.find(item => (item.aliases || []).includes(imageRouteId(previous.providerId, adapterId)));
+      if (oldBinding && oldBinding.enabled) { oldBinding.enabled = false; oldProfile.mediaRevision += 1; }
+    }
     if (!id) delete state.imageRoutes[adapterId];
     else {
       const profile = state.profiles.find((item) => item.id === cleanText(id));
@@ -994,6 +1194,11 @@ class ProviderStore {
       const detected = profile.imageModels.find((item) => item.adapterId === adapterId);
       if (!detected) throw new Error('该服务商没有识别出这个图像模型');
       state.imageRoutes[adapterId] = { providerId: profile.id, remoteModelId: detected.remoteModelId };
+      const beforeMedia = JSON.stringify(profile.mediaModels);
+      profile.mediaModels = migrateLegacyMediaModels(profile, state.imageRoutes);
+      const migrated = profile.mediaModels.find(item => (item.aliases || []).includes(imageRouteId(profile.id, adapterId)));
+      if (migrated) migrated.enabled = true;
+      if (beforeMedia !== JSON.stringify(profile.mediaModels)) profile.mediaRevision += 1;
     }
     const changed = JSON.stringify(previous) !== JSON.stringify(state.imageRoutes[adapterId] || null);
     if (changed) this.writeState(state);

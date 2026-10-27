@@ -117,17 +117,26 @@ function executeSessionOperation(scope, operation, input = {}, options = {}) {
         const spawnProcess = options.spawn || spawn;
         child = spawnProcess(executable, ['--distribution', scope.wslDistribution, '--cd', payload.scope.cwd, '--exec', 'node', linuxPath(script)],
           { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
-        let stdout = '', size = 0;
+        let stdout = '', stderr = '', size = 0;
         child.stdout.on('data', chunk => {
           size += chunk.length;
           if (size > 4 * 1024 * 1024) { finish(fail('SESSION_HISTORY_TOO_LARGE', '历史内容过大，请缩小读取范围。')); return; }
           stdout += chunk;
         });
-        child.stderr.on('data', () => {});
+        // Keep only a bounded diagnostic tail for classification. Never expose
+        // raw process stderr, which may contain private paths or environment data.
+        child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-8192); });
         child.on('error', () => finish(fail('SESSION_ENVIRONMENT_UNAVAILABLE', '无法启动这条记录所属的 WSL 环境。')));
         child.on('close', code => {
           if (finished) return;
-          if (code !== 0) { finish(fail('SESSION_ENVIRONMENT_UNAVAILABLE', 'WSL 历史读取需要该发行版中可用的 Node.js 18.18 或更新版本。')); return; }
+          if (code !== 0) {
+            const diagnostic = stderr.replace(/\u0000/g, '');
+            const nodeMissing = /execvpe?\((?:[^)\r\n]*\/)?node\).*No such file or directory|\bnode(?:js)?:\s*(?:command )?not found\b/i.test(diagnostic);
+            finish(fail('SESSION_ENVIRONMENT_UNAVAILABLE', nodeMissing
+              ? 'WSL 中未找到 Node.js，请确认该发行版已安装 Node.js 18.18 或更新版本。'
+              : 'WSL 历史读取进程未能正常完成，请检查该发行版以及 Relay 文件、任务目录是否可访问。'));
+            return;
+          }
           try { receive(JSON.parse(stdout)); } catch (_) { finish(fail('SESSION_HISTORY_FAILED', 'WSL 历史读取返回了无效内容。')); }
         });
         child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(payload));

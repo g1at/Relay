@@ -361,12 +361,20 @@ test('typed download addresses authorize only their exact redirect chain and onl
   assert.equal(run(download('https://example.test/new')), true); h.host.destroy();
 });
 
-test('TLS and renderer failure are reported without a bypass and subframe failures leave main content intact', async () => {
+test('TLS failure stays blocked, subframes preserve main content and renderer crashes invalidate certificate challenges', async () => {
   const h = fixture(), id = await h.create(); const wc = h.views[0].webContents;
   wc.emit('did-fail-load', {}, -105, 'subframe failed', 'https://widget.test', false); assert.equal(h.host.state(id).tab.error, null);
   wc.emit('did-fail-load', {}, -202, 'ERR_CERT_AUTHORITY_INVALID', 'https://example.test/', true);
-  assert.equal(h.host.state(id).tab.error, 'ERR_CERT_AUTHORITY_INVALID'); assert.equal(wc.listenerCount('certificate-error'), 0);
-  wc.emit('render-process-gone', {}, { reason: 'crashed' }); assert.match(h.host.state(id).tab.error, /crashed/); h.host.destroy();
+  assert.equal(h.host.state(id).tab.error, 'ERR_CERT_AUTHORITY_INVALID'); assert.equal(wc.listenerCount('certificate-error'), 1);
+  const decisions = [], certificate = { data: fs.readFileSync(path.join(__dirname, 'fixtures/browser-tls/localhost.pem'), 'utf8') };
+  wc.emit('certificate-error', { preventDefault() {} }, 'https://example.test/', 'net::ERR_CERT_AUTHORITY_INVALID', certificate, accepted => decisions.push(accepted), true);
+  const challenge = h.host.state(id).tab.connection.challengeId;
+  assert.ok(challenge); assert.deepEqual(decisions, []);
+  wc.emit('render-process-gone', {}, { reason: 'crashed' });
+  assert.match(h.host.state(id).tab.error, /crashed/); assert.deepEqual(decisions, [false]);
+  assert.equal(h.host.state(id).tab.connection.canContinue, false);
+  assert.equal((await h.host.invoke({ action: 'security.continue', id, challengeId: challenge })).code, 'CERTIFICATE_CHALLENGE_STALE');
+  h.host.destroy();
 });
 
 test('closing tabs and destroying the owner closes WebContents and removes session listeners exactly once', async () => {
@@ -1047,7 +1055,7 @@ test('annotation preparation times out explicitly instead of hanging the rendere
   assert.equal(f.h.events.at(-1).type, 'annotation-cancelled');
 });
 
-test('annotation viewport floors nonintegral view extents at native 125% and 150% page zoom', async t => {
+test('annotation preparation sends the lower rounding bound at 125% and 150% page zoom', async t => {
   const f = await annotationFixture(t);
   f.h.host.setBounds({ x: 600, y: 80, width: 379, height: 620 });
   for (const [zoom, viewport] of [[1.25, { width: 303, height: 496 }], [1.5, { width: 252, height: 413 }]]) {
@@ -1436,4 +1444,30 @@ test('invisibility configuration failures never show a helper and dispose its na
     assert.equal(h.host.getAutomationTarget(id).backgroundCapable, false);
     assert.equal(h.events.filter(event => event.type === 'background-unavailable').length, 1);
   }
+});
+
+test('annotation accepts native fractional zoom rounding once and rejects stale or out-of-range geometry', async t => {
+  const f = await annotationFixture(t, { autoReady: false });
+  f.h.host.setBounds({ x: 600, y: 80, width: 379, height: 606 }); f.wc.setZoomFactor(1.25);
+  let ready = false; const work = f.start(); work.then(() => { ready = true; });
+  const request = f.wc.sent.at(-1).payload;
+  assert.deepEqual(request.viewport, { width: 303, height: 484 });
+  assert.deepEqual(request.viewportMax, { width: 304, height: 485 });
+  const ack = viewport => ({ type: 'annotation-ready', requestId: request.requestId, revision: request.revision, viewport });
+  for (const viewport of [{ width: 303, height: 486 }, { width: 302, height: 485 }, { width: 303.5, height: 485 }]) f.send(ack(viewport));
+  await tick(); assert.equal(ready, false);
+  f.send(ack({ width: 303, height: 485 })); assert.deepEqual((await work).viewport, { width: 303, height: 485 });
+  const value = f.payload(request.requestId); value.viewport = { width: 303, height: 484 };
+  f.send(value); await tick(); assert.equal(f.h.events.some(event => event.type === 'annotation'), false);
+  value.viewport = { width: 303, height: 485 }; f.send(value); await tick();
+  assert.deepEqual(f.h.events.find(event => event.type === 'annotation').selection.viewport, value.viewport);
+});
+test('annotation invalidates native bounds changes even when rounded CSS size stays equal', async t => {
+  const f = await annotationFixture(t); f.wc.setZoomFactor(2);
+  f.h.host.setBounds({ x: 600, y: 80, width: 398, height: 600 });
+  const request = await f.start(); assert.equal(request.viewport.width, 199);
+  f.h.host.setBounds({ x: 600, y: 80, width: 399, height: 600 });
+  assert.equal(f.h.events.at(-1).type, 'annotation-cancelled');
+  const value = f.payload(request.requestId); value.viewport = request.viewport; f.send(value); await tick();
+  assert.equal(f.h.events.some(event => event.type === 'annotation'), false);
 });

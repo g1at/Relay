@@ -1,6 +1,7 @@
 'use strict';
 
 const { version: RELAY_VERSION } = require('../../../package.json');
+const { normalizeMediaCatalogMetadata } = require('./provider-media');
 
 const MODEL_ENV_KEYS = Object.freeze({
   haiku: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
@@ -283,7 +284,7 @@ function responseDiagnosticText(payload, runtime) {
 }
 
 function isModelAccessDenied(payload, runtime) {
-  return /(model.{0,40}(not.{0,20}(available|allowed|enabled)|access|permission|scope)|模型.{0,30}(不在|无权|未授权|未开通|不可用|权限|范围))/i
+  return /(insufficient[_ -]scope|permission[_ -]denied|insufficient[_ -]permissions?|scope[_ -]permission|model.{0,40}(not.{0,20}(available|allowed|enabled)|access|permission|scope)|模型.{0,30}(不在|无权|未授权|未开通|不可用|权限|范围))/i
     .test(responseDiagnosticText(payload, runtime));
 }
 
@@ -415,11 +416,12 @@ async function requestAnthropic(runtime, {
       }
     }
     const canTryNextModelCandidate = modelCatalogRequest
+      && !isModelAccessDenied(payloadForEndpoint, runtime)
       && responseForEndpoint
       && responseForEndpoint.status >= 400
       && responseForEndpoint.status < 500
       && ![408, 429].includes(responseForEndpoint.status);
-    if (urlIndex < urls.length - 1
+    if (urlIndex < urls.length - 1 && !isModelAccessDenied(payloadForEndpoint, runtime)
       && (shouldRetryGatewayRoot(responseForEndpoint, payloadForEndpoint, runtime)
         || canTryNextModelCandidate)) continue;
     break;
@@ -521,6 +523,8 @@ function modelCatalogOwner(item) {
   return owner && !/\s/.test(owner) ? owner : '';
 }
 
+function modelCatalogMedia(item) { return normalizeMediaCatalogMetadata(item); }
+
 function normalizeConfiguredModelId(value) {
   return String(value || '').trim().replace(/\[1m\]$/i, '').trim();
 }
@@ -559,13 +563,26 @@ function normalizeModelCatalog(payload, {
   const source = modelCatalogSource(payload);
   const records = [];
   const seenRecords = new Set();
+  const mediaCandidates = [];
+  const seenMediaCandidates = new Set();
   for (const item of source) {
     const id = modelCatalogId(item);
     const ownedBy = modelCatalogOwner(item);
-    const recordKey = `${ownedBy.toLocaleLowerCase()}\u0000${id.toLocaleLowerCase()}`;
-    if (!id || seenRecords.has(recordKey)) continue;
+    const media = modelCatalogMedia(item);
+    if (!id) continue;
+    // Keep exact directory identities for media template choices, independently
+    // from the configured chat route spelling and its deduplication below.
+    const declaredType = item && typeof item === 'object'
+      ? item.model_type || item.modelType || item.modality || (item.media && item.media.modality) || (item.mediaConfig && item.mediaConfig.modality) : '';
+    const mediaKey = JSON.stringify([id, ownedBy]);
+    if ((!declaredType || media.modality || media.modelType === '') && !seenMediaCandidates.has(mediaKey)) {
+      seenMediaCandidates.add(mediaKey);
+      mediaCandidates.push({ id, modelId: id, ownedBy, modelType: '', model_type: '', modality: '', ...media });
+    }
+    const recordKey = media.modality ? JSON.stringify([ownedBy, id]) : `${ownedBy.toLocaleLowerCase()}\u0000${id.toLocaleLowerCase()}`;
+    if (seenRecords.has(recordKey)) continue;
     seenRecords.add(recordKey);
-    records.push({ id, ownedBy });
+    records.push({ id, ownedBy, ...media });
   }
 
   const configured = [];
@@ -647,13 +664,16 @@ function normalizeModelCatalog(payload, {
       }
     }
     const value = useQualified ? qualifiedId : record.id;
-    const valueKey = value.toLocaleLowerCase();
+    const valueKey = record.modality ? JSON.stringify([record.id, record.ownedBy]) : value.toLocaleLowerCase();
     if (seenValues.has(valueKey)) continue;
     seenValues.add(valueKey);
     catalog.push({
       id: record.id,
       value,
       ownedBy: record.ownedBy,
+      ...(record.modelType ? { modelType: record.modelType, model_type: record.model_type, modality: record.modality } : {}),
+      ...(record.mediaConfig ? { mediaConfig: record.mediaConfig } : {}),
+      ...(record.mediaTemplateBlocked ? { mediaTemplateBlocked: true } : {}),
       alternateId: qualifiedId === record.id ? '' : (useQualified ? record.id : qualifiedId),
       idKind: useQualified ? 'owner-qualified' : 'raw',
       inference,
@@ -663,6 +683,7 @@ function normalizeModelCatalog(payload, {
 
   return {
     catalog,
+    mediaCandidates: mediaCandidates.slice(0, maxItems),
     idStrategy,
     strategyEvidence,
     hasOwnerCollision,
@@ -708,6 +729,10 @@ async function discoverProviderModels(runtime, { fetchImpl = globalThis.fetch, t
         models: [],
         totalModels: 0,
         imageModels: [],
+        mediaModels: [],
+        mediaCandidates: [],
+        errorKind: result.response && isModelAccessDenied(result.payload, runtime)
+          ? 'model_not_allowed' : (result.response && [401, 403].includes(result.response.status) ? 'authentication' : 'request_failed'),
         message: detail || (result.response ? `Anthropic 模型接口返回 HTTP ${result.response.status}` : '模型发现失败'),
       };
     }
@@ -719,6 +744,14 @@ async function discoverProviderModels(runtime, { fetchImpl = globalThis.fetch, t
     const allModels = normalized.catalog.map((item) => item.value);
     const models = allModels.slice(0, 1000);
     const imageModels = detectAdaptedImageModels(allModels);
+    // These are directory candidates only. A model type does not identify its
+    // request protocol, endpoint, permission, or a user's saved binding.
+    const mediaModels = normalized.catalog.filter(item => ['image', 'video'].includes(item.modality)).map(item => ({
+      id: item.id, modelId: item.id, ownedBy: item.ownedBy,
+      modelType: item.modelType, model_type: item.model_type, modality: item.modality,
+      ...(item.mediaConfig ? { mediaConfig: item.mediaConfig } : {}),
+      ...(item.mediaTemplateBlocked ? { mediaTemplateBlocked: true } : {}),
+    }));
     // A credential-protected catalog can still list every gateway model. Reading
     // it does not establish this key's permission to invoke any listed model.
     const catalogLabel = result.gatewayRootFallbackUsed ? '共享模型目录' : '模型目录';
@@ -738,6 +771,8 @@ async function discoverProviderModels(runtime, { fetchImpl = globalThis.fetch, t
         modelIdStrategyEvidence: normalized.strategyEvidence,
         totalModels: normalized.recordCount,
         imageModels,
+        mediaModels,
+        mediaCandidates: normalized.mediaCandidates,
         catalogSource: result.gatewayRootFallbackUsed ? 'gateway-root' : 'anthropic',
         message: `${catalogLabel} · ${allModels.length} 个模型${imageModels.length ? ` · ${imageModels.length} 个图像候选` : ''} · Key 权限未验证`,
       }
@@ -753,6 +788,8 @@ async function discoverProviderModels(runtime, { fetchImpl = globalThis.fetch, t
         models: [],
         totalModels: 0,
         imageModels: [],
+        mediaModels: [],
+        mediaCandidates: [],
         catalogSource: result.gatewayRootFallbackUsed ? 'gateway-root' : 'anthropic',
         message: `${catalogLabel}可访问，但没有返回模型 · Key 权限未验证`,
       };
@@ -767,6 +804,8 @@ async function discoverProviderModels(runtime, { fetchImpl = globalThis.fetch, t
       models: [],
       totalModels: 0,
       imageModels: [],
+      mediaModels: [],
+      mediaCandidates: [],
       message: sanitizedMessage(error && error.message, ...runtimeSecrets(runtime)) || '模型发现失败',
     };
   }

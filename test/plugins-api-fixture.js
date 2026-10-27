@@ -15,6 +15,7 @@
     calls: [], writes: [], imports: [], reads: [], reveals: [], overviewCount: 0,
     mcpFail: false, skillFail: false, writeMode: 'ok', readMode: 'ok', toggleFail: false,
     pendingRead: null, pendingWrite: null,
+    overviewMode: 'ok', configMode: 'ok', pendingOverview: null, pendingConfig: null,
   };
   function read(kind, key) {
     state.reads.push({ kind, key });
@@ -40,8 +41,17 @@
       renameAgent: (file, name) => { state.writes.push({ action: 'rename', file, name }); agents.find(a => a.file === file).displayName = name; return { ok: true, items: copy(agents) }; },
     },
     skills: {
-      overview: () => { state.overviewCount++; return state.skillFail ? { ok: false, message: '模拟技能读取失败' } : { ok: true, items: copy(skills), archived: [{ name: 'old-helper', useCount: 1 }], staleDays: 30, usageReady: true }; },
-      getReviewConfig: () => ({ ok: true, enabled: false, everyTurns: 6 }),
+      overview: () => {
+        state.overviewCount++;
+        const response = state.skillFail ? { ok: false, message: '模拟技能读取失败' } : { ok: true, items: copy(skills), archived: [{ name: 'old-helper', useCount: 1 }], staleDays: 30, usageReady: true };
+        if (state.overviewMode === 'hold') return new Promise(resolve => { state.pendingOverview = () => { state.pendingOverview = null; resolve(response); }; });
+        return response;
+      },
+      getReviewConfig: () => {
+        const response = { ok: true, enabled: false, everyTurns: 6 };
+        if (state.configMode === 'hold') return new Promise(resolve => { state.pendingConfig = () => { state.pendingConfig = null; resolve(response); }; });
+        return response;
+      },
       backfillMetadata: () => ({ ok: true, total: 0 }),
     },
     mcp: {

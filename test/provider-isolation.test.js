@@ -802,9 +802,9 @@ test('Relay 主进程不再写外部 Claude API / 模型配置', () => {
   assert.doesNotMatch(main, /providers:activate|providers:setChatRoute|providers:setDefaultModel/);
   assert.doesNotMatch(main, /legacySettingsPath|model\.mify|api\.llm\.mioffice/);
   assert.match(main, /firstRunSetupVersion/);
-  const imageModelsBlock = main.match(/const IMAGE_MODELS = \[([\s\S]*?)\n\];/);
-  assert.ok(imageModelsBlock);
-  assert.equal((imageModelsBlock[1].match(/\{ adapterId:/g) || []).length, 3);
+  assert.doesNotMatch(main, /const IMAGE_MODELS =/);
+  assert.match(main, /providerStore\.listMediaModels/);
+  assert.match(main, /getMediaService\(\)\.generate/);
   assert.doesNotMatch(renderer, /外部 Claude 设置/);
   assert.doesNotMatch(renderer, /claudeSettings/);
   assert.doesNotMatch(renderer, /Claude Code 服务商|与 Claude 服务商/);
@@ -816,7 +816,8 @@ test('Relay 主进程不再写外部 Claude API / 模型配置', () => {
   assert.match(renderer, /provider-toolbar/);
   assert.doesNotMatch(renderer, /provider-page-title|provider-section-heading/);
   assert.doesNotMatch(renderer, /provider-image-panel|providerImageBaseUrl|providerImageApiKey/);
-  assert.match(renderer, /<strong>图像候选<\/strong>/);
+  assert.match(renderer, /providerMediaEditor/);
+  assert.match(renderer, /RelayMediaUI\.mountProvider/);
   assert.doesNotMatch(renderer, /provider-page-desc|providerSearch|provider-filter-row|provider-search/);
   assert.doesNotMatch(renderer, /统一管理 Relay 的对话与图像 API|同一连接可同时提供对话/);
   assert.doesNotMatch(renderer, /这份配置仅供 Relay 使用|支持 Anthropic 兼容接口|由系统安全存储加密保存/);

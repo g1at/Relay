@@ -42,11 +42,13 @@
       if (prepareFragment) prepareFragment(template.content);
       return template.content;
     }
-    function replaceFull(body, text, plain = false) {
+    function replaceFull(body, text, plain = false, beforeReplace) {
       states.delete(body);
       try {
         const content = fragment(body, plain ? `<pre>${escape(text)}</pre>` : full(text));
-        for (const node of Array.from(body.childNodes)) node.remove();
+        const removed = Array.from(body.childNodes);
+        if (removed.length) beforeReplace?.(removed);
+        for (const node of removed) node.remove();
         for (const node of Array.from(content.childNodes)) body.insertBefore(node, null);
       } catch (_) {
         // A parser or sanitizer failure must never expose an unprepared
@@ -54,7 +56,7 @@
         body.innerHTML = `<pre>${escape(text)}</pre>`;
       }
     }
-    function render(body, text) {
+    function render(body, text, { beforeReplace } = {}) {
       try {
         const options = marked.defaults;
         // Preserve an extended application's complete pipeline if hooks ever
@@ -62,10 +64,10 @@
         if (options?.async) {
           // This renderer is deliberately synchronous. Do not stringify a
           // Promise into the conversation if an async parser is installed.
-          replaceFull(body, text, true); return;
+          replaceFull(body, text, true, beforeReplace); return;
         }
         if (options?.hooks || options?.walkTokens || options?.extensions) {
-          replaceFull(body, text); return;
+          replaceFull(body, text, false, beforeReplace); return;
         }
         const source = normalize(text).replace(/\r\n|\r/g, '\n');
         const previous = states.get(body);
@@ -111,7 +113,7 @@
         // If another owner wrapped a frozen node, rebuilding is safer than
         // moving it out of that owner's DOM (for example final code controls).
         if (entries.some(entry => entry.nodes.some(node => node.parentNode !== body))) {
-          states.delete(body); render(body, text); return;
+          states.delete(body); render(body, text, { beforeReplace }); return;
         }
         for (const token of tokens.slice(prefixCount)) {
           // Include parsed inline structure, list looseness, and other token
@@ -130,7 +132,11 @@
         // Prepare the whole replacement before touching the live DOM, so any
         // malformed token or parser error takes the safe full-render fallback.
         const retained = new Set(entries.flatMap(entry => entry.nodes));
-        for (const node of Array.from(body.childNodes)) if (!retained.has(node)) node.remove();
+        const removed = Array.from(body.childNodes).filter(node => !retained.has(node));
+        // Preserve UI state only for nodes actually being replaced. Reading
+        // scroll metrics from frozen offscreen code defeats content visibility.
+        if (removed.length) beforeReplace?.(removed);
+        for (const node of removed) node.remove();
         let cursor = body.firstChild;
         for (const entry of entries) for (const node of entry.nodes) {
           if (node === cursor) cursor = cursor.nextSibling;
@@ -139,7 +145,7 @@
         states.set(body, { entries, links, options, optionSnapshot: optionSnapshot(options), source, tokens, boundary, prefixCount: nextPrefixCount,
           hasLinks: Object.keys(tokens.links || {}).length > 0 });
       } catch (_) {
-        replaceFull(body, text);
+        replaceFull(body, text, false, beforeReplace);
       }
     }
     // Final code controls keep their current DOM; no parsed copy is retained.

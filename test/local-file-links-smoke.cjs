@@ -118,7 +118,7 @@ app.whenReady().then(async () => {
   await waitFor("$('workspacePreviewTitle').textContent==='D:/Synthetic/Project/another.txt'");
   await check('FileLinkPreservesAnExplicitlyOpenedFilesTab', "relayWorkspacePanel.getState().tabs.length===2&&relayWorkspacePanel.getState().tabs.filter(tab=>tab.id==='files').length===1&&relayWorkspacePanel.getState().tabs.some(tab=>tab.path==='D:/Synthetic/Project/another.txt')");
   await act("linkContext={conversationId:'explicit-files-context',workingDir:'D:/Synthetic/Project',title:'显式文件入口'};window.dispatchEvent(new CustomEvent('relay:conversation-changed'));");
-  await check('ConversationSwitchRetainsPreviouslyExplicitFilesTabOnly', "relayWorkspacePanel.getState().tabs.length===1&&relayWorkspacePanel.getState().activeId==='files'&&relayWorkspacePanel.getState().tabs[0].id==='files'");
+  await check('ConversationSwitchRetainsFilesTabWithoutOpeningAnotherConversationsPanel', "relayWorkspacePanel.getState().tabs.length===1&&relayWorkspacePanel.getState().tabs[0].id==='files'&&!relayWorkspacePanel.getState().open&&relayWorkspacePanel.getState().activeId===null");
   await act("linkContext={conversationId:'fixture-file-conversation',workingDir:'D:/Synthetic/Project',title:'文件链接测试'};window.dispatchEvent(new CustomEvent('relay:conversation-changed'));fileLinks.link('another.txt').click();");
   await waitFor("$('workspacePreviewTitle').textContent==='D:/Synthetic/Project/another.txt'");
   await act("document.querySelector('[data-tab-id=files] .workspace-tab-close').click();fileLinks.link('docs/README.md').click();");

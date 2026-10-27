@@ -46,13 +46,6 @@ app.whenReady().then(async () => {
   await new Promise(resolve => secureServer.listen(0, '127.0.0.1', resolve));
   const secureBase = `https://127.0.0.1:${secureServer.address().port}`;
   const fingerprint = value => String(value).replace(/[^a-f0-9]/gi, '').toLowerCase();
-  // Trust exactly the repository's synthetic loopback fixture in this harness.
-  // Production never overrides certificate verification.
-  app.on('certificate-error', (event, _contents, url, _error, certificate, callback) => {
-    let trusted = false;
-    try { trusted = url.startsWith(secureBase + '/') && fingerprint(new X509Certificate(certificate.data).fingerprint256) === fingerprint(new X509Certificate(cert).fingerprint256); } catch (_) {}
-    if (trusted) event.preventDefault(); callback(trusted);
-  });
   app.on('session-created', session => session.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) && ![base, secureBase].some(origin => details.url.startsWith(origin + '/')) })));
   const entry = path.join(output, 'fixture.html'), preload = path.join(output, 'preload.cjs');
   fs.writeFileSync(preload, `const{contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('nativeBrowser',{invoke:input=>ipcRenderer.invoke('browser:invoke',input),onEvent:handler=>{const listener=(_e,p)=>handler(p);ipcRenderer.on('browser:event',listener);return()=>ipcRenderer.removeListener('browser:event',listener);}});`);
@@ -86,7 +79,12 @@ app.whenReady().then(async () => {
   // focus events, so deliver the blur that a foreground click would produce.
   await act('const field=document.getElementById("workspaceBrowserAddress");field.blur();field.dispatchEvent(new FocusEvent("blur"));');
   await waitFor(`document.getElementById('workspaceBrowserAddress').value===${JSON.stringify(new URL(base).host)}`);
+  await waitFor(async () => { const state = await invoke({ action: 'state' }); return state.visible && state.tab?.url === base + '/two'; });
+  await check('native browser belongs to the visible conversation', "(async()=>{const state=await api.browser.invoke({action:'state'});return state.tab.ownerConversationId===relayConversationWorkspace().conversationId})()");
+  win.focus(); second.webContents.focus();
+  await delay(60);
   second.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'L', modifiers: ['control'] });
+  second.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'L', modifiers: ['control'] });
   await waitFor(`document.getElementById('workspaceBrowserAddress').value===${JSON.stringify(base + '/two')}`);
   await check('native address shortcut reveals full URL for editing', 'document.activeElement.id==="workspaceBrowserAddress"');
   await check('address search follows selected engine', (await invoke({ action: 'resolve', text: 'Relay 搜索测试' })).url === 'https://duckduckgo.com/?q=' + encodeURIComponent('Relay 搜索测试'));
@@ -120,7 +118,12 @@ app.whenReady().then(async () => {
   await check('passwords and contacts are encrypted by the operating system on disk', savedContact.ok && !fs.readFileSync(path.join(profileRoot, 'browser/forms.enc.json'), 'utf8').includes('synthetic-password-only') && !fs.readFileSync(path.join(profileRoot, 'browser/forms.enc.json'), 'utf8').includes('test@example.invalid'));
   await check('saved credentials cannot fill an HTTP page', (await invoke({ action: 'passwords.fill', id: current.id, recordId: passwordId })).code === 'INSECURE_FORM');
   await evaluate(`relayWorkspacePanel.openUrl(${JSON.stringify(secureBase + '/form')})`);
-  await waitFor(async () => (await invoke({ action: 'state' })).tab?.url === secureBase + '/form' && !(await invoke({ action: 'state' })).tab.loading);
+  await waitFor(async () => (await invoke({ action: 'state' })).tab?.connection?.state === 'certificate-error');
+  const warning = (await invoke({ action: 'state' })).tab;
+  await check('self-signed fixture requires explicit certificate confirmation', warning.connection.origin === secureBase
+    && warning.connection.certificate.fingerprint === fingerprint(new X509Certificate(cert).fingerprint256));
+  await check('production connection workflow accepts only the fixture challenge', (await invoke({ action: 'security.continue', id: warning.id, challengeId: warning.connection.challengeId })).ok);
+  await waitFor(async () => { const tab = (await invoke({ action: 'state' })).tab; return tab?.url === secureBase + '/form' && !tab.loading && !tab.error && tab.title === '浏览器交付测试'; });
   const secureTab = (await invoke({ action: 'state' })).tab, secureView = views().find(v => v.webContents.getURL() === secureBase + '/form');
   await check('manual password fill succeeds on matching HTTPS origin', (await invoke({ action: 'passwords.fill', id: secureTab.id, recordId: passwordId })).ok && await secureView.webContents.executeJavaScript('document.querySelector("input[name=username]").value==="fixture-user"&&document.querySelector("input[type=password]").value==="synthetic-password-only"'));
   await check('manual contact fill uses actual page fields', (await invoke({ action: 'contacts.fill', id: secureTab.id, recordId: (await invoke({ action: 'contacts.list' })).items[0].recordId })).ok && await secureView.webContents.executeJavaScript('document.querySelector("input[autocomplete=email]").value==="test@example.invalid"'));

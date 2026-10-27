@@ -46,7 +46,9 @@ app.whenReady().then(async () => {
     await api.history.save({id:'perf-history',title:'合成长任务',model:'opus',turns:[{runId:'history-run',user:'查看合成文件',assistant:'已完成',activity:RelayActivity.serialize(state),ts:new Date().toISOString()}]});
     await loadConversation('perf-history');
   `);
-  await check('LongHistoryRegistersItsTaskSummary', 'perfFixture.summaryRegistry?.has(messagesEl)&&messagesEl.querySelectorAll(".process-item").length===150');
+  await check('LongHistoryRegistersItsTaskSummary', 'perfFixture.summaryRegistry?.has(messagesEl)&&messagesEl.querySelectorAll(".process-item").length===0&&messagesEl.querySelector(".conversation-stream").classList.contains("is-collapsed")');
+  await act('messagesEl.querySelector(".process-summary").click();');
+  await check('ExpandingLongHistoryMountsEveryPreservedActivity', 'messagesEl.querySelectorAll(".process-item").length===150&&currentConv.turns[0].activity.items.length===150');
   await act('startNewConv();');
   await check('BlankConversationReleasesPreviousSummaryRegistryImmediately', '!perfFixture.summaryRegistry.has(messagesEl)&&!messagesEl.querySelector(".process-stream")');
   await act(`inputEl.value='继续合成任务';await send();perfFixture.liveId=currentConv.id;perfFixture.jobId=uiFixture.runId;

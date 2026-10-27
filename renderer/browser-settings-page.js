@@ -42,39 +42,39 @@
     const element = (tag, className, text) => { const node = doc.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; };
     const icon = name => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ({ back: '<path d="m14 5-7 7 7 7"/>', refresh: '<path d="M20 7v5h-5M20 12a8 8 0 1 0-2.34 5.66"/>', open: '<path d="M14 3h7v7m0-7L10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5"/>', delete: '<path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/>', folder: '<path d="M3 7V5a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>', plus: '<path d="M12 5v14M5 12h14"/>' })[name] + '</svg>';
     const page = element('section', 'relay-browser-settings'); page.setAttribute('aria-label', '浏览器设置');
-    page.innerHTML = `<header class="rbs-heading"><div><button type="button" class="rbs-back" data-browser-back hidden>${icon('back')}浏览器</button><h2 data-browser-heading>浏览器</h2><p data-browser-subtitle>管理 Relay 内置浏览器。</p></div><button type="button" class="rbs-icon-button" data-browser-refresh title="刷新浏览器设置" aria-label="刷新浏览器设置">${icon('refresh')}</button></header>
+    page.innerHTML = `<header class="rbs-heading"><div><button type="button" class="rbs-back" data-browser-back hidden>${icon('back')}浏览器</button><h2 data-browser-heading>浏览器</h2></div><button type="button" class="rbs-icon-button" data-browser-refresh title="刷新浏览器设置" aria-label="刷新浏览器设置">${icon('refresh')}</button></header>
       <div class="rbs-status" data-browser-status role="status" aria-live="polite">正在读取设置…</div>
       <div data-browser-general>
         <section class="rbs-section"><h3>常规</h3><div class="rbs-card">
-          <div class="rbs-row"><div class="rbs-label"><strong>网络链接打开位置</strong><p>从对话中打开网页链接时使用</p></div><select class="rbs-select" data-browser-setting="webLinkTarget" aria-label="网络链接打开位置" disabled><option value="external">默认浏览器</option><option value="internal">Relay 内置浏览器</option></select></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>本地链接打开位置</strong><p>本机开发服务，例如 localhost</p></div><select class="rbs-select" data-browser-setting="localLinkTarget" aria-label="本地链接打开位置" disabled><option value="internal">Relay 内置浏览器</option><option value="external">默认浏览器</option></select></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>搜索引擎</strong><p>在浏览器地址栏中输入文字时使用</p></div><select class="rbs-select" data-browser-setting="searchEngine" aria-label="搜索引擎" disabled><option value="bing">Bing</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option></select></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>显示完整网址</strong><p>地址栏显示路径、查询参数和片段</p></div><button type="button" class="rbs-switch" data-browser-setting="showFullUrl" role="switch" aria-label="显示完整网址" aria-checked="false" disabled><span></span></button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>网络链接打开位置</strong></div><select class="rbs-select" data-browser-setting="webLinkTarget" aria-label="网络链接打开位置" disabled><option value="external">默认浏览器</option><option value="internal">Relay 内置浏览器</option></select></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>本地链接打开位置</strong></div><select class="rbs-select" data-browser-setting="localLinkTarget" aria-label="本地链接打开位置" disabled><option value="internal">Relay 内置浏览器</option><option value="external">默认浏览器</option></select></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>搜索引擎</strong></div><select class="rbs-select" data-browser-setting="searchEngine" aria-label="搜索引擎" disabled><option value="bing">Bing</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option></select></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>显示完整网址</strong></div><button type="button" class="rbs-switch" data-browser-setting="showFullUrl" role="switch" aria-label="显示完整网址" aria-checked="false" disabled><span></span></button></div>
         </div></section>
         <section class="rbs-section"><h3>浏览数据</h3><div class="rbs-card">
-          <div class="rbs-row"><div class="rbs-label"><strong>浏览历史</strong><p>查找和管理在 Relay 中访问过的网页</p></div><button type="button" class="rbs-button" data-browser-section="history">管理</button></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>书签</strong><p>保存常用网页，方便稍后打开</p></div><button type="button" class="rbs-button" data-browser-section="bookmarks">管理</button></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>清理浏览数据</strong><p>选择清理历史、网站数据、缓存或权限</p></div><button type="button" class="rbs-button" data-browser-section="clear">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>浏览历史</strong></div><button type="button" class="rbs-button" data-browser-section="history">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>书签</strong></div><button type="button" class="rbs-button" data-browser-section="bookmarks">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>清理浏览数据</strong></div><button type="button" class="rbs-button" data-browser-section="clear">管理</button></div>
         </div></section>
         <section class="rbs-section"><h3>自动填充与密码</h3><div class="rbs-card">
-          <div class="rbs-row"><div class="rbs-label"><strong>密码管理器</strong><p>管理已保存的网站账号和密码</p></div><button type="button" class="rbs-button" data-browser-section="passwords">管理</button></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>联系人信息</strong><p>管理用于填写表单的姓名、地址和联系方式</p></div><button type="button" class="rbs-button" data-browser-section="contacts">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>密码管理器</strong></div><button type="button" class="rbs-button" data-browser-section="passwords">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>联系人信息</strong></div><button type="button" class="rbs-button" data-browser-section="contacts">管理</button></div>
         </div></section>
         <section class="rbs-section"><h3>下载</h3><div class="rbs-card">
           <div class="rbs-row"><div class="rbs-label"><strong>保存位置</strong><p data-browser-download-directory>正在读取…</p></div><button type="button" class="rbs-button" data-browser-directory disabled>更改</button></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>下载前询问保存位置</strong><p>每次下载时选择文件保存位置</p></div><button type="button" class="rbs-switch" data-browser-setting="askDownloadLocation" role="switch" aria-label="下载前询问保存位置" aria-checked="false" disabled><span></span></button></div>
-          <div class="rbs-row"><div class="rbs-label"><strong>下载记录</strong><p>查看进度，管理下载和已保存的文件</p></div><button type="button" class="rbs-button" data-browser-section="downloads">管理</button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>下载前询问保存位置</strong></div><button type="button" class="rbs-switch" data-browser-setting="askDownloadLocation" role="switch" aria-label="下载前询问保存位置" aria-checked="false" disabled><span></span></button></div>
+          <div class="rbs-row"><div class="rbs-label"><strong>下载记录</strong></div><button type="button" class="rbs-button" data-browser-section="downloads">管理</button></div>
         </div></section>
-        <section class="rbs-section"><h3>权限</h3><div class="rbs-card"><div class="rbs-row"><div class="rbs-label"><strong>站点权限</strong><p>管理网站对相机、麦克风、位置等功能的访问</p></div><button type="button" class="rbs-button" data-browser-section="permissions">管理</button></div></div></section>
+        <section class="rbs-section"><h3>权限</h3><div class="rbs-card"><div class="rbs-row"><div class="rbs-label"><strong>站点权限</strong></div><button type="button" class="rbs-button" data-browser-section="permissions">管理</button></div></div></section>
       </div>
       <div class="rbs-clear" data-browser-clear-panel hidden>
         <section class="rbs-section" aria-label="选择要清理的数据"><h3>选择要清理的数据</h3><div class="rbs-card rbs-clear-options">
-          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="history" checked><span class="rbs-label"><strong>浏览历史</strong><span>在 Relay 中访问过的网页记录</span></span></label>
-          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="cache" checked><span class="rbs-label"><strong>缓存文件</strong><span>网页保存的图片和文件，下次访问时会重新加载</span></span></label>
-          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="cookies"><span class="rbs-label"><strong>Cookie 和网站数据</strong><span>清理后会退出网站登录，并移除网站的本地数据</span></span></label>
-          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="permissions"><span class="rbs-label"><strong>网站权限</strong><span>重置相机、麦克风、位置等访问权限，下次访问时重新询问</span></span></label>
+          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="history" checked><span class="rbs-label"><strong>浏览历史</strong></span></label>
+          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="cache" checked><span class="rbs-label"><strong>缓存文件</strong><span>下次访问时重新加载</span></span></label>
+          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="cookies"><span class="rbs-label"><strong>Cookie 和网站数据</strong><span>会退出登录并删除网站本地数据</span></span></label>
+          <label class="rbs-row rbs-clear-option"><input type="checkbox" data-browser-clear="permissions"><span class="rbs-label"><strong>网站权限</strong><span>下次访问时重新询问</span></span></label>
         </div></section>
-        <div class="rbs-clear-footer"><small>仅清理 Relay 内置浏览器；书签、保存的密码和已下载的文件会保留。</small><div class="rbs-clear-actions"><button type="button" class="rbs-button" data-browser-clear-cancel>重置选择</button><button type="button" class="rbs-button rbs-danger" data-browser-clear-submit>清理所选数据</button></div></div>
+        <div class="rbs-clear-footer"><small>仅清理内置浏览器，保留书签、密码和已下载文件。</small><div class="rbs-clear-actions"><button type="button" class="rbs-button" data-browser-clear-cancel>重置选择</button><button type="button" class="rbs-button rbs-danger" data-browser-clear-submit>清理所选数据</button></div></div>
       </div>
       <div data-browser-forms hidden></div>
       <div data-browser-manager hidden><div class="rbs-list-toolbar"><input class="rbs-search" type="search" data-browser-search placeholder="搜索" aria-label="搜索记录" autocomplete="off"><button type="button" class="rbs-button" data-browser-add hidden>${icon('plus')}<span>添加</span></button></div>
@@ -286,7 +286,8 @@
       section = isSection(value) ? value : 'general'; versions.set('list', (versions.get('list') || 0) + 1); clearTimeout(searching); rows.clear(); $('[data-browser-records]').replaceChildren();
       $('[data-browser-refresh]').title = '刷新' + SECTIONS[section]; $('[data-browser-refresh]').setAttribute('aria-label', '刷新' + SECTIONS[section]);
       $('[data-browser-refresh]').hidden = section === 'clear';
-      page.dataset.browserSection = section; $('[data-browser-heading]').textContent = SECTIONS[section]; $('[data-browser-subtitle]').textContent = section === 'general' ? '管理 Relay 内置浏览器。' : ({ history: '查找访问过的网页。', bookmarks: '收藏和整理常用网页。', clear: '按类别清理浏览器保存的数据。', downloads: '查看下载进度与已保存的文件。', permissions: '未保存的站点权限会在网站请求时询问。', passwords: '管理网站账号，按需填写登录表单。', contacts: '保存常用联系人信息，按需填写表单。' })[section];
+      page.dataset.browserSection = section; $('[data-browser-heading]').textContent = SECTIONS[section];
+      $('[data-browser-heading]').title = section === 'permissions' ? '未设置的权限会在网站请求时询问' : '';
       $('[data-browser-back]').hidden = section === 'general'; $('[data-browser-general]').hidden = section !== 'general'; $('[data-browser-manager]').hidden = !listSection(); $('[data-browser-forms]').hidden = !formsSection(); $('[data-browser-clear-panel]').hidden = section !== 'clear'; $('[data-browser-add-form]').hidden = true;
       $('[data-browser-add]').hidden = !['bookmarks', 'permissions'].includes(section); $('[data-browser-add] span').textContent = section === 'permissions' ? '添加网站' : '添加书签';
       $('[data-browser-search]').placeholder = section === 'permissions' ? '搜索网站' : '搜索'; $('[data-browser-search]').value = queries.get(section) || ''; $('[data-browser-search]').setAttribute('aria-label', '搜索' + SECTIONS[section]);

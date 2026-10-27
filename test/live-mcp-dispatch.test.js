@@ -23,6 +23,7 @@ function harness() {
     convId: 'synthetic-conversation', jobId: 'original-uuid', busy: true, dead: false,
     sessionId: 'preserved-sdk-session',
     child: {
+      whenInputResponse: async () => true,
       prepareMcp: options => { preparations.push(options); return preparation.promise; },
       push: (text, metadata) => { pushes.push({ text, metadata }); return true; },
     },
@@ -454,3 +455,46 @@ for (const withInitialization of [false, true]) {
     assert.deepEqual(h.failures, []);
   });
 }
+
+test('failed MCP waits for the submitted input response before issuing reconnect control', async () => {
+  const h = harness(), response = deferred();
+  h.session.child.whenInputResponse = (id, options) => {
+    assert.equal(id, h.session.jobId); assert.equal(h.pushes.length, 0);
+    assert.equal(options.signal.aborted, false); return response.promise;
+  };
+  h.session.child.prepareMcp = async options => {
+    h.preparations.push(options);
+    return options.reconnect === false ? { ok: false, code: 'MCP_NOT_READY', items: [] } : connected;
+  };
+  await h.dispatch().done;
+  assert.equal(h.session.pendingInput, null); assert.equal(h.pushes.length, 1);
+  assert.equal(h.preparations.length, 1, 'composer release does not imply reconnect may run');
+  response.resolve(true); await h.session.mcpBackgroundPreparation;
+  assert.equal(h.preparations.length, 2); assert.equal(h.pushes.length, 1);
+  assert.equal(h.statuses.at(-1).ok, true);
+});
+
+for (const finish of ['timeout', 'new-run', 'ended-run', 'session-replaced']) {
+  test('pending response ' + finish + ' cannot start stale reconnect or resend input', async () => {
+    const h = harness(), response = deferred();
+    h.session.child.whenInputResponse = () => response.promise;
+    h.session.child.prepareMcp = async options => {
+      h.preparations.push(options); return { ok: false, code: 'MCP_NOT_READY', items: [] };
+    };
+    await h.dispatch().done;
+    if (finish === 'new-run') h.session.jobId = 'another-input';
+    if (finish === 'ended-run') h.session.busy = false;
+    if (finish === 'session-replaced') h.sessions.delete(h.session.convId);
+    response.resolve(finish !== 'timeout'); await h.session.mcpBackgroundPreparation;
+    assert.equal(h.preparations.length, 1); assert.equal(h.pushes.length, 1);
+    assert.equal(h.statuses.at(-1).code, 'MCP_NOT_READY');
+  });
+}
+
+test('an executor without attributed response support never eagerly reconnects after send', async () => {
+  const h = harness(); delete h.session.child.whenInputResponse;
+  h.session.child.prepareMcp = async options => { h.preparations.push(options); return { ok: false, code: 'MCP_NOT_READY', items: [] }; };
+  await h.dispatch().done;
+  assert.equal(h.preparations.length, 1); assert.equal(h.pushes.length, 1);
+  assert.equal(h.session.mcpBackgroundPreparation, undefined);
+});

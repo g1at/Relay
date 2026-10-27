@@ -42,7 +42,7 @@ app.whenReady().then(async () => {
       <style>html{scrollbar-width:auto!important}html::-webkit-scrollbar{width:24px!important;background:#eee!important}html::-webkit-scrollbar-button{display:block!important;width:24px!important;height:24px!important}body{margin:0;background:#fafafa;color:#292929;font:16px system-ui}h1,p{padding:0 30px}.long{height:2500px;background:linear-gradient(#fafafa,#dedfe4)}</style>
       <script>
         const id=${JSON.stringify(id)};
-        function record(phase){const root=document.documentElement;fetch('/report',{method:'POST',body:JSON.stringify({id,phase,ready:document.readyState,
+        function record(phase){const root=document.documentElement;fetch('/report',{method:'POST',body:JSON.stringify({id,phase,ready:document.readyState,visibility:document.visibilityState,viewportHeight:innerHeight,
           width:getComputedStyle(root,'::-webkit-scrollbar').width,arrows:getComputedStyle(root,'::-webkit-scrollbar-button').display,
           actualWidth:innerWidth-root.clientWidth,overflow:root.scrollHeight>innerHeight,
           isolated:typeof require==='undefined'&&typeof process==='undefined'&&typeof window.api==='undefined'&&typeof window.electron==='undefined'})});}
@@ -53,12 +53,12 @@ app.whenReady().then(async () => {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const base = 'http://127.0.0.1:' + server.address().port;
   app.on('session-created', ses => ses.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/.test(details.url) && !details.url.startsWith(base + '/') })));
-  owner = new BrowserWindow({ width: 660, height: 760, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  owner = new BrowserWindow({ width: 660, height: 760, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   await owner.loadURL('about:blank');
   // Reproduce the old lifecycle without the new preload: dom-ready arrives after
   // the page has already painted its wide scrollbar for several frames.
-  control = new WebContentsView({ webPreferences: { session: session.fromPartition('relay-scrollbar-control'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
-  owner.contentView.addChildView(control); control.setBounds({ x: 0, y: 0, width: 640, height: 680 }); owner.show();
+  control = new WebContentsView({ webPreferences: { session: session.fromPartition('relay-scrollbar-control'), backgroundThrottling: false, sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  owner.contentView.addChildView(control); control.setBounds({ x: 0, y: 0, width: 640, height: 680 }); owner.show(); owner.focus(); control.setVisible(true);
   attachBrowserPageScrollbars(control.webContents); void control.webContents.loadURL(base + '/slow?id=control');
   await until(() => frames('control-1').length >= 4 && gates.has('control-1'), 'old lifecycle first frames');
   check('regressionFixtureReproducesWideScrollbarBeforeDomReady', frames('control-1').every(item => item.width === '24px' && item.arrows === 'block'));
@@ -66,7 +66,7 @@ app.whenReady().then(async () => {
   await until(() => control.webContents.executeJavaScript('getComputedStyle(document.documentElement,"::-webkit-scrollbar").width==="9px"'), 'control style catches up');
   check('oldLifecycleOnlyFixesScrollbarAfterLoad', true); control.webContents.close({ waitForBeforeUnload: false }); owner.contentView.removeChildView(control); control = null;
   host = createBrowserPanelHost({ BaseWindow, owner, WebContentsView, session });
-  const created = await host.invoke({ action: 'create', url: base + '/slow?id=fixed' });
+  const created = await host.invoke({ action: 'create', url: base + '/slow?id=fixed', conversationId: 'scrollbar-fixture' });
   await host.invoke({ action: 'setBounds', rect: { x: 0, y: 0, width: 640, height: 680 } });
   await host.invoke({ action: 'visibility', id: created.id, visible: true });
   const wc = owner.contentView.children.find(view => view.webContents !== owner.webContents).webContents;

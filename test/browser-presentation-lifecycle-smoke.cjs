@@ -41,6 +41,7 @@ app.whenReady().then(async () => {
   const production = slice(source, '  function renderBrowserAutomation()', '  async function browserAutomationControl(')
     + slice(source, '  function visibleElement(', '  function renderBrowserSnapshot(');
   const evalUi = code => owner.webContents.executeJavaScript(code);
+  await evalUi(fs.readFileSync(path.join(__dirname, '../renderer/browser-connection.js'), 'utf8') + '\nvoid 0;');
   await evalUi(`(() => {
     const $ = id => document.getElementById(id), app = document.querySelector('.app');
     const browserBridge = {invoke: input => require('electron').ipcRenderer.invoke('test:presentation', input)};

@@ -47,7 +47,14 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
     getSdkPluginStore: () => ({ runtime: () => ({ plugins: [], settings: { enabledPlugins: {}, pluginConfigs: {} }, fingerprint: 'fixture' }) }),
     LiveTurnRouter: require('../src/main/live/live-turn-router').LiveTurnRouter, createSessionForkService,
     crypto, path, process: { env: { CLAUDE_CONFIG_DIR: path.join(root, '.claude') } }, os: { homedir: () => root },
-    fs: { ...fs, existsSync: file => records.has(file) || fs.existsSync(file) },
+    fs: { ...fs, existsSync: file => records.has(file) || fs.existsSync(file),
+      statSync(file, options) {
+        if (!records.has(file)) return fs.statSync(file, options);
+        const content = JSON.stringify(records.get(file));
+        const revision = BigInt('0x' + crypto.createHash('sha256').update(content).digest('hex').slice(0, 16));
+        return { dev: 0n, ino: 1n, size: BigInt(Buffer.byteLength(content)), mtimeNs: revision, ctimeNs: revision };
+      },
+    }, workspaceLinkMetadata: new Map(),
     convFilePath: id => id, loadConversation, persistConversationRecord, getProjectStore: () => projects,
     getConversationWorkspaces: () => workspaces, readAppSettings: () => settings,
     getSdkRuntimeStorage: () => require('../src/main/sdk/sdk-runtime-storage').createSdkRuntimeStorage({ dataDir: path.join(root, 'app-data') }),
@@ -97,10 +104,11 @@ function fixture(t, { inProject = false, liveAvailable = true } = {}) {
     console: { log() {}, warn() {}, error() {} },
   };
   require('./helpers/conversation-permissions-fixture')(context);
+  context.memoryRetriever = require('../src/main/memory/memory-retrieval').createMemoryRetriever({ store: context.relayMemoryStore });
   vm.createContext(context); vm.runInContext('let nativeForkService;', context);
   for (const name of ['providerSessionRoute', 'sessionRouteMatchesProvider', 'relayModelTier', 'sdkProjectContext', 'conversationRuntimeContract',
     'migrateConversationRuntimeContract', 'createBrowserRunScope', 'liveBrowserContext',
-    'projectConversation', 'updateConversationProject', 'resolveExecutionWorkspace', 'resolveLinkWorkspace', 'buildSdkParams', 'spawnLiveSession', 'prespawnSession',
+    'projectConversation', 'updateConversationProject', 'resolveExecutionWorkspace', 'resolveRegisteredWorkspaceForTools', 'savedWorkspaceLinkDistribution', 'resolveLinkWorkspace', 'isMemoryPinned', 'buildSdkParams', 'spawnLiveSession', 'prespawnSession',
     'runLiveTurn', 'runClaudeJob', 'saveConversation', 'getNativeForkService']) vm.runInContext(declaration(name), context);
   const start = source.indexOf("ipcMain.handle('claude:run',"), end = source.indexOf('// IPC: 丢弃某对话', start);
   vm.runInContext(source.slice(start, end), context);

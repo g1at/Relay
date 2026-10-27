@@ -34,6 +34,8 @@
     code: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
     sound: '<path d="m11 4-6 5H2v6h3l6 5ZM15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>',
     lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    site: '<path d="M5 7h7m4 0h3M5 17h3m4 0h7"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
+    warning: '<path d="m10.3 4.2-8 13.8A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3l-8-13.8a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4m0 4h.01"/>',
 
   };
   function icon(name, className = '') {
@@ -265,11 +267,11 @@
   const tabs = [];
   let activeId = null, navigationRevision = 0, tabNumber = 0;
   let tabsFingerprint = '', menuButton = null;
+  let nativeMenuRequest = null, nativeMenuNumber = 0;
   const obscured = new Set(), priorInert = new Map();
   const activeTab = () => tabs.find(item => item.id === activeId);
   const lastBrowserTabs = new Map();
   const panelPresentationStates = new Map();
-  let browserContextFallback = false;
   const browserContextId = () => context?.conversationId || null;
   const tabInContext = item => item?.kind !== 'browser' || item.browserConversationId === browserContextId();
   const visibleTabs = () => tabs.filter(tabInContext);
@@ -287,7 +289,6 @@
     restoreWidth = defaultPreferredWidth;
     maximized = opened && !!saved?.maximized; automaticMaximized = false;
     activeId = saved?.activeId || null;
-    browserContextFallback = false;
     const selected = tabs.find(item => item.id === activeId && tabInContext(item));
     if (!opened && panel.contains(document.activeElement)) toggle.focus({ preventScroll: true });
     if (selected) { activate(selected.id, { reveal: false }); return; }
@@ -306,7 +307,7 @@
     if (current && tabInContext(current) && !restore) { renderTabs(); return; }
     const remembered = lastBrowserTabs.get(browserContextId());
     const next = available.find(item => item.id === remembered) || available.find(item => item.kind === 'browser') || available[0];
-    if (next) { activate(next.id, { reveal: false }); browserContextFallback = next.kind !== 'browser'; return; }
+    if (next) { activate(next.id, { reveal: false }); return; }
     navigationRevision++; activeId = null; tab = null;
     preview = null; disposeHtmlPreview(); closeMenus(false); renderTabs(); syncInternalPages(); layout(); dispatchTab(); syncNative();
   }
@@ -314,8 +315,31 @@
     body: $('workspaceFileBody'), tree: $('workspaceTreePane'), handle: $('workspaceTreeResizeHandle'), toggle: $('workspaceTreeToggle'), window,
     getActive: () => opened && tab === 'files' && (!app.dataset.view || app.dataset.view === 'chat'),
   });
+  const failedTabFavicons = new WeakMap();
+  function tabFavicon(item) {
+    if (item.kind !== 'browser' || item.internalPage || item.browser?.isPreview || !item.browser?.url || item.browser.url === 'about:blank') return null;
+    const value = item.browser.favicon;
+    // Only host-normalized image bytes may enter the trusted renderer. The
+    // host validates SVG; use image decoding, never inline SVG/HTML or a URL.
+    return typeof value === 'string' && value.length <= Math.ceil(256 * 1024 / 3) * 4 + 128 && value !== failedTabFavicons.get(item)
+      && /^data:image\/(?:png|jpeg|gif|webp|x-icon|vnd\.microsoft\.icon|svg\+xml);base64,[a-z0-9+/]+={0,2}$/i.test(value) ? value : null;
+  }
+  function defaultTabIcon(item) {
+    const node = item.preview && window.relayWorkspaceFileTypes ? window.relayWorkspaceFileTypes.createIcon(item.preview.path)
+      : icon(item.kind === 'files' ? 'folder' : item.kind);
+    node.classList.add('workspace-tab-icon'); return node;
+  }
+  function tabIcon(item) {
+    const favicon = tabFavicon(item);
+    if (!favicon) return defaultTabIcon(item);
+    const image = document.createElement('img'); image.className = 'workspace-tab-icon workspace-tab-favicon';
+    image.alt = ''; image.setAttribute('aria-hidden', 'true'); image.width = 16; image.height = 16; image.draggable = false; image.decoding = 'async';
+    image.addEventListener('error', () => { failedTabFavicons.set(item, favicon); image.replaceWith(defaultTabIcon(item)); }, { once: true });
+    image.src = favicon; return image;
+  }
   function renderTabs() {
     const available = visibleTabs(), hasTabs = available.length > 0;
+    panel.classList.toggle('is-browser', activeTab()?.kind === 'browser');
     $('workspaceAdd').hidden = !hasTabs;
     $('workspaceTabs').hidden = !hasTabs;
     $('workspaceNoTabs').hidden = hasTabs;
@@ -323,7 +347,7 @@
       panel.querySelectorAll('[data-workspace-content]').forEach(content => { content.hidden = true; });
       $('workspaceTreeToggle').hidden = true;
     }
-    const fingerprint = JSON.stringify(available.map(item => [item.id, item.title, item.id === activeId]));
+    const fingerprint = JSON.stringify(available.map(item => [item.id, item.title, item.id === activeId, tabFavicon(item)]));
     if (fingerprint === tabsFingerprint) return;
     tabsFingerprint = fingerprint;
     const host = $('workspaceTabs'), scroll = host.scrollLeft;
@@ -336,7 +360,7 @@
       button.id = item.id === 'files' ? 'workspaceFilesTab' : 'workspaceTab-' + item.id;
       button.setAttribute('role', 'tab'); button.setAttribute('aria-selected', String(item.id === activeId)); button.setAttribute('aria-controls', ({ files: 'workspaceFiles', browser: 'workspaceBrowser', terminal: 'workspaceTerminal', review: 'workspaceReview' })[item.kind]);
       button.tabIndex = item.id === activeId ? 0 : -1; button.title = item.preview?.path || item.terminalRoot || item.title;
-      button.append(item.preview && window.relayWorkspaceFileTypes ? window.relayWorkspaceFileTypes.createIcon(item.preview.path) : icon(item.kind === 'files' ? 'folder' : item.kind));
+      button.append(tabIcon(item));
       const label = document.createElement('span'); label.className = 'workspace-tab-label'; label.textContent = item.title; button.append(label);
       button.addEventListener('click', () => activate(item.id));
       button.addEventListener('keydown', event => {
@@ -370,7 +394,6 @@
   function activate(id, { refresh = true, reveal = true } = {}) {
     if (contextLoading) return;
     const item = tabs.find(value => value.id === id); if (!item || !tabInContext(item)) return;
-    browserContextFallback = false;
     if (item.kind === 'browser') lastBrowserTabs.set(browserContextId(), item.id);
     clearTimeout(findTimer); findTimer = null;
     $('workspaceNotice').textContent = '';
@@ -387,7 +410,7 @@
     requestAnimationFrame(() => { if (activeId === id) $('workspaceTabs').querySelector('[aria-selected="true"]')?.closest('.workspace-tab-item')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }); });
   }
   function dispatchTab() { window.dispatchEvent(new CustomEvent('relay:workspace-tab', { detail: { tab, open: opened, id: activeId } })); }
-  function open(next = null, { startTerminal = false, refresh = true } = {}) {
+  function open(next = null, { refresh = true } = {}) {
     if (contextLoading) return;
     syncContext(); opened = true;
     const kind = ['files', 'browser', 'terminal', 'review'].includes(next) ? next : null;
@@ -409,7 +432,7 @@
     if (panel.contains(document.activeElement)) toggle.focus();
     layout(); dispatchTab(); syncNative();
   }
-  async function closeTab(id, { remoteClosed = false } = {}) {
+  async function closeTab(id) {
     const index = tabs.findIndex(item => item.id === id); if (index < 0) return;
     const item = tabs[index];
     if (item.kind === 'terminal' && !await closeTerminal(item)) return;
@@ -427,7 +450,7 @@
     if (item.kind === 'review') { reviewView?.destroy(); reviewView = null; }
     tabs.splice(tabs.indexOf(item), 1);
     if (item.id !== activeId) { renderTabs(); return; }
-    previewRevision++; disposeHtmlPreview();
+    previewRevision++; closeMenus(false); disposeHtmlPreview();
     const available = visibleTabs(), next = available[Math.min(index, available.length - 1)];
     if (next) { const wasOpen = opened; activate(next.id); if (!wasOpen) { opened = false; layout(); dispatchTab(); syncNative(); } }
     else { navigationRevision++; activeId = null; tab = null; preview = null; panel.querySelectorAll('[data-workspace-content]').forEach(content => { content.hidden = true; }); $('workspaceNoTabs').hidden = false; $('workspaceTreeToggle').hidden = true; renderTabs(); dispatchTab(); syncNative(); if (opened) $('workspaceLauncherActions').querySelector('button:not(:disabled)')?.focus({ preventScroll: true }); }
@@ -449,6 +472,10 @@
   }
   function closeMenus(restoreFocus = true) {
     const previous = menuButton; menuButton = null; previous?.setAttribute('aria-expanded', 'false');
+    if (nativeMenuRequest) {
+      const requestId = nativeMenuRequest; nativeMenuRequest = null;
+      void browserBridge.invoke({ action: 'menu.close', requestId }).catch(() => {});
+    }
     for (const [menu, button] of [['workspaceAddMenu', 'workspaceAdd'], ['workspaceBrowserMenu', 'workspaceBrowserMore']]) { if (!$(menu).hidden) $(menu).hidden = true; $(button).setAttribute('aria-expanded', 'false'); }
     if (restoreFocus && previous) previous.focus({ preventScroll: true });
     scheduleNative();
@@ -465,6 +492,44 @@
     const menuWidth = Math.min(224, box.width - 20); menu.style.width = menuWidth + 'px';
     menu.style.left = Math.max(8, Math.min(rect.left - box.left, box.width - menuWidth - 8)) + 'px'; menu.style.top = (rect.bottom - box.top + 6) + 'px'; menu.style.maxHeight = Math.max(60, box.bottom - rect.bottom - 14) + 'px';
     syncNative(); menu.querySelector('button:not(:disabled)')?.focus();
+  }
+  async function showNativeBrowserMenu(menu, button) {
+    const wasOpen = !!nativeMenuRequest; closeMenus(false); if (wasOpen) return;
+    // A renderer menu cannot overlap a WebContentsView. Use a native popup so
+    // opening More keeps the live page, rather than a stretched static snapshot.
+    const item = activeTab(), conversationId = browserContextId(), revision = navigationRevision;
+    const browserId = item?.browserId, url = item?.browser?.url;
+    const requestId = 'browser-menu-' + (++nativeMenuNumber), actions = new Map();
+    const entry = node => {
+      const id = String(actions.size); actions.set(id, node);
+      return { id, label: node.title || node.textContent, enabled: !node.disabled };
+    };
+    const items = Array.from(menu.children).flatMap(node => {
+      if (node.classList.contains('workspace-menu-divider')) return { type: 'separator' };
+      if (node.matches('button')) return entry(node);
+      if (node.classList.contains('workspace-browser-zoom')) return {
+        label: '缩放 · ' + Math.round((Number(item?.browser?.zoom) || 1) * 100) + '%',
+        submenu: Array.from(node.querySelectorAll('button'), entry),
+      };
+      return Array.from(node.children).flatMap(child => child.textContent.split(/\r?\n/))
+        .map(label => label.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 256))
+        .filter(Boolean).map(label => ({ label, enabled: false }));
+    });
+    nativeMenuRequest = requestId; menuButton = button; button.setAttribute('aria-expanded', 'true');
+    clearTimeout(captureTimer); captureTimer = null;
+    const rect = button.getBoundingClientRect();
+    try {
+      const result = assertResult(await browserBridge.invoke({ action: 'menu.popup', requestId, items, x: rect.left, y: rect.bottom + 6 }));
+      if (disposed || nativeMenuRequest !== requestId) return;
+      nativeMenuRequest = null; menuButton = null; button.setAttribute('aria-expanded', 'false');
+      if (activeTab() !== item || browserContextId() !== conversationId || navigationRevision !== revision
+        || item?.browserId !== browserId || item?.browser?.url !== url) return;
+      const selected = result.requestId === requestId && actions.get(result.selectedId);
+      if (selected && !selected.disabled) selected.click();
+      else if (document.hasFocus()) button.focus({ preventScroll: true });
+    } catch (error) {
+      if (nativeMenuRequest === requestId) { closeMenus(false); browserNotice(error.message); }
+    }
   }
   const workspaceShortcutIds = { browser: 'newBrowser', files: 'openFiles', terminal: 'newTerminal', review: 'openReview' };
   const shortcutStore = window.relayKeyboardShortcuts;
@@ -889,6 +954,12 @@
   }
   $('workspaceBrowserAddress').placeholder = '搜索或输入网址';
   $('workspaceBrowserNav').insertBefore($('workspaceBrowserAutomation'), $('workspaceBrowserMore'));
+  const browserNavigation = document.createElement('div'); browserNavigation.className = 'workspace-browser-navigation'; browserNavigation.setAttribute('role', 'group'); browserNavigation.setAttribute('aria-label', '页面导航');
+  $('workspaceBrowserNav').prepend(browserNavigation);
+  browserNavigation.append($('workspaceBrowserBack'), $('workspaceBrowserForward'), $('workspaceBrowserReload'));
+  const browserAddressShell = document.createElement('div'); browserAddressShell.className = 'workspace-browser-address-shell';
+  browserNavigation.after(browserAddressShell);
+  browserAddressShell.append($('workspaceBrowserSiteInfo'), $('workspaceBrowserAddress'));
   const creatingBrowsers = new Set();
   let nativeFrame = null, nativeChain = Promise.resolve(), nativeEpoch = 0, nativeSignature = '', nativeActiveId = null;
   let findTimer = null, captureTimer = null, capturing = false, geometryUntil = 0;
@@ -946,8 +1017,12 @@
     }
     if (route) route.state = { ...route.state, ...state };
     if (item.internalPage || item.browserId !== state.id) return item;
+    if (nativeMenuRequest && item === activeTab() && ((state.url && state.url !== item.browser.url)
+      || (state.loading && !item.browser.loading))) closeMenus(false);
     if ((state.url && item.browser.url && state.url !== item.browser.url) || (Number.isFinite(state.zoom) && state.zoom !== item.browser.zoom)) { item.snapshot = null; item.capturedAt = 0; }
-    item.browser = { ...item.browser, ...state }; item.title = state.title || (state.url && state.url !== 'about:blank' ? state.url : '新标签页'); renderTabs();
+    item.browser = { ...item.browser, ...state };
+    const connection = window.RelayBrowserConnection.describe(item.browser);
+    item.title = connection.failed ? connection.host || '页面未能打开' : state.title || (state.url && state.url !== 'about:blank' ? state.url : '新标签页'); renderTabs();
     if (activeId === item.id) { if (tabInContext(item)) renderBrowser(); else reconcileBrowserTabs(); } return item;
   }
   function nativeCanGo(item, action) {
@@ -1041,6 +1116,7 @@
   function renderBrowser() {
     const item = activeTab(); if (item?.kind !== 'browser') return;
     const state = item.browser || {}, internal = !!item.internalPage, blank = !state.url || state.url === 'about:blank';
+    const connection = window.RelayBrowserConnection.describe(state), failed = !internal && connection.failed;
     renderBrowserAutomation();
     syncInternalPages();
     const address = $('workspaceBrowserAddress');
@@ -1053,14 +1129,28 @@
     $('workspaceBrowserBookmark').title = state.bookmarked ? '取消收藏' : '收藏此页';
     $('workspaceBrowserBookmark').setAttribute('aria-label', $('workspaceBrowserBookmark').title);
     $('workspaceBrowserSiteInfo').disabled = blank || internal || !!state.isPreview;
-    $('workspaceBrowserSiteInfo').title = state.isPreview ? '本地代码预览' : state.url?.startsWith('https:') ? '网站信息 · HTTPS 连接' : '网站信息 · HTTP 连接';
-    $('workspaceBrowserSiteInfo').replaceChildren(icon(state.isPreview ? 'code' : 'lock'));
+    $('workspaceBrowserSiteInfo').title = connection.title;
+    $('workspaceBrowserSiteInfo').setAttribute('aria-label', connection.title);
+    $('workspaceBrowserSiteInfo').dataset.connection = connection.state;
+    $('workspaceBrowserSiteInfo').replaceChildren(icon(connection.icon));
     $('workspaceBrowserNav').classList.toggle('is-loading', !!state.loading);
     $('workspaceBrowserBack').disabled = !(nativeCanGo(item, 'back') || item.browserRouteIndex > 0);
     $('workspaceBrowserForward').disabled = !(nativeCanGo(item, 'forward') || item.browserRouteIndex < (item.browserRoutes?.length || 0) - 1);
     const reload = $('workspaceBrowserReload'); reload.title = state.loading ? '停止加载' : '刷新页面'; reload.setAttribute('aria-label', reload.title); reload.replaceChildren(icon(state.loading ? 'stop' : 'reload')); reload.disabled = blank;
-    if (state.error || !browserFeedback?.isSelecting()) browserNotice(state.error || '');
-    $('workspaceBrowserEmpty').hidden = !blank;
+    if (failed || !browserFeedback?.isSelecting()) browserNotice('');
+    $('workspaceBrowserEmpty').hidden = !blank || failed;
+    $('workspaceBrowserViewport').dataset.state = failed ? 'error' : blank ? 'empty' : internal ? 'internal' : 'page';
+    const errorPage = $('workspaceBrowserError'); errorPage.hidden = !failed; errorPage.dataset.kind = connection.state;
+    if (failed) {
+      $('workspaceBrowserErrorIcon').replaceChildren(icon(connection.state === 'certificate-error' ? 'warning' : 'browser'));
+      $('workspaceBrowserErrorOrigin').textContent = connection.host;
+      $('workspaceBrowserErrorTitle').textContent = connection.errorTitle;
+      $('workspaceBrowserErrorDescription').textContent = connection.errorDescription;
+      $('workspaceBrowserErrorCode').textContent = connection.code || state.error || '';
+      $('workspaceBrowserErrorConsent').hidden = !connection.canContinue;
+      $('workspaceBrowserCertificateContinue').hidden = !connection.canContinue;
+      $('workspaceBrowserUseHttp').hidden = !connection.canUseHttp;
+    }
     $('workspaceBrowserFind').hidden = !item.findOpen;
     if ($('workspaceBrowserFindInput').dataset.tabId !== item.id) { $('workspaceBrowserFindInput').value = item.findText || ''; $('workspaceBrowserFindInput').dataset.tabId = item.id; $('workspaceBrowserFindCount').textContent = item.findCount || ''; }
     scheduleNative(); if (!state.loading && !blank) scheduleCapture();
@@ -1260,8 +1350,10 @@
     // Fill the page viewport even at full width. The resize grip remains
     // reachable beside the tab/address bars above the native WebContentsView;
     // pointer capture keeps that gesture active when the pane moves.
-    const rect = { x: viewport.left, y: viewport.y, width: Math.max(0, viewport.right - viewport.left), height: viewport.height };
-    const realPage = !!state?.url && state.url !== 'about:blank' && !state.error;
+    const viewportNode = $('workspaceBrowserViewport');
+    const rect = { x: viewport.left + viewportNode.clientLeft, y: viewport.y + viewportNode.clientTop,
+      width: viewportNode.clientWidth, height: viewportNode.clientHeight };
+    const realPage = !!state?.url && state.url !== 'about:blank' && !window.RelayBrowserConnection.describe(state).failed;
     return { id: item?.kind === 'browser' ? item.browserId : null, visible: allowed && realPage && rect.width > 10 && rect.height > 10, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.max(0, Math.floor(rect.width)), height: Math.max(0, Math.floor(rect.height)) }, cover: realPage && !allowed };
   }
   function syncNative() {
@@ -1376,6 +1468,16 @@
   $('workspaceBrowserBack').addEventListener('click', () => void browserAction('back'));
   $('workspaceBrowserForward').addEventListener('click', () => void browserAction('forward'));
   $('workspaceBrowserReload').addEventListener('click', () => void browserAction(activeTab()?.browser?.loading ? 'stop' : 'reload'));
+  $('workspaceBrowserErrorReload').addEventListener('click', () => void browserAction('reload'));
+  for (const [id, action] of [['workspaceBrowserCertificateContinue', 'security.continue'], ['workspaceBrowserUseHttp', 'security.useHttp']]) {
+    $(id).addEventListener('click', async () => {
+      const item = activeTab(); if (item?.kind !== 'browser') return;
+      const current = item.browser?.connection, control = $(id); control.disabled = true;
+      try { await browserCall({ action, id: item.browserId, ...(action === 'security.continue' ? { challengeId: current?.challengeId } : {}) }); }
+      catch (error) { if (activeTab() === item) browserNotice(error.message); }
+      finally { control.disabled = false; scheduleNative(); }
+    });
+  }
   function openFind() { const item = activeTab(); if (item?.kind !== 'browser') return; if (item.internalPage) { item.managerMount.querySelector('[data-browser-search]')?.focus(); return; } item.findOpen = true; renderBrowser(); $('workspaceBrowserFindInput').focus(); $('workspaceBrowserFindInput').select(); trackGeometry(); }
   function closeFind() { clearTimeout(findTimer); findTimer = null; const item = activeTab(); if (item?.kind !== 'browser') return; item.findOpen = false; void browserAction('stopFind'); renderBrowser(); trackGeometry(); $('workspaceBrowserAddress').focus(); }
   async function findInPage(forward = true, findNext = false) {
@@ -1438,11 +1540,12 @@
   $('workspaceBrowserBookmark').addEventListener('click', () => void browserAction('bookmark', { toggle: true }));
   $('workspaceBrowserSiteInfo').addEventListener('click', () => {
     const menu = $('workspaceBrowserMenu'); menu.replaceChildren();
-    const url = activeTab()?.browser?.url || '';
+    const state = activeTab()?.browser || {}, url = state.url || '', connection = window.RelayBrowserConnection.describe(state);
     const heading = document.createElement('div'); heading.className = 'workspace-site-info';
     const title = document.createElement('strong'); try { title.textContent = new URL(url).host; } catch (_) { title.textContent = '网站信息'; }
-    const detail = document.createElement('span'); detail.textContent = url.startsWith('https:') ? '连接使用 HTTPS 加密' : '连接使用 HTTP，未加密';
+    const detail = document.createElement('span'); detail.textContent = connection.description;
     heading.append(title, detail); menu.append(heading);
+    if (connection.certificate?.issuerName) { const issuer = document.createElement('span'); issuer.textContent = '证书颁发者：' + connection.certificate.issuerName; heading.append(issuer); }
     menuItem(menu, '管理网站权限', 'settings', () => openBrowserManager('permissions'));
     showMenu('workspaceBrowserMenu', $('workspaceBrowserSiteInfo'));
   });
@@ -1498,7 +1601,7 @@
     menuItem(menu, '在默认浏览器中打开', 'external', () => void browserAction('openExternal'), blank || !!state.isPreview);
     menuDivider(menu);
     menuItem(menu, '浏览器设置', 'settings', () => openBrowserManager());
-    showMenu('workspaceBrowserMenu', $('workspaceBrowserMore'));
+    void showNativeBrowserMenu(menu, $('workspaceBrowserMore'));
   });
   function browserShortcut(action) {
     if (action === 'newTab') { void createBrowser(); return; }
@@ -1555,6 +1658,7 @@
     }
     if (event.type === 'navigation-start') {
       const item = browserTab(event.id);
+      if (item === activeTab() && nativeMenuRequest) closeMenus(false);
       if (item && !item.internalPage && item.browserId === event.id) {
         const route = browserRoutes(item)[item.browserRouteIndex];
         if (route) route.endIndex = null;
@@ -1564,7 +1668,7 @@
     }
     if (event.type === 'open-link') { if (event.tab) showBrowserTab(event.tab); return; }
     if (event.type === 'profile') { if (event.section === 'settings') void refreshBrowserPreferences(); return; }
-    if (event.type === 'closed') { const wasReleased = closedBrowserIds.has(event.id); closedBrowserIds.add(event.id); const item = browserTab(event.id); if (nativeActiveId === event.id) { nativeActiveId = null; nativeSignature = ''; } if (item && !wasReleased) void closeTab(item.id, { remoteClosed: true }); return; }
+    if (event.type === 'closed') { const wasReleased = closedBrowserIds.has(event.id); closedBrowserIds.add(event.id); const item = browserTab(event.id); if (nativeActiveId === event.id) { nativeActiveId = null; nativeSignature = ''; } if (item && !wasReleased) void closeTab(item.id); return; }
     if (event.type === 'find') { const item = browserTab(event.id); if (!item || (item.findRequestId && event.requestId && event.requestId < item.findRequestId)) return; item.findCount = event.matches ? String(event.activeMatchOrdinal || 0) + ' / ' + event.matches : '无匹配'; if (item === activeTab() && item.findOpen) $('workspaceBrowserFindCount').textContent = item.findCount; return; }
     // Download and recovery notices live in the fixed-height control row. They
     // survive unrelated page-state renders without resizing an active picker.

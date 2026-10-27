@@ -3,8 +3,8 @@
   const MAX_LENGTH = 10000;
   function create({ mount, value = '', api, onChange, onSaved } = {}) {
     let saved = String(value || ''), busy = false, disposed = false;
-    mount.innerHTML = `<header class="relay-guidance-head"><div><h2>Relay 说明</h2><p id="relayInstructionsHelp">为所有聊天提供额外说明和偏好。保存后在后续任务中使用。</p></div><button type="button" id="relayInstructionsSave" disabled>保存</button></header>
-      <textarea id="relayInstructions" aria-label="Relay 说明" aria-describedby="relayInstructionsHelp relayInstructionsStatus" placeholder="例如：默认使用中文回答，先给结论，再说明依据。" maxlength="${MAX_LENGTH}" spellcheck="false"></textarea>
+    mount.innerHTML = `<header class="relay-guidance-head"><div><h2>Relay 说明</h2></div><button type="button" id="relayInstructionsSave" disabled>保存</button></header>
+      <textarea id="relayInstructions" aria-label="Relay 说明" aria-describedby="relayInstructionsStatus" placeholder="例如：中文回答，先给结论。" maxlength="${MAX_LENGTH}" spellcheck="false"></textarea>
       <div class="relay-guidance-foot"><span id="relayInstructionsStatus" role="status" aria-live="polite"></span><span id="relayInstructionsCount"></span></div>`;
     const input = mount.querySelector('textarea'), button = mount.querySelector('button');
     const status = mount.querySelector('#relayInstructionsStatus'), count = mount.querySelector('#relayInstructionsCount');

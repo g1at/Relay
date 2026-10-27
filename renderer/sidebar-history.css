@@ -29,8 +29,8 @@
 .sidebar .history-item .hi-title:focus-visible { outline: 1px solid var(--text-muted); outline-offset: 2px; border-radius: 2px; }
 .sidebar .history-item .hi-rename, .sidebar .history-item .hi-pin, .sidebar .history-item .hi-tail { margin: 0; }
 .sidebar .history-item .hi-rename, .sidebar .history-item .hi-pin, .sidebar .history-item .hi-del { width: 23px; height: 23px; padding: 4px; justify-content: center; align-items: center; }
-.sidebar .history-item .hi-pin.on { display: none; color: var(--text-muted); }
-.sidebar .history-item .hi-pin.on svg { fill: none; stroke: currentColor; }
+.sidebar .history-item .hi-pin.on { display: none; color: var(--text); }
+.sidebar .history-item .hi-pin.on svg { fill: currentColor; stroke: currentColor; }
 .sidebar .history-item:hover .hi-rename, .sidebar .history-item:hover .hi-pin,
 .sidebar .history-item:focus-within .hi-rename, .sidebar .history-item:focus-within .hi-pin { display: inline-flex; }
 .sidebar .history-item:focus-within .hi-del { display: inline-flex; }
@@ -73,3 +73,8 @@
 .sidebar .history-item.deleting :is(.hi-del, .hi-rename, .hi-pin) { display: none; }
 .sidebar .history-item.deleting .hi-title { cursor: progress; }
 .sidebar .history-item .hi-delete-status { display: inline-block; margin-left: 8px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+
+/* A completed answer stays discoverable until its conversation is viewed. */
+.sidebar .history-item .hi-tail[data-state="unread"] { min-width: 16px; gap: 4px; }
+.sidebar .history-item .hi-unread-dot { display: inline-block; flex: 0 0 8px; width: 8px; height: 8px; margin-inline: 4px; border-radius: 50%; background: #3b82f6; }
+[data-theme="dark"] .sidebar .history-item .hi-unread-dot { background: #60a5fa; }

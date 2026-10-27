@@ -23,7 +23,17 @@ async function metrics() {
   return Object.fromEntries((await win.webContents.debugger.sendCommand('Performance.getMetrics')).metrics.map(m => [m.name, m.value]));
 }
 async function drag(streaming = false) {
-  const handle = await evaluate(`(()=>{const r=$('workspaceResizeHandle').getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+120)};})()`);
+  // Native input must hit the handle after the new conversation's opening
+  // transition. Faster rendering can otherwise start this probe mid-animation.
+  win.focus();
+  await evaluate(`new Promise((resolve,reject)=>{let previous='',stable=0;const end=Date.now()+5000;
+    function next(){const h=$('workspaceResizeHandle'),r=h.getBoundingClientRect(),key=[r.x,r.y,r.width,r.height].join(',');
+      stable=key===previous?stable+1:0;previous=key;
+      if(stable>=3&&document.hasFocus()&&!h.hidden&&r.width>0&&document.elementFromPoint(r.x+r.width/2,r.y+120)===h)return resolve();
+      if(Date.now()>end)return reject(Error('Native resize handle did not settle'));requestAnimationFrame(next);}
+    requestAnimationFrame(next);})`);
+  const geometry = await evaluate(`(()=>{const r=$('workspaceResizeHandle').getBoundingClientRect(),a=document.querySelector('.app');return {handle:{x:Math.round(r.x+r.width/2),y:Math.round(r.y+120)},state:relayWorkspacePanel.getState(),grid:getComputedStyle(a).gridTemplateColumns,classes:a.className,focused:document.hasFocus(),target:document.elementFromPoint(r.x+r.width/2,r.y+120)?.id};})()`);
+  const handle = geometry.handle;
   await evaluate(`if(window.dragLayoutListener)window.removeEventListener('relay:workspace-layout',dragLayoutListener);window.dragMeasure={gaps:[],last:null,active:true,events:0,widths:[]};
     function measure(now){const m=dragMeasure;if(!m.active)return;if(m.last!==null)m.gaps.push(now-m.last);m.last=now;requestAnimationFrame(measure);}requestAnimationFrame(measure);
     window.dragLayoutListener=()=>{dragMeasure.events++;dragMeasure.widths.push(parseFloat(document.querySelector('.app').style.getPropertyValue('--workspace-visible-width')));};window.addEventListener('relay:workspace-layout',dragLayoutListener);`);
@@ -39,8 +49,10 @@ async function drag(streaming = false) {
   win.webContents.sendInputEvent({ type: 'mouseUp', ...handle, button: 'left', clickCount: 1 });
   await sleep(180);
   const after = await metrics();
-  const frames = await evaluate(`(()=>{const m=dragMeasure;m.active=false;const g=m.gaps.toSorted((a,b)=>a-b);return{frames:g.length,p50:g[Math.floor(g.length*.5)],p95:g[Math.floor(g.length*.95)],max:g.at(-1),over50:g.filter(v=>v>50).length,layoutEvents:m.events,widthRange:Math.max(...m.widths)-Math.min(...m.widths)};})()`);
+  const frames = await evaluate(`(()=>{const m=dragMeasure;m.active=false;const g=m.gaps.toSorted((a,b)=>a-b);return{frames:g.length,p50:g[Math.floor(g.length*.5)],p95:g[Math.floor(g.length*.95)],max:g.at(-1),over50:g.filter(v=>v>50).length,layoutEvents:m.events,widthRange:Math.max(...m.widths)-Math.min(...m.widths),widthSamples:m.widths};})()`);
   for (const key of ['LayoutCount', 'RecalcStyleCount', 'LayoutDuration', 'RecalcStyleDuration', 'ScriptDuration', 'TaskDuration']) frames[key] = after[key] - before[key];
+  frames.initialGeometry = geometry;
+  frames.finalGeometry = await evaluate(`({state:relayWorkspacePanel.getState(),classes:document.querySelector('.app').className,focused:document.hasFocus()})`);
   return frames;
 }
 app.whenReady().then(async () => {
@@ -84,18 +96,28 @@ app.whenReady().then(async () => {
     const state=RelayActivity.createState();state.phase='complete';
     state.items=Array.from({length:305},(_,i)=>({id:'activity-'+i,type:i%3===0?'thinking':'tool',status:'success',title:i%3===0?'思考说明'.repeat(80):'读取合成文件',toolName:i%3===0?null:'Read',toolUseId:'tool-'+i,input:{file_path:'C:/Synthetic/report-'+i+'.txt'},result:'合成结果，保留每项调用的详情。'.repeat(60)}));
     const conv={id:'activity-long-history',title:'大量已完成工具调用',mode:'chat',model:'opus',turns:[{user:'检查合成文件',assistant:longAnswer.slice(0,2400),activity:RelayActivity.serialize(state),ts:new Date().toISOString()}]};
-    await api.history.save(conv);await loadConversation(conv.id);scrollToBottom(true);await new Promise(r=>setTimeout(r,350));
+    await api.history.save(conv);await loadConversation(conv.id);
+    // Workspace visibility belongs to each conversation; open this task's panel
+    // before delivering native drag input to its handle.
+    if(!relayWorkspacePanel.getState().open)$('btnWorkspacePanel').click();
+    scrollToBottom(true);await new Promise(r=>setTimeout(r,350));
     return{items:305,nodes:messagesEl.querySelectorAll('*').length};
   })()`);
   stage('activity-history-drag');
   result.activityHistory = await drag();
-  result.checks.collapsedActivityRetained = await evaluate('messagesEl.querySelectorAll(".process-item").length===305');
-  await evaluate(`messagesEl.querySelector('.process-summary').click();messagesEl.querySelector('.process-item.is-inspectable').click();`);
+  result.checks.activityNativeDragMoved = result.activityHistory.widthRange > 250;
+  result.checks.collapsedActivityRetained = await evaluate('messagesEl.querySelector(".process-stream")._processState.items.length===305&&messagesEl.querySelectorAll(".process-item").length===0');
+  await evaluate(`messagesEl.querySelector('.process-summary').click();`);
+  await waitFor('messagesEl.querySelectorAll(".process-item").length===305');
+  result.checks.expandedActivityRetained = true;
+  // Thinking details use their own body; inspect an actual tool receipt here.
+  await evaluate(`window.getSelection().removeAllRanges();messagesEl.querySelector('.process-item.is-tool.is-inspectable').click();`);
+  await waitFor('!!messagesEl.querySelector(".is-expanded > .process-inspector")');
   await sleep(300);
   result.checks.activityExpands = await evaluate('getComputedStyle(messagesEl.querySelector(".process-items")).contentVisibility!=="hidden"&&getComputedStyle(messagesEl.querySelector(".is-expanded > .process-inspector")).contentVisibility!=="hidden"');
   // Use the actual run creation + handleClaudeEvent + scheduled output reducer.
   stage('live-run-start');
-  await evaluate(`startNewConv();$('input').value='开始合成流式验证';$('btnSend').click();`);
+  await evaluate(`startNewConv();if(!relayWorkspacePanel.getState().open)$('btnWorkspacePanel').click();$('input').value='开始合成流式验证';$('btnSend').click();`);
   await waitFor('uiFixture.runId&&runs.size');
   await evaluate(`window.liveExpected=longAnswer;uiFixture.emit('onEvent',{jobId:uiFixture.runId,type:'stream_event',event:{type:'message_start',message:{id:'long-live-answer'}}});
     uiFixture.emit('onEvent',{jobId:uiFixture.runId,type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:longAnswer}}});`);
@@ -114,6 +136,7 @@ app.whenReady().then(async () => {
     window.liveTimer=setInterval(()=>{const text='继续补充验证结论。';liveExpected+=text;liveTicks++;uiFixture.emit('onEvent',{jobId:uiFixture.runId,type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});},35);`);
   stage('live-stream-drag');
   result.streaming = await drag(true);
+  result.checks.streamingNativeDragMoved = result.streaming.widthRange > 250;
   if (process.argv.includes('--profile')) {
     const { profile } = await win.webContents.debugger.sendCommand('Profiler.stop');
     fs.writeFileSync(path.join(out, label + '.cpuprofile'), JSON.stringify(profile));

@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..'), output = process.env.RELAY_SMOKE_OUT
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'));
 app.commandLine.appendSwitch('disable-background-networking'); app.on('window-all-closed', () => {});
 const report = { checks: {}, errors: [], external: [] };
-let win, mini, registry, server, context;
+let win, mini, registry, server, context, conversationId;
 const save = () => fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(report, null, 2));
 const timer = setTimeout(() => { report.errors.push('timeout'); save(); app.exit(1); }, 90000);
 const evaluate = code => win.webContents.executeJavaScript(code);
@@ -22,7 +22,7 @@ async function until(code) {
   throw Error('Timed out: ' + code);
 }
 async function check(name, condition) { report.checks[name] = !!await (typeof condition === 'string' ? evaluate(condition) : condition); save(); if (!report.checks[name]) throw Error(name); }
-const invoke = input => evaluate(`api.browser.invoke(${JSON.stringify(input)})`);
+const invoke = input => evaluate(`api.browser.invoke({...${JSON.stringify(input)},conversationId:relayConversationWorkspace().conversationId})`);
 async function link(url, action = 'click') {
   await act(`const a=document.getElementById('testLink');a.href=${JSON.stringify(url)};${action === 'middle' ? "a.dispatchEvent(new MouseEvent('auxclick',{button:1,bubbles:true,cancelable:true}))" : 'a.click()'};`);
 }
@@ -32,7 +32,7 @@ app.whenReady().then(async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const entry = path.join(output, 'fixture.html'), preload = path.join(output, 'preload.cjs');
-  fs.writeFileSync(preload, `const {contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('nativeBrowser',{invoke:input=>ipcRenderer.invoke('browser:invoke',input),open:url=>ipcRenderer.invoke('shell:open',url),onEvent:fn=>{const h=(_e,p)=>fn(p);ipcRenderer.on('browser:event',h);return()=>ipcRenderer.removeListener('browser:event',h)}});`);
+  fs.writeFileSync(preload, `const {contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('nativeBrowser',{invoke:input=>ipcRenderer.invoke('browser:invoke',input),open:(url,options)=>ipcRenderer.invoke('shell:open',url,options),onEvent:fn=>{const h=(_e,p)=>fn(p);ipcRenderer.on('browser:event',h);return()=>ipcRenderer.removeListener('browser:event',h)}});`);
   const fixture = ['ui-api-fixture.js','workspace-api-fixture.js'].map(file => fs.readFileSync(path.join(__dirname, file), 'utf8')).join('\n');
   const seed = `(()=>{const original=window.api;window.api=new Proxy(original,{get(o,k){if(k==='browser')return nativeBrowser;if(k==='openExternal')return nativeBrowser.open;return o[k]}})})();`;
   fs.writeFileSync(entry, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', `<head><base href="${pathToFileURL(path.join(root,'renderer')+path.sep).href}"><script>${fixture}\n${seed}</script>`));
@@ -43,14 +43,15 @@ app.whenReady().then(async () => {
   const windowSource = fs.readFileSync(path.join(root, 'src/main/app/application-windows.js'), 'utf8').replace(/^  /gm, '');
   context = vm.createContext({ mainWindow: win, pathToFileURL, Promise, require: require('node:module').createRequire(path.join(root, 'src/main/app/application-windows.js')), browserPanelTools: registry,
     showMainWindow: () => win.showInactive(), shell, logger: { warn: (...args) => report.errors.push(args.join(' ')) },
-    ipcMain, miniPanelCaller: event => mini && event.sender === mini.webContents && event.senderFrame === event.sender.mainFrame,
+    ipcMain, miniChat: { getConversationId: () => conversationId }, miniPanelCaller: event => mini && event.sender === mini.webContents && event.senderFrame === event.sender.mainFrame,
   });
-  context.browser = { openLink: url => registry.openLink(url) };
-  context.applicationWindows = { get mainWindow() { return context.mainWindow; }, openConfiguredWebLink: url => context.openConfiguredWebLink(url) };
+  context.browser = { openLink: (url, options) => registry.openLink(url, options) };
+  context.applicationWindows = { get mainWindow() { return context.mainWindow; }, openConfiguredWebLink: (url, options) => context.openConfiguredWebLink(url, options) };
   vm.runInContext(windowSource.slice(windowSource.indexOf('async function openConfiguredWebLink('),windowSource.indexOf('// 创建首次设置向导窗口'))+'\n'+source.slice(source.indexOf("ipcMain.handle('shell:open'"),source.indexOf('// IPC: 文件选择对话框')), context);
   context.attachExternalLinkGuard(win, entry);
   win.relayContentReady = win.loadFile(entry); await win.relayContentReady; win.showInactive();
   await until('!!relayWorkspacePanel && providerRoutingLoaded && !restoringActiveRuns');
+  conversationId = await evaluate('relayConversationWorkspace().conversationId');
   await act("const a=document.createElement('a');a.id='testLink';a.textContent='测试网页';a.target='_blank';document.getElementById('messages').append(a);inputEl.value='保留的草稿';");
   await invoke({ action: 'settings.update', settings: { webLinkTarget: 'internal', localLinkTarget: 'internal' } });
   await link(base+'/primary'); await until(async () => await currentUrl() === base+'/primary');
@@ -58,9 +59,9 @@ app.whenReady().then(async () => {
   const before = await evaluate('relayWorkspacePanel.getState().tabs.length');
   await link(base+'/middle','middle'); await until(async () => await currentUrl() === base+'/middle');
   await check('MiddleClickOpensExactlyOneInternalTab', `relayWorkspacePanel.getState().tabs.length===${before+1}`);
-  await act(`window.open(${JSON.stringify(base+'/native-popup')},'_blank');`); await until(async () => await currentUrl() === base+'/native-popup');
-  await check('NativePopupFallbackRevealsInternalTab', "relayWorkspacePanel.getState().open&&relayWorkspacePanel.getState().tab==='browser'");
-  await act(`location.href=${JSON.stringify(base+'/navigation')};`); await until(async () => await currentUrl() === base+'/navigation');
+  await act(`window.open(${JSON.stringify(base+'/native-popup')},'_blank');`); await until(() => report.external.includes(base+'/native-popup'));
+  await check('OwnerlessNativePopupUsesSystemBrowserWithoutCreatingTab', (await currentUrl()) === base+'/middle' && await evaluate(`relayWorkspacePanel.getState().tabs.length===${before+1}`));
+  await act(`location.href=${JSON.stringify(base+'/navigation')};`); await until(() => report.external.includes(base+'/navigation'));
   await check('NativeNavigationFallbackPreservesAppDocument', "location.protocol==='file:'&&!!document.getElementById('input')");
   // Save through the real settings UI, then immediately exercise its destination.
   await evaluate("openSettings('browser')"); await until("document.querySelector('[data-browser-setting=webLinkTarget]')?.disabled===false");

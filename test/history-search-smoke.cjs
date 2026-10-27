@@ -4,7 +4,7 @@ const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs'), path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
-const out = path.join(root, '.codex-tmp/history-search-2026-10-14/ui');
+const out = path.join(root, '.codex-tmp/history-search-2026-10-22/ui');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile'));
 app.commandLine.appendSwitch('disable-gpu');
@@ -13,7 +13,7 @@ const report = { runtime: process.versions.electron, platform: process.platform,
 const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ ...report, step }, null, 2));
 const deadline = setTimeout(() => { report.failures.push('Timeout: ' + step); save(); app.exit(1); }, 90000);
 const evaluate = source => win.webContents.executeJavaScript(source);
-const act = source => evaluate('(()=>{' + source + '\n})()');
+const act = source => evaluate('(async()=>{' + source + '\n})()');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(source) {
   const end = Date.now() + 6000;
@@ -41,9 +41,9 @@ function seed() {
         : [{ user: '原始问题 ' + index, assistant: '安全分析：合成答案 ' + index, ts: '2026-10-14T00:00:00.000Z' },
           { user: '后续问题 ' + index, assistant: '第二轮安全分析 ' + index, ts: '2026-10-14T00:01:00.000Z' }] });
   }
-  const state = window.searchFixture = { records, requests: [], cancels: 0, loads: [], writes: [], loadJumps: [],
-    items(query, count = 50) {
-      return [...records.values()].slice(0, count).map((record, index) => ({ id: record.id,
+  const state = window.searchFixture = { records, requests: [], cancels: 0, loads: [], writes: [], loadJumps: [], failLoadIds: new Set(),
+    items(query, count = 50, offset = 0) {
+      return [...records.values()].slice(offset, offset + count).map((record, index) => ({ id: record.id,
         title: index === 2 ? '<img src=x onerror=alert(1)> ' + query : query + '工程分析 ' + index,
         kind: record.kind, mode: record.mode, updatedAt: record.updatedAt,
         snippet: '已审查完整上下文：\x00' + query + '\x01 相关技术记录 <script>not executable</script> ' + index,
@@ -53,10 +53,10 @@ function seed() {
     reject(index) { state.requests[index].reject(Error('Synthetic delayed request failure')); },
   };
   const history = new Proxy(base.history, { get(target, key) {
-    if (key === 'search') return (query, limit) => new Promise((resolve, reject) => state.requests.push({ query, limit, resolve, reject }));
+    if (key === 'search') return (query, limit, offset) => new Promise((resolve, reject) => state.requests.push({ query, limit, offset, resolve, reject }));
     if (key === 'cancelSearch') return async () => { state.cancels++; return { ok: true }; };
     if (key === 'list') return async () => clone([...records.values()]);
-    if (key === 'load') return async id => { state.loads.push(id); return clone(records.get(id) || null); };
+    if (key === 'load') return async id => { state.loads.push(id); if (state.failLoadIds.delete(id)) throw Error('Synthetic load failure'); return clone(records.get(id) || null); };
     if (key === 'save') return async value => { state.writes.push(clone(value)); return clone(value); };
     return target[key];
   } });
@@ -130,9 +130,95 @@ app.whenReady().then(async () => {
   await waitFor('searchFixture.requests.length===' + (slow + 2));
   await finish(slow, '旧慢查询');
   await finish(slow + 1, '安全定位');
-  await act("searchFixture.expectedId=document.querySelector('.search-result').dataset.id;document.querySelector('.search-input').dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));");
+  const actualHit = await nextRequest('第二轮安全分析'); await finish(actualHit, '第二轮安全分析');
+  await act("searchFixture.expectedId=document.querySelector('.search-result').dataset.id;await Promise.resolve();document.querySelector('.search-input').dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));");
   await waitFor("currentConv&&currentConv.id===searchFixture.expectedId&&document.querySelector('.search-hit')");
   await check('enterNavigatesToSelectedConversationAndClosesModal', "!searchEl.classList.contains('show')&&searchFixture.loads.at(-1)===searchFixture.expectedId&&document.querySelector('.message.assistant.search-hit[data-turn=\"1\"]')");
+  await check('searchHighlightsTheActualVisibleTextWithoutChangingCopyContent', "[...CSS.highlights.get('relay-history-search')][0].toString()==='第二轮安全分析'&&document.querySelector('.search-hit').dataset.raw==='第二轮安全分析 0'");
+
+  await act('showSearchModal();');
+  const paged = await nextRequest('分页'); await finish(paged, '分页', 'hasMore:true,nextOffset:50');
+  await check('firstPageShowsCountAndLoadMore', "document.querySelectorAll('.search-result').length===50&&document.querySelector('.search-more')&&document.querySelector('.search-count').textContent.includes('50')");
+  await act("document.querySelector('.search-more').click();");
+  await waitFor('searchFixture.requests.length===' + (paged + 2));
+  await check('nextPageUsesOffsetAndDisablesDuplicateLoad', 'searchFixture.requests[' + (paged + 1) + '].offset===50&&document.querySelector(".search-more").disabled');
+  await act('searchFixture.finish(' + (paged + 1) + ",{ok:true,items:searchFixture.items('分页',30,50),hasMore:false,nextOffset:80});");
+  await check('paginationAppendsEveryResultWithoutDuplicates', "document.querySelectorAll('.search-result').length===80&&new Set([...document.querySelectorAll('.search-result')].map(row=>row.dataset.id)).size===80&&!document.querySelector('.search-more')&&document.querySelector('.search-count').textContent.includes('80')");
+  const flushCount = await evaluate('searchFixture.requests.length');
+  await type('立即搜索');
+  await act("document.querySelector('.search-input').dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key:'Enter'}));");
+  await check('enterFlushesPendingDebounceImmediately', 'searchFixture.requests.length===' + (flushCount + 1) + '&&searchFixture.requests.at(-1).query==="立即搜索"');
+  await act('searchFixture.finish(' + flushCount + ',{ok:true,items:[]});');
+
+  const retry = await nextRequest('第二轮安全分析');
+  await act('searchFixture.failLoadIds.add("search-fixture-2");searchFixture.finish(' + retry + ",{ok:true,items:searchFixture.items('第二轮安全分析').filter(item=>item.id==='search-fixture-2')});await Promise.resolve();document.querySelector('.search-result').click();");
+  await waitFor("document.querySelector('.search-notice')?.textContent.includes('无法打开')");
+  await check('failedNavigationPreservesQueryAndRetryableResult', "searchEl.classList.contains('show')&&document.querySelector('.search-input').value==='第二轮安全分析'&&!document.querySelector('.search-result').disabled&&document.querySelectorAll('.search-result').length===1");
+  await act("document.querySelector('.search-result').click();");
+  await waitFor("!searchEl.classList.contains('show')&&currentConv.id==='search-fixture-2'&&document.querySelector('.search-hit')");
+  await check('retryLoadsAndHighlightsTheRequestedMessage', "[...CSS.highlights.get('relay-history-search')][0].toString()==='第二轮安全分析'");
+
+  await act(String.raw`
+    const Output=window.RelayAssistantOutput, Timeline=window.RelaySupplementTimeline;
+    const body='Before boundary.\n\nAfter **precise** boundary.';
+    const output=Output.createState({eventOrder:10,messages:[{id:'answer',parent:'',order:1,blocks:[{index:0,type:'text',text:body}]}]});
+    Output.finish(output,{exitCode:0,finalResult:{type:'result',subtype:'success',result:body}});
+    searchFixture.records.set('search-rich',{id:'search-rich',title:'Synthetic rich message',kind:'chat',model:'opus',updatedAt:new Date().toISOString(),turns:[
+      {id:'stable-message',user:'Original input',assistant:'Obsolete assistant field',output:{status:'complete',final:'First **precise** _visible_ phrase\n\nSecond searchable line.'}},
+      {id:'stable-supplement',user:'Base user text',assistant:'Saved answer',supplements:[{id:'plain-input',text:'Supplement exact needle',status:'applied'}]},
+      {id:'stable-timeline',user:'Timeline base',assistant:body,output:Output.serialize(output),supplements:[{id:'timeline-input',text:'Timeline supplement needle',status:'applied',presentation:{version:1,order:2,messageId:'answer',textLength:body.indexOf('After')}}]}
+    ]});
+    searchFixture.realItems=(query,id)=>{
+      const record=searchFixture.records.get(id), helper=window.RelayHistorySearchText;
+      for(const [turnIndex,turn] of record.turns.entries())for(const field of helper.fieldsForTurn(turn,record.kind)){
+        const visible=helper.displayText(field.text,{markdown:field.side==='assistant'}), match=helper.matchRange(visible,query);
+        if(match)return [{id,title:record.title,kind:record.kind,updatedAt:record.updatedAt,turnIndex,turnId:turn.id,matchSide:field.side,messageKey:field.messageKey,snippet:visible.slice(0,match.start)+'\x00'+visible.slice(match.start,match.end)+'\x01'+visible.slice(match.end)}];
+      }
+      return [];
+    };
+    showSearchModal();
+  `);
+  const rich = await nextRequest('precise visible phrase');
+  await act('searchFixture.finish(' + rich + ",{ok:true,items:searchFixture.realItems('precise visible phrase','search-rich')});searchFixture.records.get('search-rich').turns.unshift({id:'inserted-turn',user:'Inserted before original',assistant:'Unrelated'});await Promise.resolve();document.querySelector('.search-result').click();");
+  await waitFor("currentConv.id==='search-rich'&&!searchEl.classList.contains('show')&&document.querySelector('.search-hit')");
+  await check('stableTurnIdSurvivesInsertedEarlierTurn', "document.querySelector('.search-hit').dataset.turn==='1'");
+  await check('structuredFinalMatchesDisplayedTextAcrossMarkdownNodes', "document.querySelector('.search-hit').dataset.raw.includes('precise')&&!document.querySelector('.search-hit').textContent.includes('Obsolete assistant field')&&[...CSS.highlights.get('relay-history-search')][0].toString()==='precise visible phrase'");
+  await act("searchFixture.retainedBubble=document.querySelector('.search-hit');searchFixture.loadsBeforeReuse=searchFixture.loads.length;showSearchModal();");
+  const reused = await nextRequest('Second searchable line');
+  await act('searchFixture.finish(' + reused + ",{ok:true,items:searchFixture.realItems('Second searchable line','search-rich')});await Promise.resolve();document.querySelector('.search-result').click();");
+  await waitFor("!searchEl.classList.contains('show')&&CSS.highlights.get('relay-history-search')?.size");
+  await check('sameConversationJumpReusesTranscriptAndAvoidsHistoryLoad', "document.querySelector('.search-hit')===searchFixture.retainedBubble&&searchFixture.loads.length===searchFixture.loadsBeforeReuse&&[...CSS.highlights.get('relay-history-search')][0].toString()==='Second searchable line'");
+
+  for (const [query,key,checkName] of [['Supplement exact needle','supplement:plain-input','supplementMatchTargetsItsOwnBubble'],['After precise boundary','assistant:after:timeline-input','segmentedAssistantMatchTargetsTheActualLaterSegment']]) {
+    await act('showSearchModal();'); const request=await nextRequest(query);
+    await act('searchFixture.finish('+request+',{ok:true,items:searchFixture.realItems('+JSON.stringify(query)+',"search-rich")});await Promise.resolve();document.querySelector(".search-result").click();');
+    await waitFor("!searchEl.classList.contains('show')&&document.querySelector('.search-hit')?.dataset.messageKey==="+JSON.stringify(key));
+    await check(checkName,"[...CSS.highlights.get('relay-history-search')][0].toString()==="+JSON.stringify(query));
+  }
+  await act("searchFixture.records.get('search-rich').turns[1].output.final='Updated saved search phrase';searchFixture.loadsBeforeStale=searchFixture.loads.length;showSearchModal();");
+  const staleMounted=await nextRequest('Updated saved search phrase');
+  await act('searchFixture.finish('+staleMounted+',{ok:true,items:searchFixture.realItems("Updated saved search phrase","search-rich")});await Promise.resolve();document.querySelector(".search-result").click();');
+  await waitFor("!searchEl.classList.contains('show')&&document.querySelector('.search-hit')?.dataset.raw==='Updated saved search phrase'");
+  await check('staleMountedConversationReloadsOnceToFindNewSavedText', "searchFixture.loads.length===searchFixture.loadsBeforeStale+1&&[...CSS.highlights.get('relay-history-search')][0].toString()==='Updated saved search phrase'");
+
+  await act("searchFixture.loadsBeforeReload=searchFixture.loads.length;pendingConversationViewReloads.add('chat:search-rich');showSearchModal();");
+  const reload=await nextRequest('Supplement exact needle');
+  await act('searchFixture.finish('+reload+',{ok:true,items:searchFixture.realItems("Supplement exact needle","search-rich")});await Promise.resolve();document.querySelector(".search-result").click();');
+  await waitFor("!searchEl.classList.contains('show')&&document.querySelector('.search-hit')?.dataset.messageKey==='supplement:plain-input'");
+  await check('pendingConversationReloadIsRespectedBeforeJump', "searchFixture.loads.length===searchFixture.loadsBeforeReload+1&&!searchFixture.retainedBubble.isConnected");
+
+  for (const query of ['安全图示 6','图示 6']) {
+    await act('showSearchModal();'); const request=await nextRequest(query);
+    await act('searchFixture.finish('+request+',{ok:true,items:searchFixture.realItems('+JSON.stringify(query)+',"search-fixture-6")});await Promise.resolve();document.querySelector(".search-result").click();');
+    await waitFor("!searchEl.classList.contains('show')&&activeView==='create'&&document.querySelector('#cvMessages .search-hit')");
+    if(query==='安全图示 6') await act("searchFixture.createBubble=document.querySelector('#cvMessages .search-hit');searchFixture.createLoads=searchFixture.loads.length;");
+    else await check('creationHistoryJumpAlsoReusesMountedTranscript', "document.querySelector('#cvMessages .search-hit')===searchFixture.createBubble&&searchFixture.loads.length===searchFixture.createLoads&&[...CSS.highlights.get('relay-history-search')][0].toString()==='图示 6'");
+  }
+  await act("searchFixture.records.get('search-fixture-6').turns[0].prompt='Updated creation search phrase';searchFixture.loadsBeforeStaleCreate=searchFixture.loads.length;showSearchModal();");
+  const staleCreate=await nextRequest('Updated creation search phrase');
+  await act('searchFixture.finish('+staleCreate+',{ok:true,items:searchFixture.realItems("Updated creation search phrase","search-fixture-6")});await Promise.resolve();document.querySelector(".search-result").click();');
+  await waitFor("!searchEl.classList.contains('show')&&document.querySelector('#cvMessages .search-hit')?.textContent.includes('Updated creation search phrase')");
+  await check('staleMountedCreationReloadsOnceBeforeHighlight', "searchFixture.loads.length===searchFixture.loadsBeforeStaleCreate+1&&[...CSS.highlights.get('relay-history-search')][0].toString()==='Updated creation search phrase'");
   await check('rendererRemainsSandboxedWithoutWritesOrUncaughtErrors', "typeof require==='undefined'&&typeof process==='undefined'&&uiFixture.errors.length===0&&searchFixture.writes.length===0");
   report.measurements.requestCount = await evaluate('searchFixture.requests.length');
   await capture('search-result-navigation'); step = 'completed'; save(); clearTimeout(deadline); app.exit(0);

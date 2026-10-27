@@ -183,16 +183,31 @@ async function verifyHistoryAndPreloads() {
 
 async function verifyTerminal() {
   const pty = require(path.join(archive, 'node_modules/node-pty'));
+  const { releaseExitedPtyResources } = require(path.join(archive, 'src/main/workspace/pty-exit-cleanup.js'));
+  let terminalExited = false;
   const terminal = pty.spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/cmd.exe'), ['/d', '/s', '/c', 'echo PACKAGED_LAYOUT_PTY_OK'], {
     cwd: fixture, cols: 80, rows: 24, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, NODE_OPTIONS: undefined }, useConpty: true,
   });
-  cleanup.push(() => { try { terminal.kill(); } catch (_) {} });
+  const worker = terminal._agent?._conoutSocketWorker?._worker;
+  let workerExited = worker?.threadId === -1;
+  worker?.once('exit', () => { workerExited = true; });
+  check('PackagedNativeTerminalOwnsOutputWorker', !!worker);
+  cleanup.push(() => { if (!terminalExited) try { terminal.kill(); } catch (_) {} });
   await new Promise((resolve, reject) => {
     let output = '';
     const timer = setTimeout(() => reject(Error('Packaged PTY timeout')), 10000);
     terminal.onData(text => { output += text; });
-    terminal.onExit(event => { clearTimeout(timer); try { check('PackagedNativeTerminalExecutes', event.exitCode === 0 && output.includes('PACKAGED_LAYOUT_PTY_OK')); resolve(); } catch (error) { reject(error); } });
+    terminal.onExit(event => {
+      clearTimeout(timer); terminalExited = true;
+      try {
+        check('PackagedExitedTerminalReleasesOwnedResources', releaseExitedPtyResources(terminal, event));
+        check('PackagedNativeTerminalExecutes', event.exitCode === 0 && output.includes('PACKAGED_LAYOUT_PTY_OK'));
+        resolve();
+      } catch (error) { reject(error); }
+    });
   });
+  for (let attempt = 0; attempt < 80 && !workerExited; attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  check('PackagedNativeTerminalWorkerExitsBeforeShutdown', workerExited);
 }
 
 const timeout = setTimeout(() => { report.failures.push('Acceptance timeout'); save(); app.exit(1); }, 90000);

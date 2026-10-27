@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(root, 'renderer/app.js'), 'utf8');
 const functionNames = [
   'setSettingsBackAction', 'preserveSettingsView', 'restoreSettingsView',
   'backToSettings', 'memoryMarkdownBody', 'renderManagedMarkdownEditor',
-  'getMemoryPageHost', 'renderMemoryEditor', 'escapeHtml',
+  'memoryHealthPresentation', 'getMemoryPageHost', 'renderMemoryEditor', 'escapeHtml',
 ];
 const functions = functionNames.map((name) => {
   const matcher = new RegExp(`^(?:async )?function ${name}\\(`, 'm');
@@ -192,8 +192,12 @@ app.whenReady().then(async () => {
     $('memViewToggle').click();$('dpEditor').value='隐藏时保存完成';$('dpEditor').dispatchEvent(new Event('input'));
     const memoryHiddenWrite=defer();fixture.write=()=>memoryHiddenWrite.promise;
     document.querySelector('[data-memory-save]').click();$('settingsModal').classList.add('hidden');
-    memoryHiddenWrite.resolve({ok:true});await Promise.resolve();await Promise.resolve();$('settingsModal').classList.remove('hidden');
-    check('memoryHiddenPageStillCompletesItsOwnSave',$('dpMemorySource').classList.contains('hidden')&&document.querySelector('[data-memory-status]').textContent==='已保存'&&modalHint.textContent==='主表单草稿提示');
+    fixture.read=async()=>({ok:true,content:'隐藏时保存完成'});
+    memoryHiddenWrite.resolve({ok:true});
+    const savedDeadline=Date.now()+2000;
+    while(document.querySelector('.memory-detail').getAttribute('aria-busy')==='true'&&Date.now()<savedDeadline) await new Promise(resolve=>setTimeout(resolve,10));
+    $('settingsModal').classList.remove('hidden');
+    check('memoryHiddenPageStillCompletesItsOwnSave',$('dpMemorySource').classList.contains('hidden')&&document.querySelector('[data-memory-status]').textContent==='已保存'&&modalHint.textContent==='主表单草稿提示'&&$('dpEditor').value==='隐藏时保存完成'&&document.querySelector('.memory-detail').getAttribute('aria-busy')==='false');
     return results;
   })()`);
   fs.writeFileSync(path.join(outputDir, 'result.json'), JSON.stringify(results, null, 2));

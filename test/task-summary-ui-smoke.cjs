@@ -7,15 +7,15 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp/task-summary-ui-smoke');
 fs.mkdirSync(out, { recursive: true });
 app.setPath('userData', path.join(out, 'profile')); app.commandLine.appendSwitch('disable-gpu');
-const checks = {}, errors = []; let win, step = 'start';
-const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, checks, errors }, null, 2));
+const checks = {}, errors = [], diagnostics = {}; let win, step = 'start';
+const save = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify({ step, checks, errors, diagnostics }, null, 2));
 const timer = setTimeout(() => { errors.push('timeout: ' + step); save(); app.exit(1); }, 65000);
 const ev = code => win.webContents.executeJavaScript(code);
 const act = code => ev(`(()=>{${code}\n})()`);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function settle() { await delay(180); await ev('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); }
 async function waitFor(code) { await ev(`new Promise((resolve,reject)=>{const end=Date.now()+5000;const poll=()=>{if(${code})return resolve();if(Date.now()>end)return reject(Error(${JSON.stringify(code)}));setTimeout(poll,20)};poll()})`); }
-async function check(name, code) { step = name; checks[name] = !!await ev(code); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
+async function check(name, code) { step = name; checks[name] = !!await ev(code); if (!checks[name]) diagnostics[name] = await ev("({headers:[...document.querySelectorAll('.process-summary')].map(e=>({hidden:e.hidden,text:e.textContent,initial:e===summaryReview.initialHeader,parent:e.parentElement.className,phase:e.parentElement.dataset.phase,summary:e.parentElement._processSummaryState?.phase})),turns:currentConv?.turns.map(t=>({runId:t.runId,status:t.status,taskRun:t.taskRun,outputStatus:t.output?.status,error:t.error})),errors:uiFixture.errors})"); save(); console.log(name + ': ' + checks[name]); if (!checks[name]) throw Error(name); }
 async function capture(name) { await settle(); fs.writeFileSync(path.join(out, name + '.png'), (await win.webContents.capturePage()).toPNG()); }
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeRequest((details, done) => done({ cancel: /^https?:/i.test(details.url) }));
@@ -58,11 +58,11 @@ app.whenReady().then(async () => {
   await check('ResumedToolsRemainBelowTheEarlierInterjection', 'headerAtStart()&&headers()[0]===summaryReview.initialHeader&&!!(document.querySelector(".message.user[data-supplement-id]").compareDocumentPosition(document.querySelector("[data-process-id=read-readme]"))&4)');
   await capture('resumed-header-at-task-start');
   await act(`summaryReview.emit({type:'job-done',exitCode:0,finalResult:{type:'result',subtype:'success',result:'## 检查报告\\n\\n已完成兼容性检查。'}});`); await waitFor('runs.size===0'); await settle();
-  await check('ResumedCompletionKeepsOneOriginalHeader', 'headerAtStart()&&headers()[0]===summaryReview.initialHeader&&headers()[0].textContent.includes("已完成")');
+  await check('ResumedCompletionKeepsOneOriginalHeader', 'headerAtStart()&&headers()[0]===summaryReview.initialHeader&&headers()[0].textContent.includes("已结束")&&headers()[0].parentElement._processSummaryState.phase==="complete"&&currentConv.turns.at(-1).status==="complete"&&currentConv.turns.at(-1).output.status==="complete"');
   await ev('loadConversation(summaryReview.id,null,{forceReload:true})'); await settle();
-  await check('RestoredResumeHistoryHasOneHeaderAtTheFirstQuestion', 'headerAtStart()&&headers()[0].textContent.includes("已完成")&&document.querySelectorAll(".message.user:not([data-supplement-id])").length===1');
+  await check('RestoredResumeHistoryHasOneHeaderAtTheFirstQuestion', 'headerAtStart()&&headers()[0].textContent.includes("已结束")&&document.querySelectorAll(".message.user:not([data-supplement-id])").length===1');
   await act(`$('input').value='开始下一项独立任务';$('btnSend').click();`); await waitFor('summaryReview.calls.length===3&&runs.size===1');
-  await check('IndependentTaskKeepsItsOwnHeaderAndClock', 'headers().length===2&&currentConv.turns.at(-1).taskRun.taskId!==summaryReview.taskId&&headers()[0].textContent.includes("已完成")&&headers()[1].textContent.includes("用时")');
+  await check('IndependentTaskKeepsItsOwnHeaderAndClock', 'headers().length===2&&currentConv.turns.at(-1).taskRun.taskId!==summaryReview.taskId&&headers()[0].textContent.includes("已结束")&&headers()[1].textContent.includes("用时")');
   await act(`summaryReview.emit({type:'job-done',exitCode:0,finalResult:{type:'result',subtype:'success',result:'独立任务已交付。'}});`); await waitFor('runs.size===0');
   // Older paused runs can lack activity/task metadata. A validated explicit
   // resume still supplies an initial presentation anchor without changing data.

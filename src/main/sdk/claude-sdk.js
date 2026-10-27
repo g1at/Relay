@@ -35,6 +35,7 @@ const { collectStructuredOutput } = require('./sdk-structured-output');
 const { RETRY_ENV, RETRY_CONTROL_FAILURE, SdkRetryGuard, interruptFailedConnection, closeFailedRetryQuery } = require('./sdk-retry-policy');
 const { LiveMcpReadiness, McpControlQueue } = require('../live/live-mcp-readiness');
 const { normalizeExecutionMode, executionToolPolicy, LiveExecutionModes, PLAN_INSTRUCTIONS } = require('../projects/execution-modes');
+const { LiveInputResponse } = require('../live/live-input-response');
 const { McpPermissionOverrides, requiresMcpApproval, mcpApprovalHook } = require('./sdk-mcp-permissions');
 const { validateFlagSettings, customPrompt } = require('./sdk-runtime-preferences');
 const { sanitizeNativeEvent } = require('./sdk-native-events');
@@ -52,7 +53,8 @@ const { SdkProcessSupervisor } = require('./sdk-process-supervisor');
 const { spawnManagedSdkProcess } = require('./sdk-process-tree');
 const { createRuntimeClosure } = require('./sdk-runtime-closure');
 const { bundledClaudeVersion } = require('./sdk-runtime-version');
-const { createRuntimeMcpMapper } = require('./host-stdio-mcp');
+const { createRuntimeMcpMapper, getMcpDiscoveryTools } = require('./host-stdio-mcp');
+const { createMcpDiscoveryHook } = require('./mcp-discovery-guidance');
 
 // The host supplies an environment adapter; each Query captures its prepared
 // launch once. Switching preferences cannot mutate an already running process.
@@ -75,6 +77,14 @@ async function prepareRuntimeOptions(options, onSpawn, onPrepared) {
     const environment = prepared.env && prepared.env.RELAY_AGENT_ENVIRONMENT || 'native';
     runtimeMcpMappers.set(prepared, createRuntimeMcpMapper(prepared.mcpServers,
       servers => adapter.prepareMcpServers(servers, { environment, resourceDir, prepared })));
+  }
+  const mapper = runtimeMcpMappers.get(prepared);
+  if (mapper || Object.keys(prepared.mcpServers || {}).length) {
+    const discovery = createMcpDiscoveryHook(() => mapper?.discoveryTools
+      ? mapper.discoveryTools() : getMcpDiscoveryTools(prepared.mcpServers));
+    prepared.hooks = { ...prepared.hooks, UserPromptSubmit: [
+      ...(prepared.hooks?.UserPromptSubmit || []), { hooks: [discovery] },
+    ] };
   }
   if (typeof prepared.spawnClaudeCodeProcess === 'function') {
     const spawnProcess = prepared.spawnClaudeCodeProcess;
@@ -682,6 +692,7 @@ function runOneShot({ prompt, files, onEvent, userMessageId, onUsage, onRuntimeP
 // 对应原来的 spawnLiveSession：一个进程服务多轮，避免每轮重连 MCP。
 // SDK 的流式输入要一个 AsyncIterable，这里用一个「推送队列」把它转成命令式的 push(text)。
 function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntimePrepared, ...rest }) {
+  const inputResponses = new LiveInputResponse();
   const mcpPermissions = new McpPermissionOverrides(rest.mcpPermissionOverrides);
   const observeUsage = createUsageObserver(onUsage, { inheritedCounters: !!rest.sessionId });
   const abortController = new AbortController();
@@ -834,6 +845,7 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
     onPending: code => console.warn('[sdk:process] %s', code),
     onClosed: native => {
       closed = true; finalized = true; queue.length = 0; wake();
+      inputResponses.close();
       observeUsage.close(); diagnosticLog?.close(); execution.close();
       if (executionError) { exitCode = -1; error = executionError; }
       if (abortController.signal.aborted) exitCode = -1;
@@ -856,6 +868,7 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
     },
     // 回收时撤回本地未发送内容，并通过 AbortController 结束 Query。只停当前轮用 interrupt。
     kill() {
+      inputResponses.close();
       // Observe the actual child even if the Query is stuck or already closed.
       // A repeated stop may retry a native signal that previously failed.
       nativeProcess.stop().then(finish);
@@ -873,8 +886,10 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
     },
     whenClosed() { return closure.whenClosed(); },
     whenReady,
+    whenInputResponse(inputId, options) { return inputResponses.wait(inputId, options); },
     // 常驻会话控制：中止当前轮但保留 Query/MCP，及运行时能力、模型与上下文控制。
     interrupt() {
+      inputResponses.cancel();
       retryGuard.cancel();
       queue.length = 0;
       inputGeneration++;
@@ -964,6 +979,7 @@ function createLiveSession({ onMessage, onExit, onUsage, onInitialized, onRuntim
         observeUsage(raw);
         const msg = execution.observe(await retryGuard.observe(TaskClock.normalizeEvent(raw)));
         if (!msg || finalized || abortController.signal.aborted) continue;
+        inputResponses.observe(msg);
         // 常驻会话与 one-shot 使用同一条拒绝清单脱敏边界，避免 tool_input/tool_use_id
         // 在 main 进程写入原始流事件日志后才被任务归一化层发现。
         try { onMessage(stripAttachmentImageData(annotateError(sanitizeNativeEvent(sanitizeResultPermissionDenials(msg))))); }
@@ -1062,37 +1078,67 @@ function runText({
   });
 }
 
-async function runStructured({ prompt, cwd, model, runtimeEnv, schema, validate, timeoutMs = 30000, onUsage, runtimePolicy }) {
+async function runStructured({ prompt, cwd, model, runtimeEnv, schema, validate, timeoutMs = 30000, onUsage, runtimePolicy, signal, maxTurns }) {
   if (!schema || typeof validate !== 'function') throw new Error('结构化调用需要 schema 和本地校验器');
   const abortController = new AbortController();
   const observe = createUsageObserver(onUsage);
-  const timer = setTimeout(() => { observe.stop(); abortController.abort(); }, timeoutMs);
-  let query;
+  let query, queryClosed = false, rejectCanceled;
+  const canceled = new Promise((_, reject) => { rejectCanceled = reject; });
+  canceled.catch(() => {});
+  const cancelError = () => Object.assign(new Error('结构化调用已取消或超时'), { name: 'AbortError', code: 'ABORT_ERR' });
+  const closeQuery = () => {
+    if (!query || queryClosed) return;
+    queryClosed = true;
+    try { Promise.resolve(query.close?.()).catch(() => {}); } catch (_) {}
+  };
+  const abort = () => {
+    observe.stop(); abortController.abort();
+    closeQuery();
+    rejectCanceled(cancelError());
+  };
+  const checkCanceled = () => {
+    if (abortController.signal.aborted || signal?.aborted) throw cancelError();
+  };
+  const timer = setTimeout(abort, timeoutMs);
+  signal?.addEventListener('abort', abort, { once: true });
   try {
-    const sdk = await loadSdk();
-    const built = buildOptions({ cwd, model, runtimeEnv, runtimePolicy, includeRelayInstructions: false,
-      abortController, tools: [], disallowAskUserQuestion: true,
-      canUseTool: async (name, input) => name === 'StructuredOutput'
-        ? { behavior: 'allow', updatedInput: input }
-        : { behavior: 'deny', message: '结构化辅助调用不执行其他工具。' },
-      outputFormat: { type: 'json_schema', schema } }, sdk);
-    // tools: [] disables built-ins only. Keep user/plugin MCP out of metadata
-    // generation without changing discovery for normal conversation Queries.
-    built.strictMcpConfig = true;
-    built.mcpServers = {};
-    built.hooks = { ...built.hooks, PreToolUse: [{ hooks: [async input => input.tool_name === 'StructuredOutput' ? {} : {
-      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
-        permissionDecisionReason: '结构化辅助调用不执行其他工具。' },
-    }] }] };
-    const options = await prepareRuntimeOptions(built);
-    options.persistSession = false;
-    query = sdk.query({ prompt, options });
-    observe.attach(query);
-    return await collectStructuredOutput(query, validate, observe);
+    checkCanceled();
+    return await Promise.race([(async () => {
+      const sdk = await loadSdk();
+      checkCanceled();
+      const built = buildOptions({ cwd, model, runtimeEnv, runtimePolicy, includeRelayInstructions: false,
+        abortController, tools: [], disallowAskUserQuestion: true,
+        canUseTool: async (name, input) => name === 'StructuredOutput'
+          ? { behavior: 'allow', updatedInput: input }
+          : { behavior: 'deny', message: '结构化辅助调用不执行其他工具。' },
+        outputFormat: { type: 'json_schema', schema } }, sdk);
+      // tools: [] disables built-ins only. Keep user/plugin MCP out of metadata
+      // generation without changing discovery for normal conversation Queries.
+      built.strictMcpConfig = true;
+      built.mcpServers = {};
+      built.hooks = { ...built.hooks, PreToolUse: [{ hooks: [async input => input.tool_name === 'StructuredOutput' ? {} : {
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+          permissionDecisionReason: '结构化辅助调用不执行其他工具。' },
+      }] }] };
+      const options = await prepareRuntimeOptions(built);
+      checkCanceled();
+      options.persistSession = false;
+      if (Number.isInteger(maxTurns) && maxTurns > 0) options.maxTurns = Math.min(16, maxTurns);
+      query = sdk.query({ prompt, options });
+      checkCanceled();
+      observe.attach(query);
+      const output = await collectStructuredOutput(query, validate, observe);
+      checkCanceled();
+      return output;
+    })(), canceled]);
+  } catch (error) {
+    checkCanceled();
+    throw error;
   } finally {
+    signal?.removeEventListener('abort', abort);
     observe.close();
     clearTimeout(timer);
-    if (query && typeof query.close === 'function') query.close();
+    closeQuery();
   }
 }
 

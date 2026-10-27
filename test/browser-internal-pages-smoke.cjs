@@ -6,14 +6,19 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs'), path = require('node:path'), http = require('node:http');
 const { pathToFileURL } = require('node:url');
 const { registerBrowserPanelIpc } = require('../src/main/browser/browser-panel-ipc');
+const { createBrowserPanelHost } = require('../src/main/browser/browser-panel-host');
+const { createBrowserMenuProbe } = require('./browser-menu-test-helper.cjs');
+const nativeMenu = createBrowserMenuProbe(require('electron'));
 const root = path.resolve(__dirname, '..'), out = path.join(root, '.codex-tmp', 'browser-internal-pages-smoke');
 fs.mkdirSync(out, { recursive: true });
-app.setPath('userData', path.join(out, 'profile'));
+app.setPath('userData', fs.mkdtempSync(path.join(out, 'profile-')));
 app.commandLine.appendSwitch('disable-background-networking');
 app.on('window-all-closed', () => {});
 let win, registry, server;
-const report = { results: {}, failures: [] };
-const deadline = setTimeout(() => { console.error('Browser renderer smoke timed out'); app.exit(1); }, 175000);
+const report = { startedAt: new Date().toISOString(), state: 'running', results: {}, failures: [] };
+const saveReport = () => fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(report, null, 2));
+saveReport();
+const deadline = setTimeout(() => { report.state='timeout'; report.failures.push('Browser renderer smoke timed out'); saveReport(); console.error('Browser renderer smoke timed out'); app.exit(1); }, 175000);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const evaluate = source => win.webContents.executeJavaScript(source);
 const act = source => evaluate(`(()=>{${source}\n})()`);
@@ -22,7 +27,7 @@ async function until(predicate, label = 'state') {
   while (Date.now() < end) { if (await (typeof predicate === 'function' ? predicate() : evaluate(predicate))) return; await pause(30); }
   throw Error('Timed out: ' + label);
 }
-async function check(name, predicate) { const value = typeof predicate === 'string' ? await evaluate(predicate) : await predicate; report.results[name] = !!value; if (!value) throw Error(name); }
+async function check(name, predicate) { const value = typeof predicate === 'string' ? await evaluate(predicate) : await predicate; report.results[name] = !!value; saveReport(); if (!value) throw Error(name); }
 const click = id => act(`document.getElementById(${JSON.stringify(id)}).click();`);
 async function settle() { await pause(400); await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))'); }
 async function capture(name) {
@@ -35,7 +40,7 @@ async function capture(name) {
     let captured = false;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        fs.writeFileSync(path.join(out, name + suffix + '.png'), (await surface.capturePage()).toPNG());
+        fs.writeFileSync(path.join(out, name + suffix + '.png'), (await Promise.race([surface.capturePage(),new Promise((_,reject)=>{const timer=setTimeout(()=>reject(Error('Native capture timed out')),3000);timer.unref();})])).toPNG());
         captured = true; break;
       } catch (error) {
         if (!String(error.message).includes('Current display surface not available')) throw error;
@@ -93,16 +98,31 @@ app.whenReady().then(async () => {
   fs.writeFileSync(entry, fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8').replace('<head>', '<head><base href="' + pathToFileURL(path.join(root, 'renderer') + path.sep).href + '"><script>' + fixture + seed + '(' + installManagementFixture.toString() + ')(' + JSON.stringify(base) + ');</script>'));
   win = new BrowserWindow({ width: 1200, height: 820, show: false, titleBarStyle: 'hidden', titleBarOverlay: { color: '#fafafa', symbolColor: '#343436', height: 35 }, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   win.webContents.on('console-message', (_e, level, message) => { if (level >= 3 && !message.includes('Content Security Policy')) report.failures.push('Renderer: ' + message); });
-  registry = registerBrowserPanelIpc({ ipcMain, getWindow: () => win, entryFile: entry });
+  registry = registerBrowserPanelIpc({ createHost(options) {
+    try {
+      const host = createBrowserPanelHost(options), invoke = host.invoke;
+      host.invoke = async input => {
+        try { return await invoke(input); }
+        catch (error) { (report.hostDiagnostics ||= []).push({ action: input.action, error: error.stack || String(error) }); throw error; }
+      };
+      return host;
+    } catch (error) { (report.hostDiagnostics ||= []).push({ phase: 'initialize', error: error.stack || String(error) }); throw error; }
+  }, ipcMain, getWindow: () => win, entryFile: entry, getElectron: nativeMenu.getElectron });
   await win.loadFile(entry); win.show();
   await until('!!window.relayWorkspacePanel&&providerRoutingLoaded&&!restoringActiveRuns');
 
   await click('btnWorkspacePanel');
   await act('document.querySelector("[data-workspace-create=browser]").click()');
   await until('relayWorkspacePanel.getState().tab==="browser"');
+  await check('browser page is owned by the current conversation', "relayWorkspacePanel.getState().tabs.filter(t=>t.kind==='browser').every(t=>t.ownerConversationId===relayConversationWorkspace().conversationId)");
   async function address(url) {await act(`document.getElementById('workspaceBrowserAddress').value=${JSON.stringify(url)};document.getElementById('workspaceBrowserNav').requestSubmit()`);}
   async function activate(id) {await act(`document.querySelector('[data-tab-id="${id}"] .workspace-tab').click()`);await settle();}
-  async function menu(label, site=false) {await click(site?'workspaceBrowserSiteInfo':'workspaceBrowserMore');await act(`Array.from(document.querySelectorAll('#workspaceBrowserMenu button')).find(button=>button.textContent===${JSON.stringify(label)}).click()`);await settle();}
+  async function menu(label, site=false) {
+    await click(site?'workspaceBrowserSiteInfo':'workspaceBrowserMore');
+    if (site) await act(`Array.from(document.querySelectorAll('#workspaceBrowserMenu button')).find(button=>button.textContent===${JSON.stringify(label)}).click()`);
+    else { await until(() => nativeMenu.isOpen(), 'native browser menu'); nativeMenu.select(label); }
+    await settle();
+  }
   async function section(name) {await act(`document.querySelector('.browser-internal-host:not([hidden]) [data-browser-internal-section="${name}"]').click()`);await settle();}
   const currentSection = name=>`document.querySelector('.browser-internal-host:not([hidden]) .relay-browser-settings')?.dataset.browserSection===${JSON.stringify(name)}`;
   await address(base+'/'); await until(async()=> (await browserState()).visible && (await browserState()).tab?.title==='项目交付预览'); await settle();
@@ -186,8 +206,10 @@ app.whenReady().then(async () => {
   await section('permissions');await capture('management-300-permissions');
   await click('workspaceMaximize');await settle();
   await check('maximized manager fills visible panel without horizontal overflow',`relayWorkspacePanel.getState().maximized&&(${inBounds})`);
+  const fillsManagementViewport=`(()=>{const host=document.querySelector('.browser-internal-host:not([hidden])'),page=host.querySelector('.browser-internal-page'),content=host.querySelector('.browser-internal-content'),settings=host.querySelector('.relay-browser-settings'),viewport=document.getElementById('workspaceBrowserViewport').getBoundingClientRect(),h=host.getBoundingClientRect(),p=page.getBoundingClientRect(),c=content.getBoundingClientRect(),s=settings.getBoundingClientRect(),style=getComputedStyle(content);return Math.abs(h.left-viewport.left)<1&&Math.abs(h.top-viewport.top)<1&&Math.abs(h.right-viewport.right)<1&&Math.abs(h.bottom-viewport.bottom)<1&&Math.abs(p.left-h.left)<1&&Math.abs(p.width-host.clientWidth)<1&&Math.abs(s.left-c.left-parseFloat(style.paddingLeft))<1&&Math.abs(c.right-s.right-parseFloat(style.paddingRight))<1&&s.width>960})()`;
+  await check('internal settings fill the viewport and use its full content column',fillsManagementViewport);
   await section('general');await capture('management-maximized');
-  await section('history');await capture('management-maximized-history');
+  await section('history');await check('internal history uses the same full content column',fillsManagementViewport);await capture('management-maximized-history');
   // Traverse alternating native and local navigation segments in one tab.
   await activate(originalId);await address(base+'/');await until(async()=> (await browserState()).visible && (await browserState()).tab?.url===base+'/');
   await address('relay://browser/history');await until(currentSection('history'));
@@ -248,11 +270,11 @@ app.whenReady().then(async () => {
   await until(currentSection('history'));await settle();await until(async()=> !(await browserState()).visible);
   await check('management navigation wins over a pending native create reply',`relayWorkspacePanel.getState().tabs.length===${localRaceCount}&&relayWorkspacePanel.getState().activeId===${JSON.stringify(localRaceId)}&&document.getElementById('workspaceBrowserAddress').value==='relay://browser/history'`);
   await check('all management operations leave conversation history and model untouched',`!currentConv&&!uiFixture.calls.includes('history.save')&&!uiFixture.calls.includes('runClaude')`);
-}).catch(async error => { report.failures.push(error.stack || error.message); try { report.chrome = await evaluate('({address:document.getElementById("workspaceBrowserAddress").value,title:document.getElementById("workspaceBrowserAddress").title,active:document.activeElement.id,view:document.querySelector(".app").dataset.view})'); report.browser = await browserState(); report.native = nativeViews().map(v=>({url:v.webContents.getURL(),historyLength:v.webContents.navigationHistory.length(),back:v.webContents.navigationHistory.canGoBack()})); report.geometry = await evaluate('({width:innerWidth,app:document.querySelector(".app").getBoundingClientRect().toJSON(),panel:document.getElementById("workspacePanel").getBoundingClientRect().toJSON(),state:relayWorkspacePanel.getState()})'); await capture('failure'); } catch (_) {} }).finally(async () => {
+}).catch(async error => { report.failures.push(error.stack || error.message); report.state='failed'; saveReport(); try { report.chrome = await evaluate('({address:document.getElementById("workspaceBrowserAddress").value,title:document.getElementById("workspaceBrowserAddress").title,active:document.activeElement.id,view:document.querySelector(".app").dataset.view})'); report.browser = await browserState(); report.native = nativeViews().map(v=>({url:v.webContents.getURL(),historyLength:v.webContents.navigationHistory.length(),back:v.webContents.navigationHistory.canGoBack()})); report.geometry = await evaluate('({width:innerWidth,app:document.querySelector(".app").getBoundingClientRect().toJSON(),panel:document.getElementById("workspacePanel").getBoundingClientRect().toJSON(),state:relayWorkspacePanel.getState()})'); await capture('failure'); } catch (_) {} }).finally(async () => {
   clearTimeout(deadline);
   if (registry) registry.dispose();
   if (win && !win.isDestroyed()) win.destroy();
   if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
-  fs.writeFileSync(path.join(out, 'result.json'), JSON.stringify(report, null, 2));
+  report.state=report.failures.length?'failed':'complete'; report.finishedAt=new Date().toISOString(); saveReport();
   console.log(JSON.stringify(report)); app.exit(report.failures.length ? 1 : 0);
 });

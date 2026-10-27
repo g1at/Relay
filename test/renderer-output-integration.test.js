@@ -167,6 +167,16 @@ test('legacy display isolates protocol-shaped ranges without rewriting unrelated
   assert.match(notice.assistant, /任务已完成/);
 });
 
+test('history display and search use the same confirmed answer when legacy and structured fields disagree', () => {
+  const h = harness();
+  const turn = { assistant: 'old draft shown before this fix', output: { status: 'complete', final: 'confirmed searchable answer' } };
+  assert.equal(h.context.savedAssistantDisplay(turn).text, 'confirmed searchable answer');
+  for (const output of [{ status: 'complete', final: '' }, { status: 'canceled', final: 'withdrawn answer' }]) {
+    assert.equal(h.context.savedAssistantDisplay({ ...turn, output }).text, '');
+  }
+  assert.equal(turn.assistant, 'old draft shown before this fix', 'opening history does not rewrite the saved record');
+});
+
 test('a natural final answer winning a pause race is retained and never marked paused', async () => {
   const h = harness(); h.send(full('final', 'authoritative answer'));
   h.run.pauseRequested = true; h.run.abortRequested = true;

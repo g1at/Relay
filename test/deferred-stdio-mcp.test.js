@@ -87,6 +87,23 @@ test('first search connects once, keeps original initialization data and publish
   await f.search(4); assert.equal(f.children.length, 1); assert.equal(f.response(4).result.content.length, 1);
 });
 
+test('recreated bridges retain discovery identity but require fresh business-tool selection', async t => {
+  const first = fixture(t), resumed = fixture(t);
+  await first.initialize(); await first.search();
+  assert.ok(first.server.toolCatalog.list().some(item => item.name === 'echo'));
+  await first.server.close();
+  await resumed.initialize();
+  assert.equal(resumed.server.discoveryName, first.server.discoveryName);
+  assert.deepEqual(resumed.response(2).result.tools.map(item => item.name), [first.server.discoveryName]);
+  assert.equal(resumed.children.length, 0);
+  await resumed.search();
+  await resumed.server.receive({ jsonrpc: '2.0', id: 9, method: 'tools/call',
+    params: { name: 'echo', arguments: { value: 'after resume' } } });
+  await tick();
+  assert.equal(resumed.calls.length, 1);
+  assert.equal(resumed.calls[0].params.arguments.value, 'after resume');
+});
+
 test('original business names and arguments pass unchanged exactly once after caller approval', async t => {
   const f = fixture(t); await f.initialize(); await f.search();
   const params = { name: 'echo', arguments: { value: 'original payload', nested: { keys: ['untouched'] } }, _meta: { progressToken: 'original' } };

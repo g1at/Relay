@@ -6,6 +6,7 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const { createProjectStore } = require('../src/main/projects/project-store');
 const workspaces = require('../src/main/projects/conversation-workspaces');
 const { mergeSupplementHistory } = require('../src/main/live/live-supplement-input');
+const { protectTurnDeliverables } = require('../src/main/app/turn-delivery-service');
 const { createAgentEnvironment } = require('../src/main/sdk/agent-environment');
 const { createGeneralPreferences, registerGeneralPreferencesIpc, normalizePreferences } = require('../src/main/app/general-preferences');
 const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
@@ -27,7 +28,7 @@ function fixture(t) {
     persistConversationRecord:persist,readHistoryIndex:()=>[...records.values()].map(clone),readAppSettings:()=>({}),
     ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},shell:{openPath:async()=>''},liveSessions,liveTombstones,
     taskLedger:{list:()=>ledger},RUN_STATES:{QUEUED:'queued'},killLiveSession:(sess,reason)=>{kills.push(reason);liveSessions.delete(sess.convId);},
-    mergeSupplementHistory,TITLE_MAX_W:64,truncateByWidth:value=>value,genId:()=>ids[0],
+    mergeSupplementHistory,protectTurnDeliverables,TITLE_MAX_W:64,truncateByWidth:value=>value,genId:()=>ids[0],
   };
   require('./helpers/conversation-permissions-fixture')(context);
   vm.createContext(context);

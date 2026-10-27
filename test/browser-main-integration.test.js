@@ -28,7 +28,7 @@ function fixture(t) {
   t.after(() => fs.rmSync(cwd, { force: true, recursive: true }));
   const calls = [], pauses = [];
   const context = vm.createContext({
-    fs, os, AbortController, console, MEMORY_DIR: path.join(cwd, 'memory'), relayMemoryStore: {},
+    fs, os, AbortController, console, MEMORY_DIR: path.join(cwd, 'memory'), relayMemoryStore: {}, memoryRetriever: {}, isMemoryPinned: () => false,
     createMemoryRuntime: () => ({ hook: async () => ({}), factory: () => ({}) }),
     createBrowserToolFactory,
     browserPanelTools: {

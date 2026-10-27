@@ -57,6 +57,32 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function timestampMs(value) {
+  const parsed = typeof value === 'number' ? new Date(value).getTime()
+    : typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// Recovery is detected in a new process, potentially days after execution
+// stopped. Retain the last durable activity before terminal() advances the
+// ledger timestamps. Health-monitor writes are observations, not SDK activity.
+function lastActiveAt(run) {
+  if (run.state === RUN_STATES.QUEUED && !run.startedAt) {
+    const created = timestampMs(run.createdAt);
+    return created == null ? null : new Date(created).toISOString();
+  }
+  const orchestration = run.metadata?.orchestration || {};
+  const healthCheck = timestampMs(orchestration.lastHealthCheckAt);
+  const activity = [orchestration.lastActivityAt, run.startedAt].map(timestampMs);
+  for (const value of [run.lastEventAt, run.progress?.lastEventAt]) {
+    const event = timestampMs(value);
+    if (event != null && (healthCheck == null || event > healthCheck)) activity.push(event);
+  }
+  const known = activity.filter(value => value != null);
+  const latest = known.length ? Math.max(...known) : timestampMs(run.createdAt);
+  return latest == null ? null : new Date(latest).toISOString();
+}
+
 // The temporary file lives beside the destination, so rename remains an atomic same-volume move.
 // Unique names avoid collisions between a stale crash file and a new Relay process on Windows.
 function writeJsonAtomic(file, value) {
@@ -120,6 +146,7 @@ class TaskLedger {
     // 正常运行只读内存中的权威快照；磁盘 run 文件仍是崩溃恢复来源。
     // 旧实现每次 list() 都同步解析全部文件、每次进展都重写完整 index，长任务会阻塞主进程。
     this._runs = new Map();
+    this._runsByState = new Map();
     this._indexSignature = null;
     this._indexWriteTimer = null;
     this._indexDirty = false;
@@ -209,9 +236,24 @@ class TaskLedger {
     } catch (_) { return null; }
   }
 
+  _cacheRun(run) {
+    const previous = this._runs.get(run.runId);
+    if (previous) this._runsByState.get(previous.state)?.delete(run.runId);
+    this._runs.set(run.runId, run);
+    let state = this._runsByState.get(run.state);
+    if (!state) this._runsByState.set(run.state, state = new Map());
+    state.set(run.runId, run);
+  }
+
+  _replaceRuns(runs) {
+    this._runs = new Map();
+    this._runsByState = new Map();
+    for (const run of runs) this._cacheRun(run);
+  }
+
   _bootstrapCache() {
     const runs = this._scanRuns();
-    this._runs = new Map(runs.map((run) => [run.runId, run]));
+    this._replaceRuns(runs);
     this._repairIndexIfNeeded(runs);
     this._indexSignature = this._statIndex();
   }
@@ -221,7 +263,7 @@ class TaskLedger {
     if (signature === this._indexSignature) return;
     // 只有外部修改/损坏 index 才走全盘恢复；Relay 自己的每次运行更新不会触发扫描。
     const runs = this._scanRuns();
-    this._runs = new Map(runs.map((run) => [run.runId, run]));
+    this._replaceRuns(runs);
     this._repairIndexIfNeeded(runs);
     this._indexSignature = this._statIndex();
   }
@@ -242,7 +284,7 @@ class TaskLedger {
   }
 
   _updateIndex(run) {
-    this._runs.set(run.runId, jsonClone(run));
+    this._cacheRun(jsonClone(run));
     this._indexDirty = true;
   }
 
@@ -363,18 +405,22 @@ class TaskLedger {
     const file = this._runPath(runId);
     if (!fs.existsSync(file)) return null;
     const run = this._readRunFile(file);
-    this._runs.set(run.runId, run);
+    this._cacheRun(run);
     return jsonClone(run);
   }
 
   list(filters = {}) {
     this._refreshCacheIfIndexChanged();
-    let runs = [...this._runs.values()];
     const requestedStates = filters.states || filters.state;
-    if (requestedStates != null) {
-      const states = new Set(Array.isArray(requestedStates) ? requestedStates : [requestedStates]);
-      runs = runs.filter((run) => states.has(run.state));
+    let states = requestedStates == null ? null
+      : new Set(Array.isArray(requestedStates) ? requestedStates : [requestedStates]);
+    if (states == null && typeof filters.terminal === 'boolean') {
+      states = new Set([...this._runsByState.keys()].filter(state => isTerminalState(state) === filters.terminal));
     }
+    // Scheduling repeatedly asks for a handful of active/queued records. Do
+    // not scan thousands of completed runs for each resource admission.
+    let runs = states == null ? [...this._runs.values()]
+      : [...states].flatMap(state => [...(this._runsByState.get(state)?.values() || [])]);
     if (filters.terminal === true) runs = runs.filter((run) => isTerminalState(run.state));
     if (filters.terminal === false) runs = runs.filter((run) => !isTerminalState(run.state));
     if (filters.kind != null) runs = runs.filter((run) => run.kind === filters.kind);
@@ -472,6 +518,16 @@ class TaskLedger {
     const supplied = isPlainObject(details) ? details : {};
     const next = mergeObjects(current, supplied);
     const at = this._timestamp(options.at || supplied.endedAt);
+    const interruption = supplied.result?.error?.code;
+    if (terminalState === RUN_STATES.INTERRUPTED
+      && (interruption === 'APP_RESTART' || interruption === 'APP_EXIT')) {
+      // A controlled exit has a known stop boundary. A lost, never-started
+      // queue item has no active interval to charge, even on controlled exit.
+      const neverStarted = current.state === RUN_STATES.QUEUED && !current.startedAt;
+      next.recovery = mergeObjects(next.recovery || {}, {
+        lastActiveAt: interruption === 'APP_EXIT' && !neverStarted ? at : lastActiveAt(current),
+      });
+    }
     next.schemaVersion = RUN_SCHEMA_VERSION;
     next.runId = current.runId;
     next.revision = current.revision + 1;
@@ -507,6 +563,8 @@ class TaskLedger {
         result.unchangedTerminal.push(run);
         continue;
       }
+      // A durable external executor owns recovery for these runs.
+      if (typeof options.shouldRetain === 'function' && options.shouldRetain(run)) continue;
       const neverStarted = run.state === RUN_STATES.QUEUED
         && !run.startedAt
         && (!run.executorState || run.executorState === EXECUTOR_STATES.IDLE);
@@ -565,6 +623,7 @@ class TaskLedger {
       try {
         fs.unlinkSync(this._runPath(run.runId));
         this._runs.delete(run.runId);
+        this._runsByState.get(run.state)?.delete(run.runId);
         removed.push(run.runId);
       } catch (error) {
         // 删除失败时继续保留权威文件，不能让 index 假装它已不存在。
@@ -576,7 +635,7 @@ class TaskLedger {
 
     try {
       if (removed.length) {
-        this._runs = new Map(retained.map((run) => [run.runId, run]));
+        this._replaceRuns(retained);
         this._indexDirty = true;
       }
       // No retention changes means the durable index remains valid. Still
@@ -589,7 +648,7 @@ class TaskLedger {
 
   rebuildIndex() {
     const runs = this._scanRuns();
-    this._runs = new Map(runs.map((run) => [run.runId, run]));
+    this._replaceRuns(runs);
     this._indexDirty = true;
     this._flushIndex();
     return jsonClone([...runs].sort(compareRunsNewestFirst).map(runMeta));

@@ -56,7 +56,8 @@
 .set-cat[data-cat="conversation"] > :is(#conversationPreferencesSection, #toolRulesPreferencesSection) { margin-top: 20px; }
 .rgp-row { padding-block: 13px; }
 .rgp-controls { flex-shrink: 0; }
-.rgp-controls:has(.rgp-path) { flex-wrap: wrap; }
+.rgp-controls:has(.rgp-path) { flex-wrap: nowrap; }
+.rgp-controls > .rgp-path { flex: 1 1 0; }
 .set-cat .rgp-toggle[aria-checked="true"] { background: var(--accent); }
 .set-cat .rgp-toggle::after { background: #fff; }
 #memoryPreferencesSection { margin-top: 24px; }

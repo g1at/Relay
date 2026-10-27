@@ -7,6 +7,8 @@ function createHistoryStore({
   getUserDataDir, recoverLegacyOutput, canWrite = () => true,
 }) {
   let HISTORY_DIR = null;
+  let indexCache = null;
+  let indexNeedsRebuild = false;
   function getHistoryDir() {
     if (!HISTORY_DIR) HISTORY_DIR = path.join(getUserDataDir(), 'history');
     if (!fs.existsSync(HISTORY_DIR)) { try { fs.mkdirSync(HISTORY_DIR, { recursive: true }); } catch (_) {} }
@@ -40,18 +42,63 @@ function createHistoryStore({
     };
   }
 
-  function readHistoryIndex() {
-    try {
-      const d = JSON.parse(fs.readFileSync(historyIndexPath(), 'utf8'));
-      if (d && Array.isArray(d.items)) return d.items;
-    } catch (e) { console.warn('[history] 索引读取失败,将重建: %s', e.message); }
-    return rebuildHistoryIndex();   // 缺失/损坏 → 扫正文重建(空库返回 [])
+  function indexSignature() {
+    const stat = fs.statSync(historyIndexPath(), { bigint: true });
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
   }
 
-  function writeHistoryIndex(items) {
-    try { writeJsonAtomic(historyIndexPath(), { version: 2, items }); }
-    catch (e) { console.error('[history] 索引写入失败:', e.message); }
+  function indexSnapshot(items, signature) {
+    const positions = new Map();
+    for (let i = 0; i < items.length; i++) if (!positions.has(items[i]?.id)) positions.set(items[i]?.id, i);
+    return { items, serialized: null, signature, positions };
   }
+
+  function readIndexSnapshot() {
+    if (indexNeedsRebuild) {
+      const items = rebuildHistoryIndex();
+      return indexCache || indexSnapshot(items, null);
+    }
+    try {
+      const signature = indexSignature();
+      if (indexCache?.signature === signature) return indexCache;
+      const data = JSON.parse(fs.readFileSync(historyIndexPath(), 'utf8'));
+      if (!data || !Array.isArray(data.items)) throw new Error('历史索引格式无效');
+      indexCache = indexSnapshot(data.items, signature);
+      return indexCache;
+    } catch (e) {
+      indexCache = null;
+      console.warn('[history] 索引读取失败,将重建: %s', e.message);
+    }
+    const items = rebuildHistoryIndex(); // 正文仍是索引缺失/损坏时的权威来源。
+    return indexCache || indexSnapshot(items, null);
+  }
+
+  function readHistoryIndex() {
+    // Callers receive detached metadata; only the private snapshot is cached.
+    // A filesystem signature preserves visibility of external/rollback writes.
+    const snapshot = readIndexSnapshot();
+    if (snapshot.serialized === null) snapshot.serialized = JSON.stringify(snapshot.items);
+    return JSON.parse(snapshot.serialized);
+  }
+
+  function commitHistoryIndex(items, owned = false) {
+    try {
+      // Internal updates already own their metadata. Detach public inputs once,
+      // without cloning every unchanged entry on each conversation save.
+      const detached = owned ? items : JSON.parse(JSON.stringify(items));
+      writeJsonAtomic(historyIndexPath(), { version: 2, items: detached });
+      indexCache = indexSnapshot(detached, indexSignature());
+      indexNeedsRebuild = false;
+    } catch (e) {
+      indexCache = null;
+      // A conversation body may already be committed while the old index is
+      // still valid JSON. Repair from bodies on the next read after a failure.
+      indexNeedsRebuild = true;
+      console.error('[history] 索引写入失败:', e.message);
+    }
+  }
+
+  function writeHistoryIndex(items) { commitHistoryIndex(items); }
 
   function rebuildHistoryIndex() {
     const items = [];
@@ -84,10 +131,14 @@ function createHistoryStore({
   function persistConversationRecord(conv) {
     if (!canWrite(conv?.id)) return false;
     writeJsonAtomic(convFilePath(conv.id), conv);
-    const items = readHistoryIndex();
-    const i = items.findIndex((m) => m.id === conv.id);
-    if (i >= 0) items[i] = convMeta(conv); else items.unshift(convMeta(conv));
-    writeHistoryIndex(items);
+    const snapshot = readIndexSnapshot();
+    const i = snapshot.positions.get(conv.id), metadata = JSON.parse(JSON.stringify(convMeta(conv)));
+    // Output/parameter edits often leave sidebar metadata unchanged. The body
+    // is already committed; avoid rewriting the whole library for those edits.
+    if (i !== undefined && JSON.stringify(snapshot.items[i]) === JSON.stringify(metadata)) return;
+    const items = snapshot.items.slice();
+    if (i !== undefined) items[i] = metadata; else items.unshift(metadata);
+    commitHistoryIndex(items, true);
   }
 
   function removeConversationRecord(id, { loadRecord = true } = {}) {
@@ -110,7 +161,24 @@ function createHistoryStore({
     // Both operations are synchronous: another history write cannot interleave
     // with the removal or its rollback. Filesystem workspaces are independent.
     writeJsonAtomic(historyIndexPath(), { version: 2, items: items.filter(item => !sameId(item.id)) });
-    try { fs.rmSync(convFilePath(id), { force: true }); }
+    try {
+      // The disposable search projection contains a copy of visible messages.
+      // Remove it before the body, so a cache cleanup failure can still restore
+      // the index without losing the original conversation. A concurrent worker
+      // also checks the body after installing a projection and removes late writes.
+      const searchDir = path.join(getHistoryDir(), '.search-index');
+      let searchStat;
+      try { searchStat = fs.lstatSync(searchDir); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (searchStat?.isDirectory() && !searchStat.isSymbolicLink()) {
+        fs.rmSync(path.join(searchDir, id + '.json'), { force: true });
+        for (const name of fs.readdirSync(searchDir)) {
+          const temporary = /^\.([a-z0-9][a-z0-9_-]{0,127})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.tmp$/i.exec(name);
+          if (temporary && sameId(temporary[1])) fs.rmSync(path.join(searchDir, name), { force: true });
+        }
+      }
+      fs.rmSync(convFilePath(id), { force: true });
+    }
     catch (error) {
       try { writeJsonAtomic(historyIndexPath(), { version: 2, items }); }
       catch (rollbackError) {

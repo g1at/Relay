@@ -3,6 +3,7 @@ const fs = require('node:fs'), vm = require('node:vm'), os = require('node:os'),
 const test = require('node:test'), assert = require('node:assert/strict');
 const { MemoryStore } = require('../src/main/memory/memory-store');
 const { createMemoryRuntime } = require('../src/main/memory/memory-runtime');
+const { createMemoryRetriever } = require('../src/main/memory/memory-retrieval');
 const source = fs.readFileSync(path.join(__dirname, '../src/main/bootstrap.js'), 'utf8');
 const start = source.indexOf('function buildSdkParams('), end = source.indexOf('function runRelayText(', start);
 function setup(t) {
@@ -13,6 +14,7 @@ function setup(t) {
   let currentContext;
   const context = vm.createContext({
     fs, os, MEMORY_DIR: dir, relayMemoryStore: store,
+    memoryRetriever: createMemoryRetriever({ store }), isMemoryPinned: () => false,
     getSdkRuntimeStorage: () => require('../src/main/sdk/sdk-runtime-storage').createSdkRuntimeStorage({ dataDir: cwd }),
     createMemoryRuntime: options => { currentContext = options.context; return createMemoryRuntime(options); },
     readMemoryUsage: () => ({}), flushMemoryUsage() {}, rebuildMemoryIndex() {}, notifySkillUsageUpdated() {},

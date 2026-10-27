@@ -7,20 +7,20 @@
 
   const STORAGE_KEY = 'relay.keyboard.shortcuts.v1';
   const ACTIONS = Object.freeze([
-    { id: 'newChat', label: '新对话', description: '开始一个新的对话', group: '对话', defaults: ['Mod+N', 'Mod+Shift+O'] },
-    { id: 'search', label: '搜索对话', description: '查找历史对话', group: '对话', defaults: ['Mod+K'] },
-    { id: 'focusComposer', label: '聚焦输入框', description: '将光标移到当前对话输入框', group: '对话', defaults: ['Mod+L'] },
-    { id: 'stopGeneration', label: '停止当前任务', description: '停止当前对话中正在执行的任务', group: '对话', defaults: ['Mod+Shift+X'] },
-    { id: 'toggleSidebar', label: '展开或收起侧边栏', description: '切换侧边栏显示状态', group: '导航', defaults: ['Mod+B'] },
-    { id: 'settings', label: '打开设置', description: '前往 Relay 设置', group: '导航', defaults: ['Mod+Comma'] },
-    { id: 'shortcuts', label: '键盘快捷键', description: '查看与自定义键盘快捷键', group: '导航', defaults: ['Mod+Shift+K'] },
-    { id: 'plugins', label: '打开插件', description: '管理技能、Agent 和 MCP', group: '导航', defaults: [] },
-    { id: 'library', label: '打开资料库', description: '查看资料库内容', group: '导航', defaults: [] },
-    { id: 'scheduler', label: '打开定时任务', description: '查看与管理定时任务', group: '导航', defaults: [] },
-    { id: 'newBrowser', label: '新建浏览器', description: '在右侧工作区新建一个浏览器标签', group: '右侧工作区', defaults: ['Mod+Alt+1'] },
-    { id: 'openFiles', label: '打开文件', description: '打开当前工作目录的文件列表', group: '右侧工作区', defaults: ['Mod+Alt+2'] },
-    { id: 'newTerminal', label: '新建终端', description: '在当前工作目录新建独立终端标签', group: '右侧工作区', defaults: ['Mod+Alt+3'] },
-    { id: 'openReview', label: '打开审查', description: '查看当前工作目录中的文件变更', group: '右侧工作区', defaults: ['Mod+Alt+4'] },
+    { id: 'newChat', label: '新对话', description: '', group: '对话', defaults: ['Mod+N', 'Mod+Shift+O'] },
+    { id: 'search', label: '搜索对话', description: '', group: '对话', defaults: ['Mod+K'] },
+    { id: 'focusComposer', label: '聚焦输入框', description: '', group: '对话', defaults: ['Mod+L'] },
+    { id: 'stopGeneration', label: '停止当前任务', description: '仅当前对话', group: '对话', defaults: ['Mod+Shift+X'] },
+    { id: 'toggleSidebar', label: '展开或收起侧边栏', description: '', group: '导航', defaults: ['Mod+B'] },
+    { id: 'settings', label: '打开设置', description: '', group: '导航', defaults: ['Mod+Comma'] },
+    { id: 'shortcuts', label: '键盘快捷键', description: '', group: '导航', defaults: ['Mod+Shift+K'] },
+    { id: 'plugins', label: '打开插件', description: '技能、Agent、MCP', group: '导航', defaults: [] },
+    { id: 'library', label: '打开资料库', description: '', group: '导航', defaults: [] },
+    { id: 'scheduler', label: '打开定时任务', description: '', group: '导航', defaults: [] },
+    { id: 'newBrowser', label: '新建浏览器', description: '', group: '右侧工作区', defaults: ['Mod+Alt+1'] },
+    { id: 'openFiles', label: '打开文件', description: '当前工作目录的文件列表', group: '右侧工作区', defaults: ['Mod+Alt+2'] },
+    { id: 'newTerminal', label: '新建终端', description: '使用当前工作目录', group: '右侧工作区', defaults: ['Mod+Alt+3'] },
+    { id: 'openReview', label: '打开审查', description: '当前工作目录的文件变更', group: '右侧工作区', defaults: ['Mod+Alt+4'] },
   ].map(item => Object.freeze({ ...item, defaults: Object.freeze(item.defaults) })));
   const ACTION_IDS = new Set(ACTIONS.map(item => item.id));
   const MODIFIERS = ['Mod', 'Ctrl', 'Meta', 'Alt', 'Shift'];

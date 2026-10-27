@@ -136,6 +136,60 @@ test('standalone unpacked helpers can load their production dependencies without
   }
 });
 
+test('every unpacked application entry keeps its static local dependency closure outside ASAR', async t => {
+  const f = fixture(t);
+  const unpackFilter = f.unpackMatcher.createFilter();
+  const entries = new Set();
+  const isScript = file => /\.[cm]?js$/.test(file);
+  const relative = file => path.relative(project, file).replace(/\\/g, '/');
+  const visit = file => {
+    const stat = fs.statSync(file);
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(file)) {
+        if (child !== 'node_modules' && child !== '.git') visit(path.join(file, child));
+      }
+    } else if (isScript(file) && unpackFilter(path.join(f.root, relative(file)), stat)) entries.add(file);
+  };
+  // Discover configured application entries, including future globbed roots.
+  // Native dependency packages have separate packaging checks above.
+  for (const rule of manifest.build.asarUnpack) {
+    if (rule.startsWith('!') || rule.split('/').includes('node_modules')) continue;
+    const glob = rule.search(/[*?\[\]{}]/);
+    const base = glob === -1 ? rule : rule.slice(0, glob).replace(/[^/]*$/, '');
+    visit(path.join(project, base));
+  }
+  assert.ok(entries.size > 0, 'at least one production unpacked application entry must be checked');
+  const dependencies = new Map();
+  const collect = (file, chain) => {
+    if (dependencies.has(file)) return;
+    dependencies.set(file, chain);
+    if (!isScript(file)) return;
+    // Follow literal relative require/require.resolve references without loading
+    // worker entry points, which would otherwise start real services in tests.
+    const source = fs.readFileSync(file, 'utf8');
+    const localRequires = /\brequire(?:\.resolve)?\s*\(\s*(['"])(\.[^'"\r\n]*)\1\s*\)/g;
+    for (const match of source.matchAll(localRequires)) {
+      const resolved = createRequire(file).resolve(match[2]);
+      const name = relative(resolved);
+      assert.ok(!name.startsWith('../') && !path.isAbsolute(name), 'dependency leaves the application: ' + chain.join(' -> ') + ' -> ' + match[2]);
+      collect(resolved, [...chain, name]);
+    }
+  };
+  for (const entry of entries) collect(entry, [relative(entry)]);
+  // Copy dependencies even when omitted from asarUnpack: that reproduces the
+  // actual failure where a file ships inside ASAR but ordinary Node cannot load it.
+  for (const file of dependencies.keys()) write(path.join(f.root, relative(file)), fs.readFileSync(file));
+  await new AsarPackager(f.root, f.resources, { smartUnpack: false }, unpackFilter)
+    .pack(await f.collect(), f.packager);
+  const archive = path.join(f.resources, 'app.asar');
+  for (const [file, chain] of dependencies) {
+    const name = relative(file);
+    const reason = 'dependency must be available outside ASAR: ' + chain.join(' -> ');
+    assert.equal(asar.statFile(archive, path.normalize(name)).unpacked, true, reason);
+    assert.deepEqual(fs.readFileSync(path.join(archive + '.unpacked', name)), fs.readFileSync(file), reason);
+  }
+});
+
 test('packaged draft client resolves and runs the unpacked worker with its complete dependency set', async t => {
   const f = fixture(t);
   const files = ['src/main/skills/skill-draft-client.js', 'src/main/skills/skill-draft-worker.js', 'src/main/skills/skill-draft-service.js', 'src/main/sdk/sdk-native-events.js', 'src/main/app/paths.js'];

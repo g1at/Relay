@@ -19,6 +19,7 @@ function imageFixture({ blocked = false, lease = null } = {}) {
   vm.runInNewContext(source.slice(begin, end), {
     ipcMain: { handle(name, callback) { assert.equal(name, 'image:generate'); handler = callback; } },
     crypto: { randomUUID: () => 'generated-run' },
+    resolveMediaRequest: opts => ({ model: opts.model || 'fixture-image', mediaKind: 'image' }),
     assertConversationAvailable(id) { assert.equal(id, 'conversation'); if (state.blocked) throw unavailable(); },
     createShadowTaskRun() { counters.created++; return { runId: 'image-run' }; },
     taskLedger: null, TASK_EVENT_EPOCH: 'synthetic-epoch', RUN_STATES: { QUEUED: 'queued' }, compactText: text => text,

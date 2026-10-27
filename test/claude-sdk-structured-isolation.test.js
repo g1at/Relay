@@ -7,10 +7,12 @@ const sdkPath = path.join(__dirname, '../src/main/sdk/claude-sdk.js');
 const sdkSource = fs.readFileSync(sdkPath, 'utf8');
 const schema = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false };
 const validate = value => ({ success: typeof value?.label === 'string', data: value });
-function harness() {
-  const calls = { options: null, closed: 0 };
+function harness({ query: makeQuery } = {}) {
+  const calls = { options: null, closed: 0, queries: 0 };
   const fixtureSdk = { query({ options }) {
+    calls.queries++;
     calls.options = options;
+    if (makeQuery) return makeQuery(options, calls);
     return { close() { calls.closed++; }, async initializationResult() { return {}; }, async *[Symbol.asyncIterator]() {
       yield { type: 'result', subtype: 'success', is_error: false, structured_output: { label: 'synthetic' } };
     } };
@@ -94,4 +96,95 @@ test('late environment preparation cannot publish ownership after session cancel
   await started; const closed = session.kill(); release(); await closed;
   assert.equal(calls, 0);
   assert.equal(h.calls.options, null);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const canceled = error => error?.name === 'AbortError' && error.code === 'ABORT_ERR';
+
+test('structured calls canceled before starting never prepare an environment or query', async () => {
+  const h = harness(), controller = new AbortController(); let preparations = 0;
+  h.sdk.configureRuntimeEnvironment({ prepareOptions: async options => { preparations++; return options; } });
+  controller.abort();
+  await assert.rejects(h.sdk.runStructured({ ...inputs, signal: controller.signal }), canceled);
+  assert.equal(preparations, 0);
+  assert.equal(h.calls.queries, 0);
+});
+
+test('structured cancellation returns before stalled preparation and prevents a late query', async () => {
+  const h = harness(), controller = new AbortController(), started = deferred(), gate = deferred();
+  h.sdk.configureRuntimeEnvironment({ prepareOptions: async options => { started.resolve(); await gate.promise; return options; } });
+  const running = h.sdk.runStructured({ ...inputs, signal: controller.signal });
+  await started.promise;
+  controller.abort();
+  let settled = false;
+  const rejected = assert.rejects(running, canceled).then(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  const settledBeforeRelease = settled;
+  gate.resolve();
+  await rejected;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settledBeforeRelease, true, 'cancellation must not wait for environment preparation');
+  assert.equal(h.calls.queries, 0);
+});
+
+test('structured cancellation promptly closes a stalled query and rejects late successful output', async () => {
+  const controller = new AbortController(), started = deferred(), gate = deferred();
+  const h = harness({ query: (_options, calls) => ({
+    close() { calls.closed++; },
+    async *[Symbol.asyncIterator]() {
+      started.resolve(); await gate.promise;
+      yield { type: 'result', subtype: 'success', structured_output: { label: 'must not return late' } };
+    },
+  }) });
+  const running = h.sdk.runStructured({ ...inputs, signal: controller.signal });
+  await started.promise;
+  controller.abort();
+  assert.equal(h.calls.options.abortController.signal.aborted, true);
+  assert.equal(h.calls.closed, 1, 'close happens synchronously at cancellation');
+  let settled = false;
+  const rejected = assert.rejects(running, canceled).then(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  const settledBeforeRelease = settled;
+  gate.resolve();
+  await rejected;
+  assert.equal(settledBeforeRelease, true, 'a non-cooperative iterator cannot hold cancellation open');
+  assert.equal(h.calls.closed, 1, 'finally must not close the query twice');
+});
+
+test('structured timeout closes a stalled query without waiting for another SDK event', async () => {
+  const gate = deferred(), closed = deferred();
+  const h = harness({ query: (_options, calls) => ({
+    close() { calls.closed++; closed.resolve(); },
+    async *[Symbol.asyncIterator]() { await gate.promise; },
+  }) });
+  const running = h.sdk.runStructured({ ...inputs, timeoutMs: 20 });
+  let settled = false;
+  const rejected = assert.rejects(running, canceled).then(() => { settled = true; });
+  await closed.promise;
+  await new Promise(resolve => setImmediate(resolve));
+  const settledBeforeRelease = settled;
+  gate.resolve();
+  await rejected;
+  assert.equal(settledBeforeRelease, true);
+  assert.equal(h.calls.closed, 1);
+});
+
+test('structured close failures cannot replace successful output or the cancellation reason', async () => {
+  const h = harness({ query: () => ({
+    close() { throw new Error('synthetic close failure'); },
+    async *[Symbol.asyncIterator]() { yield { type: 'result', subtype: 'success', structured_output: { label: 'still valid' } }; },
+  }) });
+  assert.deepEqual(await h.sdk.runStructured(inputs), { label: 'still valid' });
+});
+
+test('structured calls pass bounded maxTurns without changing unspecified budgets', async () => {
+  for (const [requested, expected] of [[1, 1], [4, 4], [999, 16], [0, undefined], [-1, undefined], [1.5, undefined], [undefined, undefined]]) {
+    const h = harness();
+    await h.sdk.runStructured({ ...inputs, maxTurns: requested });
+    assert.equal(h.calls.options.maxTurns, expected, String(requested));
+  }
 });

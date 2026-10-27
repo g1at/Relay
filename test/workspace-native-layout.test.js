@@ -10,15 +10,16 @@ function fixture({ viewportRect = { left: 700, right: 1200, y: 100, height: 650 
   const schedule = source.slice(source.indexOf('  function scheduleNative()'), source.indexOf('  function trackGeometry('));
   const frames = [], calls = []; let measurements = 0;
   const cover = { hidden: true, childElementCount: 0, replaceChildren() {} };
-  const viewport = { getBoundingClientRect() { measurements++; return viewportRect; } };
-  const sandbox = { requestAnimationFrame(fn) { frames.push(fn); return frames.length; },
+  const viewport = { clientLeft: 0, clientTop: 0, clientWidth: viewportRect.right - viewportRect.left, clientHeight: viewportRect.height, getBoundingClientRect() { measurements++; return viewportRect; } };
+  const sandbox = { URL, requestAnimationFrame(fn) { frames.push(fn); return frames.length; },
     browserBridge: { async invoke(input) { calls.push(input); return { ok: true }; } },
     $: id => id === 'workspaceBrowserCover' ? cover : viewport,
     app: { dataset: {}, getBoundingClientRect() { measurements++; return { left: 0 }; } },
-    document: { hidden: false }, performance: { now: () => 1000 },
+    document: { hidden: false }, window: {}, performance: { now: () => 1000 },
     hasOverlay: () => false, tabInContext: item => item.browserConversationId !== 'other-task', renderBrowserSnapshot() {}, scheduleCapture() {}, browserNotice() {},
     assertResult(value) { return value; } };
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../renderer/browser-connection.js'), 'utf8'), sandbox);
   vm.runInContext(`let item = null, opened = true, tab = null, disposed = false, contextLoading = false, nativeFrame = null,
     nativeActiveId = null, nativeSignature = '', nativeEpoch = 0, nativeChain = Promise.resolve(), geometryUntil = 0;
     const obscured = new Set(); const activeTab = () => item;
