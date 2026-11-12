@@ -36,9 +36,9 @@
 
 当前提供 **Windows x64** 安装包。
 
-**下载安装：[Relay 3.1.0 正式版](https://github.com/g1at/Relay/releases/tag/v3.1.0)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
+**下载安装：[Relay 3.1.1 正式版](https://github.com/g1at/Relay/releases/tag/v3.1.1)**。安装后，在设置中配置自己的服务商和 API Key；Relay 本身不要求注册账号，模型调用由对应服务商计费。
 
-> **3.1.0：图片与视频创作升级、定时任务可靠性和长任务性能改进。** 查看[完整更新说明](distribution/release-notes/v3.1.0.md)。旧客户端若已缓存旧安装包且无法重新检查，请下载 [3.1.0 完整安装包](https://github.com/g1at/Relay/releases/download/v3.1.0/Relay-3.1.0-Setup.exe) 手动升级，无需删除会话或配置。
+> **3.1.1：修复记忆创建与更新问题，避免视频会话重启后反复跳到“今天”。** 查看[完整更新说明](distribution/release-notes/v3.1.1.md)。旧客户端若已缓存旧安装包且无法重新检查，请下载 [3.1.1 完整安装包](https://github.com/g1at/Relay/releases/download/v3.1.1/Relay-3.1.1-Setup.exe) 手动升级，无需删除会话或配置。
 
 <details>
 <summary>下载与命令行安装入口</summary>

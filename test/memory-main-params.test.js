@@ -11,20 +11,24 @@ function setup(t) {
   const dir = path.join(cwd, '.claude', 'relay-memory');
   const store = new MemoryStore({ dir });
   t.after(() => fs.rmSync(cwd, { force: true, recursive: true }));
-  let currentContext;
+  let currentContext, memoryOptions;
+  const logs = [];
+  const logger = { info: line => logs.push(line), warn: line => logs.push(line) };
   const context = vm.createContext({
-    fs, os, MEMORY_DIR: dir, relayMemoryStore: store,
+    fs, os, console: logger, MEMORY_DIR: dir, relayMemoryStore: store,
     memoryRetriever: createMemoryRetriever({ store }), isMemoryPinned: () => false,
     getSdkRuntimeStorage: () => require('../src/main/sdk/sdk-runtime-storage').createSdkRuntimeStorage({ dataDir: cwd }),
-    createMemoryRuntime: options => { currentContext = options.context; return createMemoryRuntime(options); },
+    createMemoryRuntime: options => { memoryOptions = options; currentContext = options.context; return createMemoryRuntime(options); },
     readMemoryUsage: () => ({}), flushMemoryUsage() {}, rebuildMemoryIndex() {}, notifySkillUsageUpdated() {},
+    getConversationWorkspaces: () => ({ resolveScratch: () => cwd, fileLocations: () => ({ outputDir: cwd }) }),
     activeRelayProviderRuntime: () => ({ modelId: 'test-model', env: {} }),
     resolveUnattendedPermissionMode: () => 'default', isConversationPermissionMode: () => true,
     buildRuntimePolicy: () => ({}), readAppSettings: () => ({}), toWslPath: value => value,
     readClaudeMcpRegistry: () => ({ enabled: {} }), cronMcpFactory: () => () => ({}),
   });
   vm.runInContext(source.slice(start, end), context);
-  return { cwd, dir, build: context.buildSdkParams, currentContext: () => currentContext() };
+  return { cwd, dir, build: context.buildSdkParams, currentContext: () => currentContext(),
+    memoryOptions: () => memoryOptions, logger, logs };
 }
 test('background task without an authorized extra directory still guards relative paths in the actual cwd', async t => {
   const { build, currentContext, cwd } = setup(t);
@@ -47,4 +51,18 @@ test('live memory context re-evaluates host project/plan flags and disabled task
   const sdk = { tool: (...args) => args, createSdkMcpServer: value => value };
   assert.equal(Object.hasOwn(disabled.mcpServersFactory(sdk), 'relay-memory'), false);
   assert.equal((await disabled.onMemoryTool({ tool_name: 'mcp__relay-memory__read' })).hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('production memory setup wires diagnostics to the main logger with current conversation identity', t => {
+  const harness = setup(t);
+  harness.build({ cwd: harness.cwd, conversationId: 'conversation-a',
+    memoryContext: { sourceRef: 'conversation:conversation-a/run:run-b' } });
+  assert.equal(harness.memoryOptions().logger, harness.logger);
+  assert.equal(harness.currentContext().conversationId, 'conversation-a');
+  assert.equal(harness.currentContext().sourceRef, 'conversation:conversation-a/run:run-b');
+  const runtime = createMemoryRuntime(harness.memoryOptions());
+  runtime.propose({ file: 'diagnostic.md', content: 'Private memory body.',
+    type: 'reference', expectedRevision: null });
+  assert.ok(harness.logs.some(line => line.includes('[memory:tool]') && line.includes('conversation-a')));
+  assert.ok(harness.logs.every(line => !line.includes('Private memory body.')));
 });

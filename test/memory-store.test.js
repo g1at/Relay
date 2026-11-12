@@ -180,6 +180,161 @@ test('confirmed model updates become proposals and approval retires the exact or
   assert.equal(store.setStatus(proposal.file, 'active').revision, approved.revision);
 });
 
+test('repeated approved candidates retain a readable stem and one generated suffix', (t) => {
+  const store = fixture(t);
+  let current = store.write('feedback-draft-policy.md', 'Initial preference.');
+  for (let update = 0; update < 5; update++) {
+    const proposal = store.write(current.file, `Preference update ${update}.`, {
+      actor: 'model', memoryType: 'feedback', expectedRevision: current.revision,
+    });
+    assert.match(proposal.file, /^feedback-draft-policy-draft-[0-9a-f-]{36}\.md$/);
+    assert.equal(proposal.meta.supersedes, current.file);
+    assert.equal(proposal.meta.supersedesRevision, current.revision);
+    assert.equal(store.read(current.file).revision, current.revision);
+    current = store.setStatus(proposal.file, 'active');
+  }
+  assert.equal(store.read('feedback-draft-policy.md').meta.status, 'superseded');
+});
+
+test('candidate stems recover legacy names truncated inside UUIDs or draft markers', (t) => {
+  const store = fixture(t);
+  for (const length of [50, 83]) {
+    const stem = 'x'.repeat(length);
+    let current = store.write(`${stem}.md`, 'Original fact.');
+    for (let generation = 0; generation < 4; generation++) {
+      const file = `${current.file.slice(0, -3).slice(0, 130)}-draft-${crypto.randomUUID()}.md`;
+      current = store.write(file, document({ type: 'reference',
+        supersedes: current.file, supersedesRevision: current.revision }, 'Legacy approved fact.'));
+    }
+    assert.equal(current.file.length, 176);
+    const proposal = store.write(current.file, 'Updated fact.', { actor: 'model', memoryType: 'reference' });
+    assert.equal(proposal.file.slice(0, -46), stem);
+    assert.equal(proposal.meta.supersedes, current.file);
+    assert.equal(store.read(current.file).revision, current.revision);
+  }
+});
+
+test('orphan legacy suffixes flatten and Unicode candidate filenames stay byte bounded', (t) => {
+  const store = fixture(t);
+  const orphan = store.write(`reference-draft-${crypto.randomUUID()}-draft-${crypto.randomUUID()}.md`,
+    document({ supersedes: 'missing.md', supersedesRevision: 'a'.repeat(64) }, 'Orphan fact.'));
+  const flattened = store.write(orphan.file, 'Updated orphan.', { actor: 'model', memoryType: 'reference' });
+  assert.match(flattened.file, /^reference-draft-[0-9a-f-]{36}\.md$/);
+  const original = store.write(`${'使用偏好'.repeat(18)}.md`, 'Long Unicode filename.');
+  const proposal = store.write(original.file, 'Updated Unicode fact.', { actor: 'model', memoryType: 'feedback' });
+  assert.ok(Buffer.byteLength(proposal.file, 'utf8') <= 142);
+  assert.doesNotMatch(proposal.file, /\uFFFD/);
+  assert.equal(proposal.meta.supersedes, original.file);
+  assert.equal(store.read(proposal.file).revision, proposal.revision);
+});
+
+test('literal UUID draft names retain their stem and short atomic files remain recoverable', (t) => {
+  const store = fixture(t);
+  const stem = `literal-draft-${crypto.randomUUID()}`;
+  let current = store.write(`${stem}.md`, 'A literal root filename.');
+  for (let update = 0; update < 2; update++) {
+    const proposal = store.write(current.file, `Update ${update}.`, { actor: 'model', memoryType: 'reference' });
+    assert.equal(proposal.file.slice(0, -46), stem);
+    current = store.setStatus(proposal.file, 'active');
+  }
+  const temporary = path.join(store.dir, `.relay-memory-write.md.12345.${crypto.randomUUID()}.tmp`);
+  fs.writeFileSync(temporary, 'Interrupted write.');
+  const restarted = new MemoryStore({ dir: store.dir });
+  assert.equal(restarted.read(current.file).revision, current.revision);
+  assert.equal(fs.existsSync(temporary), false);
+});
+
+test('superseded model reads identify the current approved successor without redirecting access', (t) => {
+  const store = fixture(t);
+  const original = store.write('old.md', 'Old fact.');
+  const first = store.write(original.file, 'First replacement.', { actor: 'model', memoryType: 'reference' });
+  const approved = store.setStatus(first.file, 'active');
+  const second = store.write(first.file, 'Latest replacement.', {
+    actor: 'model', memoryType: 'reference', expectedRevision: approved.revision,
+  });
+  const latest = store.setStatus(second.file, 'active');
+  store.write(latest.file, 'Unconfirmed next replacement.', { actor: 'model', memoryType: 'reference' });
+  fs.writeFileSync(path.join(store.dir, '.unrelated.md'), 'Invalid unrelated filename.');
+  for (const file of [original.file, first.file]) {
+    assert.throws(() => store.read(file, { actor: 'model' }), error => {
+      assert.equal(error.code, 'MEMORY_SUPERSEDED');
+      assert.equal(error.file, file);
+      assert.deepEqual(error.replacementFiles, [latest.file]);
+      assert.ok(error.message.includes(latest.file));
+      assert.equal(error.content, undefined);
+      return true;
+    });
+  }
+  assert.match(store.read(original.file).content, /Old fact\.$/);
+  assert.equal(store.read(latest.file, { actor: 'model' }).revision, latest.revision);
+  const retired = store.read(original.file);
+  assert.throws(() => store.write(original.file, 'Stale edit.', {
+    actor: 'model', memoryType: 'reference', expectedRevision: original.revision,
+  }), error => {
+    assert.equal(error.code, 'MEMORY_CONFLICT');
+    assert.equal(error.targetExists, true);
+    assert.equal(error.targetStatus, 'superseded');
+    assert.equal(error.actualRevision, retired.revision);
+    return true;
+  });
+});
+
+test('superseded hints exclude inaccessible, pending, expired and evidence-only memories', (t) => {
+  const store = fixture(t);
+  const original = store.write('old.md', document({ scope: 'project', projectId: 'a' }));
+  store.setStatus(original.file, 'superseded');
+  for (const [file, meta] of [
+    ['other-project.md', { scope: 'project', projectId: 'b' }],
+    ['global.md', { scope: 'global' }],
+    ['pending.md', { status: 'draft', confidence: 'inferred' }],
+    ['expired.md', { expiresAt: '2000-01-01T00:00:00Z' }],
+    ['invalid.md', { schemaErrors: ['invalid_status'] }],
+  ]) {
+    const content = document({ scope: 'project', projectId: 'a', supersedes: original.file,
+      supersedesRevision: original.revision, ...meta });
+    fs.writeFileSync(path.join(store.dir, file), file === 'invalid.md' ? content.replace('status: active', 'status: invalid') : content);
+  }
+  fs.writeFileSync(path.join(store.dir, 'evidence-only.md'), document({ scope: 'project', projectId: 'a',
+    sources: [{ kind: 'memory', file: original.file, revision: original.revision }] }));
+  assert.throws(() => store.read(original.file, { actor: 'model', context: { projectId: 'a' } }), error => {
+    assert.equal(error.code, 'MEMORY_SUPERSEDED');
+    assert.deepEqual(error.replacementFiles, []);
+    assert.doesNotMatch(error.message, /other-project|pending\.md|expired\.md|global\.md|evidence-only/);
+    return true;
+  });
+  assert.throws(() => store.read(original.file, { actor: 'model', context: { projectId: 'b' } }), error => {
+    assert.equal(error.code, 'MEMORY_SCOPE');
+    assert.equal(error.replacementFiles, undefined);
+    assert.equal(error.file, undefined);
+    return true;
+  });
+});
+
+test('superseded discovery terminates cycles and reports multiple approved successors', (t) => {
+  const store = fixture(t);
+  const revision = 'a'.repeat(64);
+  for (const [file, status, parent] of [
+    ['old.md', 'superseded', 'middle.md'], ['middle.md', 'superseded', 'old.md'],
+    ['first.md', 'active', 'middle.md'], ['second.md', 'active', 'old.md'],
+  ]) store.write(file, document({ status, supersedes: parent, supersedesRevision: revision }));
+  assert.throws(() => store.read('old.md', { actor: 'model' }), error => {
+    assert.equal(error.code, 'MEMORY_SUPERSEDED');
+    assert.deepEqual(error.replacementFiles, ['first.md', 'second.md']);
+    return true;
+  });
+});
+
+test('stale revision diagnostics distinguish a missing target', (t) => {
+  const store = fixture(t);
+  assert.throws(() => store.write('missing.md', 'Stale edit.', { expectedRevision: 'a'.repeat(64) }), error => {
+    assert.equal(error.code, 'MEMORY_CONFLICT');
+    assert.equal(error.targetExists, false);
+    assert.equal(error.targetStatus, null);
+    assert.equal(error.actualRevision, null);
+    return true;
+  });
+});
+
 test('stale writes and approval after an intervening edit cannot silently overwrite newer facts', (t) => {
   const store = fixture(t);
   const initial = store.write('item.md', 'v1');

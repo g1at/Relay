@@ -783,7 +783,7 @@ try {
           materializeCreationTaskResult(run, {
             ok: false,
             error: 'Relay 在生成完成前退出，未找到可恢复的远端任务记录',
-          });
+          }, run.endedAt || run.updatedAt || null);
         } catch (historyError) {
           console.warn('[image] 恢复创作占位失败 runId=%s: %s', run.runId, historyError.message);
         }
@@ -1870,8 +1870,9 @@ function buildSdkParams({
     ? resolveUnattendedPermissionMode(permissionMode)
     : (isConversationPermissionMode(permissionMode) || permissionMode === 'plan' ? permissionMode : 'default');
   const memory = createMemoryRuntime({ store: relayMemoryStore, retriever: memoryRetriever,
-    isCore: isMemoryPinned,
-    context: () => ({ cwd: cwd || validWorkingDir || os.homedir(), projectId: runtimeContract?.projectId || null,
+    isCore: isMemoryPinned, logger: console,
+    context: () => ({ cwd: cwd || validWorkingDir || os.homedir(), conversationId: conversationId || null,
+      projectId: runtimeContract?.projectId || null,
       mode: includeMemoryDirectory ? (background ? 'read' : 'full') : 'off',
       ...(typeof memoryContext === 'function' ? memoryContext() : memoryContext || {}) }),
     onChanged: () => { rebuildMemoryIndex(); notifySkillUsageUpdated({ reason: 'memory-updated' }); },
@@ -4964,21 +4965,20 @@ async function generateImageCore(opts = {}) {
 
 // renderer 可能在付费图片请求完成前刷新或崩溃。主进程持有权威的 conversationId + turnIndex，
 // 因而在返回 IPC 前先幂等回填历史；renderer 正常在线时随后写入相同结果，不会产生重复轮次。
-function materializeCreationTaskResult(source, result = {}) {
+function materializeCreationTaskResult(source, result = {}, activityAt = new Date().toISOString()) {
   const mapping = source && source.source && typeof source.source === 'object' ? source.source : source || {};
   const conversationId = typeof mapping.conversationId === 'string' ? mapping.conversationId : null;
   const turnIndex = Number.isSafeInteger(mapping.turnIndex) ? mapping.turnIndex : null;
   if (!conversationId || turnIndex == null || turnIndex < 0) return false;
   const conv = loadConversation(conversationId);
   if (!conv || conv.kind !== 'create' || !Array.isArray(conv.turns) || !conv.turns[turnIndex]) return false;
-  const turn = conv.turns[turnIndex];
+  const previous = conv.turns[turnIndex];
+  const turn = { ...previous };
   if (result.mediaKind) turn.mediaKind = result.mediaKind;
   if (result.taskId) turn.mediaTaskId = result.taskId;
   const paths = Array.isArray(result.paths) ? [...new Set(result.paths.filter((item) => typeof item === 'string' && item))] : [];
   if (result.ok || paths.length) {
     turn.resultPaths = paths;
-    if (result.mediaKind) turn.mediaKind = result.mediaKind;
-    if (result.taskId) turn.mediaTaskId = result.taskId;
     if (result.ok) delete turn.error; else turn.error = result.error;
   } else if (!Array.isArray(turn.resultPaths) || !turn.resultPaths.length) {
     turn.resultPaths = [];
@@ -4987,7 +4987,14 @@ function materializeCreationTaskResult(source, result = {}) {
   }
   const runId = source && source.runId || mapping.runId;
   if (runId && !turn.runId) turn.runId = String(runId);
-  conv.updatedAt = new Date().toISOString();
+  // Startup replays durable tasks even when their results are already in history.
+  if (JSON.stringify(turn) === JSON.stringify(previous)) return true;
+  conv.turns[turnIndex] = turn;
+  const previousActivity = Date.parse(conv.updatedAt || conv.createdAt);
+  const taskActivity = Date.parse(activityAt);
+  if (Number.isFinite(taskActivity) && (!Number.isFinite(previousActivity) || taskActivity > previousActivity)) {
+    conv.updatedAt = new Date(taskActivity).toISOString();
+  }
   saveConversation(conv);
   return true;
 }

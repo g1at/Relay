@@ -9,7 +9,10 @@ function reconcileMediaTask(task, { ledger, materialize, finish, publish, reconc
   const scheduled = task.source?.type === 'schedule' || (task.runId && ledger?.get(task.runId)?.source?.type === 'schedule');
   const scheduleResult = scheduled ? reconcileSchedule?.(task) : null;
   if (!scheduled && (completed || failed || attentionStates.has(task.state) || paths.length)) {
-    materialize?.(task, { ok: completed, paths, error: task.error?.message || task.error || (task.state === 'stopped' ? '已停止本地等待' : undefined), mediaKind: task.mediaKind, taskId: task.id });
+    materialize?.(task, {
+      ok: completed, paths, mediaKind: task.mediaKind, taskId: task.id,
+      error: task.error?.message || task.error || (task.state === 'stopped' ? '已停止本地等待' : undefined),
+    }, task.updatedAt || task.createdAt || null);
   }
   let run = task.runId && ledger?.get(task.runId);
   if (run && !isTerminalState(run.state)) {

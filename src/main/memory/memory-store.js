@@ -34,6 +34,8 @@ function legacyFields(parsed) {
   return ['scope', 'status', 'confidence'].filter((key) => String(parsed.frontmatter[key] ?? '').trim() === '');
 }
 
+const DRAFT_SUFFIX = /-draft-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 class MemoryStore {
   constructor({ dir, isCore, now = () => Date.now() } = {}) {
     if (!dir) throw new TypeError('MemoryStore requires dir');
@@ -68,7 +70,9 @@ class MemoryStore {
 
   _atomic(abs, content) {
     this._checkNode(abs);
-    const tmp = `${abs}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    // Keep temporary paths short even when updating a long legacy filename.
+    // The .md.PID.UUID.tmp suffix is recognized by recovery's cleanup.
+    const tmp = path.join(path.dirname(abs), `.relay-memory-write.md.${process.pid}.${crypto.randomUUID()}.tmp`);
     let fd;
     try {
       fd = fs.openSync(tmp, 'wx', 0o600);
@@ -132,13 +136,55 @@ class MemoryStore {
 
   _access(entry, options, activeOnly = false) {
     if (isUser(options)) return;
-    const check = (activeOnly ? memoryEligibility : memoryScopeEligibility)(entry.meta, options.context || {});
+    const context = options.context || {};
+    if (!memoryScopeEligibility(entry.meta, context).eligible) fail('MEMORY_SCOPE', '当前任务不可访问这条记忆。');
+    if (activeOnly && entry.meta.status === 'superseded' && !entry.meta.schemaErrors.length) {
+      const replacementFiles = this._replacementFiles(entry, context);
+      const message = replacementFiles.length
+        ? `这条记忆已被替代。请读取当前已生效的替代记忆 ${replacementFiles.map(file => JSON.stringify(file)).join('、')}。修改时请使用新文件返回的 file 和 revision。`
+        : '这条记忆已被替代，当前没有可读取的已生效替代记忆。请重新检索当前可用记忆。';
+      throw Object.assign(new Error(message), { code: 'MEMORY_SUPERSEDED', file: entry.file, replacementFiles });
+    }
+    const check = activeOnly ? memoryEligibility(entry.meta, context) : { eligible: true };
     if (!check.eligible) fail('MEMORY_SCOPE', '当前任务不可访问这条记忆。');
+  }
+
+  _replacementFiles(entry, context) {
+    const successors = new Map();
+    for (const item of fs.readdirSync(this.dir, { withFileTypes: true })) {
+      if (!item.isFile() || !/\.md$/i.test(item.name) || item.name.toLowerCase() === 'memory.md') continue;
+      let candidate;
+      try { candidate = this._read(item.name); }
+      catch (_) { continue; } // An unrelated unreadable file must not hide a valid successor.
+      const meta = candidate?.meta;
+      if (!meta || meta.schemaErrors.length || meta.confidence !== 'user_confirmed'
+        || meta.scope !== entry.meta.scope || meta.projectId !== entry.meta.projectId
+        || !['active', 'superseded'].includes(meta.status)) continue;
+      for (const target of replacements(meta)) {
+        const key = fileKey(target.file);
+        if (!successors.has(key)) successors.set(key, []);
+        successors.get(key).push(candidate);
+      }
+    }
+    const pending = [entry.file], seen = new Set(), files = new Set();
+    for (let index = 0; index < pending.length; index++) {
+      const key = fileKey(pending[index]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      for (const candidate of successors.get(key) || []) {
+        if (candidate.meta.status === 'superseded') pending.push(candidate.file);
+        else if (memoryEligibility(candidate.meta, context).eligible) files.add(candidate.file);
+      }
+    }
+    return [...files].sort();
   }
 
   _expected(entry, options) {
     if (options.expectedRevision !== undefined && options.expectedRevision !== (entry ? entry.revision : null)) {
-      fail('MEMORY_CONFLICT', '记忆已发生变化，请重新读取后再保存。');
+      throw Object.assign(new Error('记忆已发生变化，请重新读取后再保存。'), {
+        code: 'MEMORY_CONFLICT', targetExists: !!entry, targetStatus: entry?.meta?.status || null,
+        actualRevision: entry?.revision || null,
+      });
     }
   }
 
@@ -271,11 +317,41 @@ class MemoryStore {
         return { ...candidate, proposalFor: file, deduplicated: true };
       }
     }
+    const stem = this._proposalStem(previous);
     let proposal;
-    do { proposal = `${file.slice(0, -3).slice(0, 130)}-draft-${crypto.randomUUID()}.md`; }
+    do { proposal = `${stem}-draft-${crypto.randomUUID()}.md`; }
     while (fs.existsSync(this._file(proposal)));
     this._commit([{ file: proposal, before: null, after: next }], 'propose', options);
     return { ...this._read(proposal), proposalFor: file };
+  }
+
+  _proposalStem(previous) {
+    let original = previous;
+    const seen = new Set([fileKey(previous.file)]);
+    // Old candidates inherited a truncated predecessor filename. Follow only
+    // that exact generated naming relation, preserving literal draft names.
+    for (let depth = 0; depth < MAX_MEMORY_SOURCES; depth++) {
+      const parentFile = original.meta.supersedes;
+      const stem = original.file.slice(0, -3), suffix = stem.match(DRAFT_SUFFIX)?.[0];
+      if (!parentFile || !suffix || seen.has(fileKey(parentFile))
+        || stem !== parentFile.slice(0, -3).slice(0, 130) + suffix) break;
+      seen.add(fileKey(parentFile));
+      const parent = this._read(parentFile);
+      if (!parent || parent.meta.scope !== previous.meta.scope || parent.meta.projectId !== previous.meta.projectId) break;
+      original = parent;
+    }
+    let stem = original.file.slice(0, -3);
+    // A linked orphan can still have complete generated suffix chains. Literal
+    // filenames without replacement metadata retain their original stem.
+    if (original.meta.supersedes && original.meta.supersedesRevision) {
+      while (DRAFT_SUFFIX.test(stem)) stem = stem.replace(DRAFT_SUFFIX, '');
+    }
+    let prefix = '';
+    for (const character of stem) {
+      if (Buffer.byteLength(prefix + character, 'utf8') > 96) break;
+      prefix += character;
+    }
+    return prefix || 'memory';
   }
 
   propose(file, content, options = {}) {

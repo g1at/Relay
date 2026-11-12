@@ -5,12 +5,12 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { MemoryStore } = require('../src/main/memory/memory-store');
 const { createMemoryRuntime, MEMORY_CONSOLIDATION_PROMPT } = require('../src/main/memory/memory-runtime');
 const { serializeMemoryFrontmatter } = require('../src/main/memory/memory-schema');
-function setup(t, initial = {}) {
+function setup(t, initial = {}, runtimeOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-memory-runtime-'));
   t.after(() => fs.rmSync(dir, { force: true, recursive: true }));
   const store = new MemoryStore({ dir }); let context = { mode: 'full', projectId: 'a', sourceRef: 'conversation:a/run:1', cwd: dir, ...initial };
   const reads = [], changes = [], core = new Set();
-  const runtime = createMemoryRuntime({ store, context: () => context, onRead: file => reads.push(file), onChanged: item => changes.push(item), isCore: file => core.has(file) });
+  const runtime = createMemoryRuntime({ store, context: () => context, onRead: file => reads.push(file), onChanged: item => changes.push(item), isCore: file => core.has(file), ...runtimeOptions });
   return { store, runtime, reads, changes, core, setContext: next => { context = { ...context, ...next }; } };
 }
 const doc = (meta, body = 'known fact') => serializeMemoryFrontmatter(meta) + '\n' + body;
@@ -26,6 +26,8 @@ test('model tool schema requires an explicit supported type and revision and ret
   assert.equal(list.schema.offset.safeParse(1.5).success, false);
   assert.equal(propose.schema.expectedRevision.safeParse(undefined).success, false);
   assert.equal(propose.schema.expectedRevision.safeParse(null).success, true);
+  assert.equal(propose.schema.expectedRevision.safeParse('null').success, true);
+  assert.equal(propose.schema.expectedRevision.safeParse(42).success, false);
   assert.equal(propose.schema.type.safeParse(undefined).success, false);
   assert.equal(propose.schema.type.safeParse('unsupported').success, false);
   for (const type of ['user', 'feedback', 'project', 'reference']) assert.equal(propose.schema.type.safeParse(type).success, true);
@@ -47,6 +49,113 @@ test('direct runtime calls enforce type before writing and persist the selected 
   assert.equal(changes.length, 1);
   assert.throws(() => runtime.propose({ file: 'conflict.md', content: doc({ type: 'project' }), expectedRevision: null, type: 'user' }), /不一致/);
   assert.equal(changes.length, 1);
+});
+
+test('exact string-null creates a candidate without changing caller input and cannot overwrite existing memory', t => {
+  const { store, runtime, changes } = setup(t);
+  const input = Object.freeze({ file: 'string-null.md', content: 'A new fact.', type: 'feedback', expectedRevision: 'null' });
+  const created = runtime.propose(input);
+  assert.equal(created.file, input.file);
+  assert.equal(created.meta.status, 'draft');
+  assert.equal(created.meta.type, 'feedback');
+  assert.equal(input.expectedRevision, 'null');
+  assert.equal(changes.length, 1);
+  const active = store.write('active.md', 'A confirmed fact.');
+  for (const previous of [created, active]) {
+    for (const expectedRevision of [null, 'null']) {
+      assert.throws(() => runtime.propose({ ...input, file: previous.file, content: 'A colliding fact.', expectedRevision }),
+        error => error.code === 'MEMORY_CONFLICT' && error.actualRevision === previous.revision);
+      assert.equal(store.read(previous.file).revision, previous.revision);
+      assert.equal(store.read(previous.file).content, previous.content);
+    }
+  }
+  assert.equal(changes.length, 1);
+  assert.deepEqual(store.list().map(entry => entry.file).sort(), ['active.md', 'string-null.md']);
+});
+
+test('missing and malformed revisions are rejected before persistence without broad sentinel coercion', t => {
+  const { store, runtime, changes } = setup(t);
+  const originalWrite = store.write.bind(store);
+  let writes = 0;
+  store.write = (...args) => { writes++; return originalWrite(...args); };
+  const input = { file: 'new.md', content: 'A new fact.', type: 'feedback' };
+  assert.throws(() => runtime.propose(input), error => error.code === 'MEMORY_REVISION_REQUIRED');
+  for (const expectedRevision of ['', ' null', 'null ', 'null\n', 'Null', 'NULL', '"null"', 'undefined',
+    'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64), 0, false, {}, []]) {
+    assert.throws(() => runtime.propose({ ...input, expectedRevision }),
+      error => error.code === 'MEMORY_INVALID_REVISION', JSON.stringify(expectedRevision));
+  }
+  assert.equal(writes, 0);
+  assert.deepEqual(store.list(), []);
+  assert.deepEqual(changes, []);
+});
+
+test('memory diagnostics distinguish revision inputs and redact memory text and arbitrary revision strings', t => {
+  const records = [];
+  const capture = text => records.push(JSON.parse(text.slice('[memory:tool] '.length)));
+  const { runtime } = setup(t, { conversationId: 'conversation-a', runId: 'run-a',
+    sources: [{ kind: 'conversation', conversationId: 'conversation-a', turnIndex: 0, role: 'user',
+      quote: 'private source quote', at: '2026-11-11T00:00:00.000Z', revision: 'a'.repeat(64) }] },
+  { logger: { info: capture, warn: capture } });
+  const content = 'Private memory text that must stay out of diagnostics.';
+  const created = runtime.propose({ file: 'new.md', content, type: 'feedback', expectedRevision: null });
+  assert.equal(created.meta.status, 'draft');
+  assert.equal(records.at(-1).expectedRevisionKind, 'null');
+  assert.equal(records.at(-1).status, 'draft');
+  assert.equal(records.at(-1).file, 'new.md');
+  assert.equal(records.at(-1).conversationId, 'conversation-a');
+  assert.equal(records.at(-1).runId, 'run-a');
+  assert.equal(records.at(-1).sourceRef, 'conversation:a/run:1');
+  assert.equal(records.at(-1).phase, 'result');
+  assert.ok(records.at(-1).elapsedMs >= 0);
+  assert.equal(records.at(-1).revisionCompatibility, undefined);
+  runtime.propose({ file: 'compatible.md', content, type: 'feedback', expectedRevision: 'null' });
+  assert.equal(records.at(-1).expectedRevisionKind, 'string-null');
+  assert.equal(records.at(-1).normalizedExpectedRevisionKind, 'null');
+  assert.equal(records.at(-1).revisionCompatibility, 'string-null');
+  assert.equal(records.at(-1).status, 'draft');
+  for (const [revision, kind, code] of [[null, 'null', 'MEMORY_CONFLICT'], ['null', 'string-null', 'MEMORY_CONFLICT'],
+    ['', 'empty-string', 'MEMORY_INVALID_REVISION'], [undefined, 'missing', 'MEMORY_REVISION_REQUIRED'],
+    ['private-token-value', 'string', 'MEMORY_INVALID_REVISION']]) {
+    assert.throws(() => runtime.propose({ file: 'new.md', content, type: 'feedback', expectedRevision: revision }));
+    assert.equal(records.at(-1).expectedRevisionKind, kind);
+    assert.equal(records.at(-1).expectedRevision, null);
+    assert.equal(records.at(-1).code, code);
+    assert.equal(records.at(-1).normalizedExpectedRevisionKind, revision === 'null' ? 'null' : undefined);
+    assert.equal(records.at(-1).revisionCompatibility, revision === 'null' ? 'string-null' : undefined);
+  }
+  assert.throws(() => runtime.read({ file: 'missing.md' }));
+  assert.equal(records.at(-1).operation, 'read');
+  assert.equal(records.at(-1).code, 'MEMORY_NOT_FOUND');
+  const serialized = JSON.stringify(records);
+  for (const secret of [content, 'private source quote', 'private-token-value']) assert.equal(serialized.includes(secret), false);
+  assert.ok(records.every(record => !Object.hasOwn(record, 'content') && !Object.hasOwn(record, 'sources')));
+});
+
+test('memory diagnostics cannot fail successful operations or replace their original errors', t => {
+  const logger = { info() { throw new Error('logger unavailable'); }, warn() { throw new Error('logger unavailable'); } };
+  const { runtime } = setup(t, { userConfirmed: true }, { logger });
+  const saved = runtime.propose({ file: 'logged.md', content: 'A confirmed fact.', type: 'reference', expectedRevision: 'null' });
+  assert.equal(runtime.read({ file: saved.file }).revision, saved.revision);
+  assert.throws(() => runtime.propose({ file: saved.file, content: 'Stale write.', type: 'reference', expectedRevision: null }),
+    error => error.code === 'MEMORY_CONFLICT');
+});
+
+test('tool errors expose supported recovery hints without exposing diagnostic-only fields', async t => {
+  const { runtime, store } = setup(t);
+  const tools = [];
+  runtime.factory({ tool: (name, description, schema, handler) => { const tool = { name, handler }; tools.push(tool); return tool; },
+    createSdkMcpServer: value => value });
+  const error = Object.assign(new Error('Use the active replacement.'), { code: 'MEMORY_SUPERSEDED',
+    file: 'old.md', replacementFiles: ['current.md'], targetExists: true, actualRevision: 'hidden-revision', content: 'private memory' });
+  store.read = () => { throw error; };
+  const result = await tools.find(tool => tool.name === 'read').handler({ file: 'old.md' });
+  assert.equal(result.isError, true);
+  assert.deepEqual(JSON.parse(result.content[0].text), { code: 'MEMORY_SUPERSEDED', message: error.message,
+    file: 'old.md', replacementFiles: ['current.md'] });
+  error.code = 'MEMORY_CONFLICT';
+  const conflict = await tools.find(tool => tool.name === 'read').handler({ file: 'old.md' });
+  assert.deepEqual(JSON.parse(conflict.content[0].text), { code: 'MEMORY_CONFLICT', message: error.message });
 });
 test('runtime reads and queries filter other projects and unconfirmed candidates, and record actual reads', t => {
   const { store, runtime, reads, setContext } = setup(t);
@@ -88,7 +197,10 @@ test('read mode, plan, disabled memory and changed live context enforce the same
   const { runtime, setContext } = setup(t);
   for (const context of [{ mode: 'read' }, { mode: 'full', plan: true }, { mode: 'off', plan: false }]) {
     setContext(context);
-    assert.throws(() => runtime.propose({ type: 'reference', file: 'new.md', content: 'fact', expectedRevision: null }));
+    for (const expectedRevision of [null, 'null']) {
+      assert.throws(() => runtime.propose({ type: 'reference', file: 'new.md', content: 'fact', expectedRevision }),
+        error => error.code === 'MEMORY_PERMISSION');
+    }
     const result = await runtime.hook({ tool_name: 'mcp__relay-memory__propose', tool_input: {} });
     assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
   }
@@ -112,10 +224,16 @@ test('confirmed corrections are deduplicated candidates and conflicts never clob
 test('maintenance cannot promote new facts or propose edits to core entries', t => {
   const { store, runtime, core } = setup(t, { mode: 'maintenance', userConfirmed: true });
   assert.equal(runtime.propose({ type: 'reference', file: 'candidate.md', content: 'inference', expectedRevision: null }).meta.status, 'draft');
+  assert.equal(runtime.propose({ type: 'reference', file: 'compatible.md', content: 'inference', expectedRevision: 'null' }).meta.status, 'draft');
   const original = store.write('core.md', doc({ core: true }, 'core fact'));
   assert.throws(() => runtime.propose({ type: 'reference', file: original.file, content: 'changed', expectedRevision: original.revision }), /核心/);
   const pinned = store.write('pinned.md', 'pinned by UI'); core.add(pinned.file);
   assert.throws(() => runtime.propose({ type: 'reference', file: pinned.file, content: 'changed', expectedRevision: pinned.revision }), /核心/);
+  for (const previous of [original, pinned]) {
+    assert.throws(() => runtime.propose({ type: 'reference', file: previous.file, content: 'changed', expectedRevision: 'null' }),
+      error => error.code === 'MEMORY_CONFLICT');
+    assert.equal(store.read(previous.file).revision, previous.revision);
+  }
   assert.equal(store.read(original.file).revision, original.revision);
   assert.match(MEMORY_CONSOLIDATION_PROMPT, /只.*报告问题/);
 });

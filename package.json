@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Relay - 个人 AI 助手",
   "main": "main.js",
   "author": "g0at",
